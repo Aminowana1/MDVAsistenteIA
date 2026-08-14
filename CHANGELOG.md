@@ -1,14 +1,21 @@
 # Changelog
 
+## 1.3.2
+
+- Fixed Gemini responses being silently discarded when the model returns plain text instead of the requested YAML map.
+- Added tolerant parsing for YAML/JSON maps, scalar text, string lists, fenced payloads, and common field-name variants.
+- Plain-text fallback is deliberately read-only: it can create chat messages but never tool calls or server actions.
+- Added optional provider-response diagnostics without logging malformed model output by default.
+
 ## 1.3.1
 
 - Fixed Gemini 400 `Requests ending with a model turn are not supported` for ambient events and wiki follow-ups.
-- Removed the hidden `hello world!` assistant seed from new conversations.
+- Removed the hidden `hello world!` assistant seed from active conversation initialization.
 - Added provider cooldown handling for Gemini 429 responses.
 - Added bounded retry/backoff for temporary Gemini 503/high-demand responses.
 - Lowered the default local AI request limit to 4/min for safer Free Tier testing.
-- Fresh player turns are rejected with a private in-character notice instead of silently waiting through long quota delays.
-- Plain Minecraft chat output: strips common Markdown/newlines and truncates at natural boundaries.
+- Fresh player turns can be rejected with a private in-character notice instead of silently waiting through long quota delays.
+- Plain Minecraft chat output strips common Markdown/newlines and truncates at natural boundaries.
 - Fixed Adventure/legacy color parsing for assistant and private notice messages.
 - Strengthened core instructions against generic/hallucinated custom-server advice.
 

@@ -1,5 +1,5 @@
 # ============================================================
-# SERVER ASSISTANT 1.3.1
+# SERVER ASSISTANT 1.3.2
 # ============================================================
 
 # Name shown in chat and automatically accepted as a mention.
@@ -212,6 +212,19 @@ rate-limits:
   provider-limit-message: "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... inténtalo nuevamente en un momento."
 
   player-limit-message: "&bSVA &7necesita un momento antes de procesar más mensajes tuyos."
+
+# ============================================================
+# PROVIDER RESPONSE COMPATIBILITY
+# ============================================================
+provider-response:
+  # Gemini can occasionally return the natural-language answer without the
+  # requested YAML envelope. Keep chat usable instead of silently discarding it.
+  # Plain-text fallback can NEVER create tool calls or execute actions.
+  accept-plain-text-fallback: true
+
+  # Useful while developing providers; normally keep both false to avoid log spam.
+  log-fallbacks: false
+  debug-malformed-responses: false
 
 # ============================================================
 # PROVIDER RETRY / BACKOFF

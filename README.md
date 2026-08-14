@@ -2,9 +2,9 @@
 
 Open-source Paper plugin that adds a context-aware AI assistant to a Minecraft server.
 
-## 1.3.1 highlights
+## 1.3.0 highlights
 
-Version 1.3.1 keeps the 1.2 group router and switches the AI backend to Gemini 3.7 Flash. Version 1.2 changed the chat router from **one conversation slot per player** to **one slot per logical conversation**. A conversation can contain several players while unrelated public chat remains excluded.
+Version 1.3.0 keeps the 1.2 group router and switches the AI backend to Gemini 3.7 Flash. Version 1.2 changed the chat router from **one conversation slot per player** to **one slot per logical conversation**. A conversation can contain several players while unrelated public chat remains excluded.
 
 - `smart` conversations may be individual or group conversations.
 - Default maximum: **2 simultaneous logical conversations**, not 2 players.
@@ -37,7 +37,7 @@ mvn clean package
 The shaded plugin jar is produced at:
 
 ```text
-target/ServerAssistant-1.3.1.jar
+target/ServerAssistant-1.3.0.jar
 ```
 
 ## Build on GitHub
@@ -48,7 +48,7 @@ The repository includes `.github/workflows/build.yml`.
 2. Open the **Actions** tab.
 3. Run **Build ServerAssistant** (or push to `main`/`master`).
 4. Open the finished workflow run.
-5. Download the `ServerAssistant-1.3.1` artifact.
+5. Download the `ServerAssistant-1.3.0` artifact.
 
 Do **not** commit a real API key. On the Minecraft host, either set the `GEMINI_API_KEY` environment variable or configure `api-key` locally in `plugins/ServerAssistant/config.yml`.
 
@@ -56,7 +56,7 @@ When upgrading from 1.2.0, known default OpenAI placeholders/model values are mi
 
 ### Updating from 1.1.0
 
-You do not have to delete an existing 1.1/1.2 config just to boot 1.3.1. The old `conversation-control.max-active-player-conversations` value is read as a compatibility fallback when the new `max-active-conversations` key is absent, and the group-routing options have safe Java defaults. Copy the new `group-conversations` block into your live config only if you want to tune those values explicitly.
+You do not have to delete an existing 1.1/1.2 config just to boot 1.3.0. The old `conversation-control.max-active-player-conversations` value is read as a compatibility fallback when the new `max-active-conversations` key is absent, and the group-routing options have safe Java defaults. Copy the new `group-conversations` block into your live config only if you want to tune those values explicitly.
 
 ## How group routing works
 
@@ -105,7 +105,7 @@ If two SVA conversations already exist, the router never guesses which one a new
 
 ## Security note for future action tools
 
-Version 1.3.1 intentionally does **not** add generic console-command execution. Future 2.0 action tools should be narrowly scoped and validate permissions/arguments in Java. The model must never be the authority that decides whether an administrative action is allowed.
+Version 1.3.0 intentionally does **not** add generic console-command execution. Future 2.0 action tools should be narrowly scoped and validate permissions/arguments in Java. The model must never be the authority that decides whether an administrative action is allowed.
 
 ## License
 
@@ -114,7 +114,7 @@ MIT. See `LICENSE`.
 
 ## Gemini 3.7 Flash
 
-ServerAssistant 1.3.1 uses Google's Gemini OpenAI-compatible endpoint by default.
+ServerAssistant 1.3.0 uses Google's Gemini OpenAI-compatible endpoint by default.
 The default model is `gemini-3.7-flash`.
 
 Recommended configuration:

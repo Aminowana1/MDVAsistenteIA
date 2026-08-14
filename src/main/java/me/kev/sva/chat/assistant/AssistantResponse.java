@@ -26,18 +26,66 @@ public class AssistantResponse {
     List<String> parsedToolCalls = List.of();
     boolean parsedCloseConversation = false;
 
+    String cleanedResponse = stripOuterCodeFence(response == null ? "" : response).trim();
+    boolean structured = false;
+
     try {
-      Object loaded = new Yaml().load(response);
+      Object loaded = cleanedResponse.isBlank() ? null : new Yaml().load(cleanedResponse);
+
       if (loaded instanceof Map<?, ?> data) {
-        parsedMessages = getStringList(data, "messages");
-        parsedToolCalls = getStringList(data, "tool-calls");
-        parsedCloseConversation = getBoolean(data, "close-conversation", false);
-      } else {
-        plugin.getLogger().warning("AI returned non-map YAML. Treating it as an empty response.");
+        boolean hasKnownField = containsAnyKey(
+            data,
+            "messages", "message", "response", "text",
+            "tool-calls", "tool_calls", "tools",
+            "close-conversation", "close_conversation");
+
+        if (hasKnownField) {
+          parsedMessages = firstNonEmpty(
+              getStringListFlexible(data, "messages"),
+              getStringListFlexible(data, "message"),
+              getStringListFlexible(data, "response"),
+              getStringListFlexible(data, "text"));
+
+          parsedToolCalls = firstNonEmpty(
+              getStringListFlexible(data, "tool-calls"),
+              getStringListFlexible(data, "tool_calls"),
+              getStringListFlexible(data, "tools"));
+
+          parsedCloseConversation = getBooleanFlexible(
+              data,
+              List.of("close-conversation", "close_conversation"),
+              false);
+          structured = true;
+        }
+      } else if (loaded instanceof List<?> list) {
+        parsedMessages = scalarListToStrings(list);
+        structured = !parsedMessages.isEmpty();
+      } else if (loaded instanceof String scalar) {
+        parsedMessages = scalar.isBlank() ? List.of() : List.of(scalar);
+        structured = true;
       }
     } catch (Exception ex) {
-      plugin.getLogger().warning(
-          "Could not parse AI response as YAML: " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+      if (plugin.getConfig().getBoolean("provider-response.debug-malformed-responses", false)) {
+        plugin.getLogger().warning(
+            "Could not parse AI response as structured YAML/JSON: "
+                + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+      }
+    }
+
+    // Gemini (especially through compatibility endpoints) may occasionally ignore
+    // the requested YAML envelope and return the natural-language answer directly.
+    // During ordinary chat that answer is still useful, so recover it rather than
+    // silently turning Isolda into an empty response. Tool calls still require the
+    // structured envelope and therefore can never be invented by this fallback.
+    if (!structured && !cleanedResponse.isBlank()
+        && plugin.getConfig().getBoolean("provider-response.accept-plain-text-fallback", true)) {
+      parsedMessages = List.of(cleanedResponse);
+      parsedToolCalls = List.of();
+      parsedCloseConversation = false;
+
+      if (plugin.getConfig().getBoolean("provider-response.log-fallbacks", false)) {
+        plugin.getLogger().info("Recovered a non-structured AI response as plain chat text.");
+      }
     }
 
     this.messages = normalizeMessages(parsedMessages);
@@ -71,21 +119,94 @@ public class AssistantResponse {
     return closeConversation;
   }
 
-  private static List<String> getStringList(Map<?, ?> data, String key) {
-    Object value = data.get(key);
-    if (!(value instanceof List<?> list)) {
-      return List.of();
+  private static boolean containsAnyKey(Map<?, ?> data, String... keys) {
+    for (String key : keys) {
+      if (data.containsKey(key)) {
+        return true;
+      }
     }
-
-    return list.stream()
-        .filter(String.class::isInstance)
-        .map(String.class::cast)
-        .toList();
+    return false;
   }
 
-  private static boolean getBoolean(Map<?, ?> data, String key, boolean fallback) {
+  private static List<String> getStringListFlexible(Map<?, ?> data, String key) {
     Object value = data.get(key);
-    return value instanceof Boolean bool ? bool : fallback;
+    if (value instanceof String scalar) {
+      return scalar.isBlank() ? List.of() : List.of(scalar);
+    }
+    if (value instanceof List<?> list) {
+      return scalarListToStrings(list);
+    }
+    return List.of();
+  }
+
+  @SafeVarargs
+  private static List<String> firstNonEmpty(List<String>... candidates) {
+    for (List<String> candidate : candidates) {
+      if (candidate != null && !candidate.isEmpty()) {
+        return candidate;
+      }
+    }
+    return List.of();
+  }
+
+  private static List<String> scalarListToStrings(List<?> list) {
+    List<String> result = new ArrayList<>();
+    for (Object value : list) {
+      if (value == null) {
+        continue;
+      }
+      if (value instanceof String scalar) {
+        if (!scalar.isBlank()) {
+          result.add(scalar);
+        }
+        continue;
+      }
+      if (value instanceof Number || value instanceof Boolean) {
+        result.add(String.valueOf(value));
+      }
+    }
+    return List.copyOf(result);
+  }
+
+  private static boolean getBooleanFlexible(
+      Map<?, ?> data,
+      List<String> keys,
+      boolean fallback) {
+
+    for (String key : keys) {
+      Object value = data.get(key);
+      if (value instanceof Boolean bool) {
+        return bool;
+      }
+      if (value instanceof String text) {
+        if ("true".equalsIgnoreCase(text.trim())) {
+          return true;
+        }
+        if ("false".equalsIgnoreCase(text.trim())) {
+          return false;
+        }
+      }
+    }
+    return fallback;
+  }
+
+  private static String stripOuterCodeFence(String text) {
+    if (text == null) {
+      return "";
+    }
+
+    String trimmed = text.trim();
+    if (!trimmed.startsWith("```") || !trimmed.endsWith("```")) {
+      return trimmed;
+    }
+
+    int firstNewline = trimmed.indexOf('\n');
+    if (firstNewline < 0) {
+      return trimmed;
+    }
+
+    String body = trimmed.substring(firstNewline + 1, trimmed.length() - 3);
+    return body.trim();
   }
 
   private List<String> normalizeMessages(List<String> input) {
