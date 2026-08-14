@@ -29,13 +29,22 @@ public class AssistantManager {
     this.plugin = plugin;
 
     String apiKey = resolveApiKey(plugin);
-    if (apiKey == null || apiKey.isBlank() || apiKey.equals("YOUR_API_KEY_HERE")) {
-      MessageSender.Error("API key not configured. AI features disabled.");
+    String baseUrl = resolveBaseUrl(plugin);
+
+    if (apiKey == null || apiKey.isBlank()
+        || apiKey.equals("YOUR_API_KEY_HERE")
+        || apiKey.equals("YOUR_GEMINI_API_KEY_HERE")) {
+      MessageSender.Error("Gemini API key not configured. AI features disabled.");
       client = null;
     } else {
       client = OpenAIOkHttpClient.builder()
           .apiKey(apiKey)
+          .baseUrl(baseUrl)
           .build();
+
+      String model = plugin.getConfig().getString("ai-model", "gemini-3.7-flash");
+      plugin.getLogger().info("AI provider: Gemini (OpenAI-compatible endpoint)");
+      plugin.getLogger().info("AI model: " + model);
     }
 
     AtomicInteger counter = new AtomicInteger();
@@ -48,7 +57,7 @@ public class AssistantManager {
   }
 
   private static String resolveApiKey(ServerAssistantPlugin plugin) {
-    String envName = plugin.getConfig().getString("api-key-env", "OPENAI_API_KEY");
+    String envName = plugin.getConfig().getString("api-key-env", "GEMINI_API_KEY");
     if (envName != null && !envName.isBlank()) {
       String envValue = System.getenv(envName.trim());
       if (envValue != null && !envValue.isBlank()) {
@@ -56,6 +65,19 @@ public class AssistantManager {
       }
     }
     return plugin.getConfig().getString("api-key");
+  }
+
+  private static String resolveBaseUrl(ServerAssistantPlugin plugin) {
+    String configured = plugin.getConfig().getString(
+        "api-base-url",
+        "https://generativelanguage.googleapis.com/v1beta/openai/");
+
+    if (configured == null || configured.isBlank()) {
+      return "https://generativelanguage.googleapis.com/v1beta/openai/";
+    }
+
+    String normalized = configured.trim();
+    return normalized.endsWith("/") ? normalized : normalized + "/";
   }
 
   public void shutdown() {
@@ -78,7 +100,7 @@ public class AssistantManager {
       return;
     }
 
-    String configuredModel = plugin.getConfig().getString("ai-model");
+    String configuredModel = plugin.getConfig().getString("ai-model", "gemini-3.7-flash");
     if (configuredModel == null || configuredModel.isBlank()) {
       completion.accept(null, new IllegalStateException("ai-model is not configured."));
       return;

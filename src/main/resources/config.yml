@@ -1,5 +1,5 @@
 # ============================================================
-# SERVER ASSISTANT 1.2.0
+# SERVER ASSISTANT 1.3.0
 # ============================================================
 
 # Name shown in chat and automatically accepted as a mention.
@@ -9,15 +9,24 @@ assistant-name: "ServerAssistant"
 # AI PROVIDER
 # ============================================================
 
+# ServerAssistant 1.3.0 uses Gemini through Google's OpenAI-compatible API.
+# This lets us keep the stable Java client while using Gemini models.
+#
 # Preferred: put the key in this environment variable.
 # If it exists, it takes priority over api-key below.
-api-key-env: "OPENAI_API_KEY"
+api-key-env: "GEMINI_API_KEY"
 
-# Fallback API key. Never commit a real key to a public repository.
-api-key: "YOUR_API_KEY_HERE"
+# Fallback Gemini API key. Never commit a real key to a public repository.
+# Create one in Google AI Studio if your host does not support environment variables.
+api-key: "YOUR_GEMINI_API_KEY_HERE"
 
-# OpenAI model name.
-ai-model: "gpt-4o-mini"
+# Official Gemini OpenAI-compatible endpoint.
+api-base-url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# Stable Gemini Flash model used by default.
+# Gemini 3.7 Flash supports function calling and structured outputs, which will
+# be useful when ServerAssistant 2.0 gains controlled server actions/tools.
+ai-model: "gemini-3.7-flash"
 
 # Maximum amount of recent logical conversation messages sent to the model.
 # The current batch is always kept even when this value is small.

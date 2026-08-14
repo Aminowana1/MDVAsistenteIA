@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.0 - Gemini 3.7 Flash
+
+- Switched the default AI backend from OpenAI to Gemini 3.7 Flash (`gemini-3.7-flash`).
+- Uses Google's official OpenAI-compatible endpoint so the existing Java request pipeline remains simple and stable.
+- Added configurable `api-base-url`, defaulting to the Gemini compatibility endpoint.
+- Changed the preferred API-key environment variable to `GEMINI_API_KEY`.
+- Added safe fallback support for a Gemini key in `config.yml`.
+- Added automatic migration of the old 1.2 default `OPENAI_API_KEY` / `gpt-4o-mini` values without overwriting real custom secrets or model choices.
+- Logs the selected provider/model at startup without logging the API key.
+- Preserves all 1.2.0 group conversations, slot limits, smart routing, batching, wiki lookup and rate-limit behavior.
+- Keeps the architecture ready for native/structured function tools in the planned 2.0 agent layer.
+
 ## 1.2.0
 
 ### Group conversations
