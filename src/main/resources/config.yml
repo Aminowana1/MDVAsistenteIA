@@ -1,5 +1,5 @@
 # ============================================================
-# SERVER ASSISTANT 1.3.0
+# SERVER ASSISTANT 1.3.1
 # ============================================================
 
 # Name shown in chat and automatically accepted as a mention.
@@ -9,7 +9,7 @@ assistant-name: "ServerAssistant"
 # AI PROVIDER
 # ============================================================
 
-# ServerAssistant 1.3.0 uses Gemini through Google's OpenAI-compatible API.
+# ServerAssistant 1.3.1 uses Gemini through Google's OpenAI-compatible API.
 # This lets us keep the stable Java client while using Gemini models.
 #
 # Preferred: put the key in this environment variable.
@@ -200,9 +200,30 @@ rate-limits:
   # Includes tool follow-up requests. Requests are serialized and, when this
   # limit is reached, queued briefly instead of being fired concurrently.
   # 0 = unlimited.
-  max-ai-requests-per-minute: 20
+  # 4/min is a conservative default for Gemini Free Tier testing.
+  # Raise it only if AI Studio shows a higher active quota for your project.
+  max-ai-requests-per-minute: 4
+
+  # If a fresh player request would need to wait longer than this because of the
+  # local/API quota, answer privately with provider-limit-message instead of
+  # silently holding the question for tens of seconds.
+  max-local-queue-delay-ms: 5000
+
+  provider-limit-message: "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... inténtalo nuevamente en un momento."
 
   player-limit-message: "&bSVA &7necesita un momento antes de procesar más mensajes tuyos."
+
+# ============================================================
+# PROVIDER RETRY / BACKOFF
+# ============================================================
+provider-retry:
+  # 429 responses are not blindly retried. The plugin reads Google's retry delay,
+  # pauses new requests and avoids hammering the quota.
+
+  # 503/high-demand responses are temporary and get a short bounded retry.
+  max-503-retries: 2
+  initial-503-delay-ms: 2000
+  max-503-delay-ms: 10000
 
 # ============================================================
 # MESSAGE BATCHING

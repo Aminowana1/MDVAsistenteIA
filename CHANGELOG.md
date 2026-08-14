@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.1
+
+- Fixed Gemini 400 `Requests ending with a model turn are not supported` for ambient events and wiki follow-ups.
+- Removed the hidden `hello world!` assistant seed from new conversations.
+- Added provider cooldown handling for Gemini 429 responses.
+- Added bounded retry/backoff for temporary Gemini 503/high-demand responses.
+- Lowered the default local AI request limit to 4/min for safer Free Tier testing.
+- Fresh player turns are rejected with a private in-character notice instead of silently waiting through long quota delays.
+- Plain Minecraft chat output: strips common Markdown/newlines and truncates at natural boundaries.
+- Fixed Adventure/legacy color parsing for assistant and private notice messages.
+- Strengthened core instructions against generic/hallucinated custom-server advice.
+
 ## 1.3.0 - Gemini 3.7 Flash
 
 - Switched the default AI backend from OpenAI to Gemini 3.7 Flash (`gemini-3.7-flash`).

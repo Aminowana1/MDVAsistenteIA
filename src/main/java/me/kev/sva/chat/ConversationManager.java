@@ -18,7 +18,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitTask;
 
 import me.kev.sva.ServerAssistantPlugin;
-import me.kev.sva.chat.assistant.AssistantContextualizer;
 import me.kev.sva.chat.assistant.AssistantManager;
 import me.kev.sva.chat.assistant.AssistantRequestContext;
 import me.kev.sva.chat.assistant.AssistantResponse;
@@ -29,7 +28,6 @@ import me.kev.sva.chat.message.PlayerChatMessage;
 import me.kev.sva.chat.message.SystemContextMessage;
 import me.kev.sva.chat.tools.all.WikiTool;
 import net.kyori.adventure.text.Component;
-import net.md_5.bungee.api.ChatColor;
 
 /**
  * Owns all conversation state.
@@ -61,6 +59,7 @@ public class ConversationManager {
   private boolean requestInFlight = false;
   private boolean shutdown = false;
   private long lastGlobalRequestAt = 0;
+  private long providerCooldownUntil = 0;
   private long nextConversationId = 1;
   private BukkitTask requestRateRetryTask;
   private BukkitTask idleTask;
@@ -804,7 +803,7 @@ public class ConversationManager {
     session.processing = true;
     if (!session.queued) {
       session.queued = true;
-      requestQueue.addLast(new RequestJob(session, 0));
+      requestQueue.addLast(new RequestJob(session, 0, 0));
     }
     processNextRequest();
   }
@@ -829,6 +828,22 @@ public class ConversationManager {
 
     long rateDelay = getGlobalRequestRateDelay();
     if (rateDelay > 0) {
+      long maxQueueDelay = Math.max(
+          plugin.getConfig().getLong("rate-limits.max-local-queue-delay-ms", 5000L),
+          0L);
+
+      // On the very small Gemini Free Tier quota, silently queueing a fresh player
+      // question for 30-60 seconds feels broken and the smart session may expire
+      // before it is ever answered. Reject fresh turns quickly and tell the group
+      // privately; tool follow-ups/retries may still wait because dropping those
+      // would strand an answer half-way through a tool chain.
+      if (!job.session.global && job.depth == 0 && maxQueueDelay > 0 && rateDelay > maxQueueDelay) {
+        notifyProviderBusy(job.session);
+        finishSessionRequest(job.session, false, false);
+        processNextRequest();
+        return;
+      }
+
       requestQueue.addFirst(job);
       long ticks = Math.max(1, (rateDelay + 49) / 50);
       requestRateRetryTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
@@ -905,9 +920,29 @@ public class ConversationManager {
     ConversationSession session = job.session;
 
     if (error != null) {
+      requestInFlight = false;
+
+      if (isRateLimitError(error)) {
+        long retryAfter = parseProviderRetryDelay(error, 60000L);
+        providerCooldownUntil = Math.max(
+            providerCooldownUntil,
+            System.currentTimeMillis() + retryAfter);
+
+        plugin.getLogger().warning(
+            "Gemini rate limit reached (429). Pausing AI requests for about "
+                + Math.max(1, retryAfter / 1000L) + "s instead of repeatedly retrying.");
+        notifyProviderBusy(session);
+        finishSessionRequest(session, false, false);
+        processNextRequest();
+        return;
+      }
+
+      if (isServiceUnavailable(error) && scheduleTransientRetry(job)) {
+        return;
+      }
+
       plugin.getLogger().warning(
           "AI request failed: " + error.getClass().getSimpleName() + ": " + error.getMessage());
-      requestInFlight = false;
       finishSessionRequest(session, false, false);
       processNextRequest();
       return;
@@ -943,7 +978,7 @@ public class ConversationManager {
         trimStoredHistory(session);
 
         requestInFlight = false;
-        requestQueue.addFirst(new RequestJob(session, job.depth + 1));
+        requestQueue.addFirst(new RequestJob(session, job.depth + 1, 0));
         processNextRequest();
         return;
       }
@@ -1048,21 +1083,115 @@ public class ConversationManager {
   }
 
   private long getGlobalRequestRateDelay() {
+    long now = System.currentTimeMillis();
+    long providerDelay = Math.max(0L, providerCooldownUntil - now);
+
     int maxPerMinute = Math.max(
-        plugin.getConfig().getInt("rate-limits.max-ai-requests-per-minute", 20),
+        plugin.getConfig().getInt("rate-limits.max-ai-requests-per-minute", 4),
         0);
     if (maxPerMinute == 0) {
-      return 0;
+      return providerDelay;
     }
 
-    long now = System.currentTimeMillis();
     pruneOlderThan(aiRequestTimes, now - 60000L);
-    if (aiRequestTimes.size() < maxPerMinute) {
-      return 0;
+    long localDelay = 0L;
+    if (aiRequestTimes.size() >= maxPerMinute) {
+      Long oldest = aiRequestTimes.peekFirst();
+      localDelay = oldest == null ? 0L : Math.max(50L, 60000L - (now - oldest));
     }
 
-    Long oldest = aiRequestTimes.peekFirst();
-    return oldest == null ? 0 : Math.max(50, 60000L - (now - oldest));
+    return Math.max(providerDelay, localDelay);
+  }
+
+  private boolean isRateLimitError(Throwable error) {
+    String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+    String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
+    return type.contains("ratelimit") || message.contains("429") || message.contains("resource_exhausted");
+  }
+
+  private boolean isServiceUnavailable(Throwable error) {
+    String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+    String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
+    return type.contains("internalserver")
+        || type.contains("serviceunavailable")
+        || message.contains("503")
+        || message.contains("high demand")
+        || message.contains("unavailable");
+  }
+
+  private long parseProviderRetryDelay(Throwable error, long fallbackMs) {
+    String message = String.valueOf(error.getMessage());
+
+    java.util.regex.Matcher jsonDelay = Pattern.compile(
+        "\"retryDelay\"\\s*:\\s*\"([0-9]+)s\"",
+        Pattern.CASE_INSENSITIVE).matcher(message);
+    if (jsonDelay.find()) {
+      try {
+        return Math.max(1000L, Long.parseLong(jsonDelay.group(1)) * 1000L + 250L);
+      } catch (NumberFormatException ignored) {
+      }
+    }
+
+    java.util.regex.Matcher textDelay = Pattern.compile(
+        "retry in\\s+([0-9]+(?:\\.[0-9]+)?)s",
+        Pattern.CASE_INSENSITIVE).matcher(message);
+    if (textDelay.find()) {
+      try {
+        double seconds = Double.parseDouble(textDelay.group(1));
+        return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
+      } catch (NumberFormatException ignored) {
+      }
+    }
+
+    return Math.max(1000L, fallbackMs);
+  }
+
+  private boolean scheduleTransientRetry(RequestJob job) {
+    int maxRetries = Math.max(
+        plugin.getConfig().getInt("provider-retry.max-503-retries", 2),
+        0);
+    if (job.retryCount >= maxRetries) {
+      return false;
+    }
+
+    long baseDelay = Math.max(
+        plugin.getConfig().getLong("provider-retry.initial-503-delay-ms", 2000L),
+        250L);
+    long maxDelay = Math.max(
+        plugin.getConfig().getLong("provider-retry.max-503-delay-ms", 10000L),
+        baseDelay);
+    long delay = Math.min(maxDelay, baseDelay * (1L << Math.min(job.retryCount, 10)));
+
+    plugin.getLogger().warning(
+        "Gemini is temporarily unavailable (503). Retrying in " + delay
+            + "ms (attempt " + (job.retryCount + 1) + "/" + maxRetries + ").");
+
+    requestQueue.addFirst(new RequestJob(job.session, job.depth, job.retryCount + 1));
+    long ticks = Math.max(1L, (delay + 49L) / 50L);
+    cancelTask(requestRateRetryTask);
+    requestRateRetryTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+      requestRateRetryTask = null;
+      processNextRequest();
+    }, ticks);
+    return true;
+  }
+
+  private void notifyProviderBusy(ConversationSession session) {
+    if (session == null || session.global) {
+      return;
+    }
+    String fallback = "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... inténtalo nuevamente en un momento.";
+    String text = plugin.getConfig().getString("rate-limits.provider-limit-message", fallback);
+    if (text == null || text.isBlank()) {
+      return;
+    }
+    Component component = legacyComponent(text);
+    for (ParticipantState participant : session.participants.values()) {
+      Player player = Bukkit.getPlayer(participant.playerId);
+      if (player != null) {
+        player.sendMessage(component);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1071,20 +1200,12 @@ public class ConversationManager {
 
   private ConversationSession createPlayerConversation() {
     ConversationSession session = new ConversationSession(false, nextConversationId++);
-    addInitialAssistantMessage(session);
     session.lastInteractionAt = System.currentTimeMillis();
     return session;
   }
 
   private ConversationSession createGlobalSession() {
-    ConversationSession session = new ConversationSession(true, 0);
-    addInitialAssistantMessage(session);
-    return session;
-  }
-
-  private void addInitialAssistantMessage(ConversationSession session) {
-    AssistantResponse initial = AssistantContextualizer.getInitialResponse(plugin);
-    session.history.add(new AssistantChatMessage(plugin, initial));
+    return new ConversationSession(true, 0);
   }
 
   private void refreshParticipantSnapshot(ParticipantState participant, Player player) {
@@ -1318,7 +1439,13 @@ public class ConversationManager {
     if (text == null || text.isBlank()) {
       return;
     }
-    player.sendMessage(Component.text(ChatColor.translateAlternateColorCodes('&', text)));
+    player.sendMessage(legacyComponent(text));
+  }
+
+  private static Component legacyComponent(String text) {
+    return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+        .legacyAmpersand()
+        .deserialize(text);
   }
 
   // ---------------------------------------------------------------------------
@@ -1349,7 +1476,7 @@ public class ConversationManager {
     session.expiryTask = null;
   }
 
-  private record RequestJob(ConversationSession session, int depth) {
+  private record RequestJob(ConversationSession session, int depth, int retryCount) {
   }
 
   private static final class ParticipantState {

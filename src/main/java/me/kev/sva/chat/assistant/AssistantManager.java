@@ -191,9 +191,13 @@ public class AssistantManager {
         plugin.getConfig().getInt("chat.max-player-message-length", 250),
         0);
 
+    boolean hasUserTurn = false;
+    boolean lastConversationalTurnWasAssistant = false;
+
     for (ChatMessage message : chatMessages) {
       if (message instanceof AssistantChatMessage assistantMessage) {
         paramsBuilder.addAssistantMessage(assistantMessage.content);
+        lastConversationalTurnWasAssistant = true;
         continue;
       }
 
@@ -205,6 +209,8 @@ public class AssistantManager {
 
         // CRITICAL: player content is USER content, never SYSTEM content.
         paramsBuilder.addUserMessage(playerMessage.header + msg);
+        hasUserTurn = true;
+        lastConversationalTurnWasAssistant = false;
         continue;
       }
 
@@ -214,8 +220,22 @@ public class AssistantManager {
       }
 
       if (message instanceof BroadcastChatMessage broadcastMessage) {
+        // Trusted server events remain SYSTEM context. Gemini's OpenAI-compatible
+        // endpoint still requires a user turn after an assistant/model turn, so a
+        // controlled continuation trigger is appended below when needed.
         paramsBuilder.addSystemMessage(broadcastMessage.header + broadcastMessage.content);
       }
+    }
+
+    // Gemini rejects requests whose effective conversation ends on a model turn.
+    // This happens naturally for ambient events and our YAML wiki-tool follow-ups:
+    // assistant -> trusted SYSTEM event/result -> next request. Add a plugin-owned
+    // USER turn so the model has something to answer without pretending that a
+    // real player sent it. This content is constant and never player-controlled.
+    if (!hasUserTurn || lastConversationalTurnWasAssistant) {
+      paramsBuilder.addUserMessage(
+          "[TRUSTED CONTINUATION] Use the trusted server context/tool results above. "
+              + "Respond only if a response is useful; otherwise return an empty messages list.");
     }
   }
 }

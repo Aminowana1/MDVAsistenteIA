@@ -10,7 +10,7 @@ import org.yaml.snakeyaml.Yaml;
 
 import me.kev.sva.ServerAssistantPlugin;
 import net.kyori.adventure.text.Component;
-import net.md_5.bungee.api.ChatColor;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 
 public class AssistantResponse {
   public final String raw;
@@ -109,7 +109,7 @@ public class AssistantResponse {
       }
 
       if (maxLength > 0 && message.length() > maxLength) {
-        message = message.substring(0, maxLength).trim();
+        message = truncateNaturally(message, maxLength);
       }
 
       if (!message.isEmpty()) {
@@ -154,7 +154,7 @@ public class AssistantResponse {
     return new Yaml(options).dump(data);
   }
 
-  public static String formatMessage(ServerAssistantPlugin plugin, String message) {
+  public static Component formatMessage(ServerAssistantPlugin plugin, String message) {
     String assistantName = plugin.getConfig().getString(
         "assistant-name",
         "ServerAssistant");
@@ -163,11 +163,10 @@ public class AssistantResponse {
         "chat.assistant-format",
         "&b🤖 &b&l%assistant_name%: &r%message%");
 
-    return ChatColor.translateAlternateColorCodes(
-        '&',
-        format
-            .replace("%assistant_name%", assistantName)
-            .replace("%message%", message));
+    String rendered = format
+        .replace("%assistant_name%", assistantName)
+        .replace("%message%", message);
+    return LegacyComponentSerializer.legacyAmpersand().deserialize(rendered);
   }
 
   private static String sanitizeMessage(String text) {
@@ -175,7 +174,7 @@ public class AssistantResponse {
       return "";
     }
 
-    return text.replaceAll(
+    String cleaned = text.replaceAll(
         "[\\x{1F000}-\\x{1FAFF}" +
             "\\x{2600}-\\x{27BF}" +
             "\\x{2300}-\\x{23FF}" +
@@ -183,6 +182,38 @@ public class AssistantResponse {
             "\\x{FE00}-\\x{FE0F}" +
             "\\x{1F1E6}-\\x{1F1FF}]",
         "");
+
+    // Minecraft chat is not Markdown. Keep Isolda's output looking like a
+    // normal player line rather than a generated document/list.
+    cleaned = cleaned
+        .replace("**", "")
+        .replace("__", "")
+        .replace("`", "")
+        .replaceAll("(?m)^\\s*#{1,6}\\s*", "")
+        .replaceAll("[\\r\\n]+", " ")
+        .replaceAll("\\s{2,}", " ")
+        .trim();
+    return cleaned;
+  }
+
+  private static String truncateNaturally(String message, int maxLength) {
+    if (message == null || message.length() <= maxLength) {
+      return message == null ? "" : message;
+    }
+
+    String candidate = message.substring(0, maxLength).trim();
+    int sentenceCut = Math.max(
+        candidate.lastIndexOf(". "),
+        Math.max(candidate.lastIndexOf("! "), candidate.lastIndexOf("? ")));
+    if (sentenceCut >= Math.max(40, maxLength / 2)) {
+      return candidate.substring(0, sentenceCut + 1).trim();
+    }
+
+    int wordCut = candidate.lastIndexOf(' ');
+    if (wordCut >= Math.max(20, maxLength / 2)) {
+      candidate = candidate.substring(0, wordCut).trim();
+    }
+    return candidate + "…";
   }
 
   /** Broadcasts this already-normalized response to global chat. */
@@ -202,7 +233,7 @@ public class AssistantResponse {
       plugin.getServer().getScheduler().runTaskLater(
           plugin,
           () -> plugin.getServer().broadcast(
-              Component.text(formatMessage(plugin, message))),
+              formatMessage(plugin, message)),
           ticks);
     }
   }

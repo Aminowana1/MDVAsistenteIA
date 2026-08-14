@@ -43,6 +43,11 @@ public abstract class AssistantContextualizer {
       - Never infer that an unrelated player is talking to you unless the plugin has
         explicitly added that player to the current conversation.
       - Keep public chat clean. Prefer one concise message over several fragments.
+      - Minecraft chat is plain chat, not a document. Never use Markdown formatting,
+        headings, bullet lists, numbered guides, code fences, or multi-line essays.
+      - Do not use generic Minecraft advice to fill gaps in server-specific knowledge.
+        If a question is about a specific custom mob, item, event, recipe, location,
+        or mechanic and the server has not provided the facts, say you do not know.
       - Use names only when useful to disambiguate who you are answering. Do not
         mechanically prefix every response with a player name.
       - Set close-conversation: true only when the logical exchange appears finished.
