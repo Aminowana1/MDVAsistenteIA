@@ -80,16 +80,30 @@ public class ConversationManager {
   }
 
   public String getRuntimeStatus() {
-    String key = assistantManager.getProviderSettings().throttleKey();
-    long cooldownMs = providerThrottle.cooldownRemainingMs(key);
-    int used = providerThrottle.requestsLastMinute(key);
-    int limit = Math.max(plugin.getConfig().getInt("rate-limits.max-ai-requests-per-minute", 4), 0);
-    return "provider=" + assistantManager.getProviderSettings().displayName()
-        + ", model=" + assistantManager.getProviderSettings().model()
-        + ", requests_60s=" + used + "/" + (limit == 0 ? "unlimited" : limit)
-        + ", provider_cooldown=" + Math.max(0L, (cooldownMs + 999L) / 1000L) + "s"
+    var primary = assistantManager.getPrimaryProviderSettings();
+    String primaryStatus = providerStatus("primary", primary);
+
+    var fallback = assistantManager.getFallbackProviderSettings();
+    String fallbackStatus = fallback == null
+        ? "fallback=disabled"
+        : providerStatus("fallback", fallback);
+
+    return primaryStatus
+        + ", " + fallbackStatus
         + ", queue=" + requestQueue.size()
         + ", active_conversations=" + countActivePlayerConversations();
+  }
+
+  private String providerStatus(String role, me.kev.sva.chat.assistant.ProviderSettings settings) {
+    if (settings == null) {
+      return role + "=unconfigured";
+    }
+    long cooldownMs = providerThrottle.cooldownRemainingMs(settings.throttleKey());
+    int used = providerThrottle.requestsLastMinute(settings.throttleKey());
+    int limit = settings.maxRequestsPerMinute();
+    return role + "=" + settings.displayName() + "/" + settings.model()
+        + "[" + used + "/" + (limit == 0 ? "unlimited" : limit)
+        + ",cooldown=" + Math.max(0L, (cooldownMs + 999L) / 1000L) + "s]";
   }
 
   public void shutdown() {
@@ -937,7 +951,7 @@ public class ConversationManager {
     session.processing = true;
     if (!session.queued) {
       session.queued = true;
-      requestQueue.addLast(new RequestJob(session, 0, 0));
+      requestQueue.addLast(new RequestJob(session, 0, 0, AssistantManager.PRIMARY));
     }
     processNextRequest();
   }
@@ -960,17 +974,47 @@ public class ConversationManager {
       job.session.queued = false;
     }
 
-    long rateDelay = getGlobalRequestRateDelay();
+    // If the primary is not configured but the fallback is, keep the server alive.
+    // This is especially useful during API-key rotation, but it is logged loudly.
+    if (!assistantManager.isProviderAvailable(job.providerIndex)) {
+      if (job.providerIndex == AssistantManager.PRIMARY && assistantManager.hasFallback()) {
+        plugin.getLogger().warning("Primary AI provider is unavailable locally; using fallback for this request.");
+        job = job.withProvider(AssistantManager.FALLBACK);
+      } else {
+        plugin.getLogger().warning("Selected AI provider is not configured; dropping request.");
+        notifyProviderBusy(job.session);
+        discardCurrentBatch(job.session);
+        finishSessionRequest(job.session, false, false);
+        processNextRequest();
+        return;
+      }
+    }
+
+    long rateDelay = getProviderRequestRateDelay(job.providerIndex);
+
+    // 1.4.1: a throttled primary never makes a player wait behind a known cooldown
+    // when the fallback is immediately available. Preserve the exact same batch.
+    if (rateDelay > 0
+        && job.providerIndex == AssistantManager.PRIMARY
+        && assistantManager.hasFallback()) {
+      long fallbackDelay = getProviderRequestRateDelay(AssistantManager.FALLBACK);
+      long maxFallbackWait = Math.max(
+          plugin.getConfig().getLong("ai.fallback.max-wait-ms", 2500L),
+          0L);
+      if (fallbackDelay <= maxFallbackWait) {
+        job = job.withProvider(AssistantManager.FALLBACK);
+        rateDelay = fallbackDelay;
+      }
+    }
+
     if (rateDelay > 0) {
       long maxQueueDelay = Math.max(
           plugin.getConfig().getLong("rate-limits.max-local-queue-delay-ms", 5000L),
           0L);
 
-      // On the very small Gemini Free Tier quota, silently queueing a fresh player
-      // question for 30-60 seconds feels broken and the smart session may expire
-      // before it is ever answered. Reject fresh turns quickly and tell the group
-      // privately; tool follow-ups/retries may still wait because dropping those
-      // would strand an answer half-way through a tool chain.
+      // Fresh player turns should never disappear into a 30-60 second queue. Tool
+      // follow-ups and retries may still wait because dropping them would strand an
+      // answer half-way through a tool chain.
       if (!job.session.global && job.depth == 0 && maxQueueDelay > 0 && rateDelay > maxQueueDelay) {
         notifyProviderBusy(job.session);
         discardCurrentBatch(job.session);
@@ -1029,7 +1073,16 @@ public class ConversationManager {
 
     requestInFlight = true;
     long now = System.currentTimeMillis();
-    providerThrottle.recordAttempt(assistantManager.getProviderSettings().throttleKey());
+    var selectedProvider = assistantManager.getProviderSettings(job.providerIndex);
+    if (selectedProvider == null) {
+      requestInFlight = false;
+      notifyProviderBusy(session);
+      discardCurrentBatch(session);
+      finishSessionRequest(session, false, false);
+      processNextRequest();
+      return;
+    }
+    providerThrottle.recordAttempt(selectedProvider.throttleKey());
     session.lastProviderRequestAt = now;
     if (session.global && job.depth == 0) {
       lastGlobalRequestAt = now;
@@ -1046,7 +1099,7 @@ public class ConversationManager {
 
     List<ChatMessage> snapshot = getConversationSnapshot(session);
 
-    assistantManager.sendAIRequest(snapshot, requestContext, (response, error) -> {
+    assistantManager.sendAIRequest(job.providerIndex, snapshot, requestContext, (response, error) -> {
       if (shutdown) {
         return;
       }
@@ -1056,21 +1109,28 @@ public class ConversationManager {
 
   private void handleAICompletion(RequestJob job, AssistantResponse response, Throwable error) {
     ConversationSession session = job.session;
+    var selectedProvider = assistantManager.getProviderSettings(job.providerIndex);
 
     if (error != null) {
       requestInFlight = false;
 
       if (isRateLimitError(error)) {
         long retryAfter = parseProviderRetryDelay(error, 60000L);
-        providerThrottle.applyCooldown(
-            assistantManager.getProviderSettings().throttleKey(),
-            retryAfter);
+        if (selectedProvider != null) {
+          providerThrottle.applyCooldown(selectedProvider.throttleKey(), retryAfter);
+        }
 
+        String providerName = selectedProvider == null ? "AI provider" : selectedProvider.displayName();
         plugin.getLogger().warning(
-            assistantManager.getProviderSettings().displayName()
-                + " rate limit reached (429). Cooling down for about "
+            providerName + " rate limit reached (429). Cooling down for about "
                 + Math.max(1, retryAfter / 1000L)
                 + "s. /sva reload will NOT bypass this cooldown.");
+
+        if (queueFallbackForSameBatch(job, "429 rate limit")) {
+          processNextRequest();
+          return;
+        }
+
         notifyProviderBusy(session);
         discardCurrentBatch(session);
         finishSessionRequest(session, false, false);
@@ -1078,12 +1138,20 @@ public class ConversationManager {
         return;
       }
 
-      if (isServiceUnavailable(error) && scheduleTransientRetry(job)) {
-        return;
+      if (isTransientProviderError(error)) {
+        if (queueFallbackForSameBatch(job, "temporary provider error")) {
+          processNextRequest();
+          return;
+        }
+        if (scheduleTransientRetry(job)) {
+          return;
+        }
       }
 
       plugin.getLogger().warning(
-          "AI request failed: " + error.getClass().getSimpleName() + ": " + error.getMessage());
+          "AI request failed via "
+              + (selectedProvider == null ? "unknown provider" : selectedProvider.displayName())
+              + ": " + error.getClass().getSimpleName() + ": " + error.getMessage());
       discardCurrentBatch(session);
       finishSessionRequest(session, false, false);
       processNextRequest();
@@ -1121,7 +1189,7 @@ public class ConversationManager {
         trimStoredHistory(session);
 
         requestInFlight = false;
-        requestQueue.addFirst(new RequestJob(session, job.depth + 1, 0));
+        requestQueue.addFirst(new RequestJob(session, job.depth + 1, 0, job.providerIndex));
         processNextRequest();
         return;
       }
@@ -1195,50 +1263,108 @@ public class ConversationManager {
     }
   }
 
-  private long getGlobalRequestRateDelay() {
-    int maxPerMinute = Math.max(
-        plugin.getConfig().getInt("rate-limits.max-ai-requests-per-minute", 4),
-        0);
+  private long getProviderRequestRateDelay(int providerIndex) {
+    var settings = assistantManager.getProviderSettings(providerIndex);
+    if (settings == null) {
+      return 0L;
+    }
     return providerThrottle.getDelay(
-        assistantManager.getProviderSettings().throttleKey(),
-        maxPerMinute);
+        settings.throttleKey(),
+        settings.maxRequestsPerMinute());
+  }
+
+  /**
+   * Reuses the exact in-flight batch with Gemini when the primary OpenAI request
+   * cannot be served. No player message is committed, discarded or duplicated.
+   */
+  private boolean queueFallbackForSameBatch(RequestJob job, String reason) {
+    if (job.providerIndex != AssistantManager.PRIMARY || !assistantManager.hasFallback()) {
+      return false;
+    }
+
+    var fallbackSettings = assistantManager.getFallbackProviderSettings();
+    if (fallbackSettings == null) {
+      return false;
+    }
+
+    long fallbackDelay = getProviderRequestRateDelay(AssistantManager.FALLBACK);
+    long maxFallbackWait = Math.max(
+        plugin.getConfig().getLong("ai.fallback.max-wait-ms", 2500L),
+        0L);
+
+    if (fallbackDelay > maxFallbackWait) {
+      plugin.getLogger().warning(
+          "Fallback " + fallbackSettings.displayName() + " is also throttled for about "
+              + Math.max(1L, fallbackDelay / 1000L) + "s; not queueing stale player chat.");
+      return false;
+    }
+
+    plugin.getLogger().warning(
+        "Switching current request to fallback " + fallbackSettings.displayName()
+            + "/" + fallbackSettings.model() + " after " + reason + ".");
+
+    requestQueue.addFirst(job.withProvider(AssistantManager.FALLBACK));
+    return true;
   }
 
   private boolean isRateLimitError(Throwable error) {
     String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
     String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
-    return type.contains("ratelimit") || message.contains("429") || message.contains("resource_exhausted");
+    return type.contains("ratelimit")
+        || message.contains("429")
+        || message.contains("resource_exhausted")
+        || message.contains("rate limit");
   }
 
-  private boolean isServiceUnavailable(Throwable error) {
+  private boolean isTransientProviderError(Throwable error) {
     String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
     String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
     return type.contains("internalserver")
         || type.contains("serviceunavailable")
+        || type.contains("timeout")
+        || message.contains("500")
+        || message.contains("502")
         || message.contains("503")
+        || message.contains("504")
         || message.contains("high demand")
-        || message.contains("unavailable");
+        || message.contains("temporarily unavailable")
+        || message.contains("connection reset")
+        || message.contains("timed out");
   }
 
   private long parseProviderRetryDelay(Throwable error, long fallbackMs) {
     String message = String.valueOf(error.getMessage());
 
     java.util.regex.Matcher jsonDelay = Pattern.compile(
-        "\"retryDelay\"\\s*:\\s*\"([0-9]+)s\"",
+        "\\\"retryDelay\\\"\\s*:\\s*\\\"([0-9]+(?:\\.[0-9]+)?)s\\\"",
         Pattern.CASE_INSENSITIVE).matcher(message);
     if (jsonDelay.find()) {
       try {
-        return Math.max(1000L, Long.parseLong(jsonDelay.group(1)) * 1000L + 250L);
+        double seconds = Double.parseDouble(jsonDelay.group(1));
+        return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
       } catch (NumberFormatException ignored) {
       }
     }
 
+    // Gemini commonly says "retry in 37.2s"; OpenAI commonly says
+    // "Please try again in 1.2s" or exposes Retry-After text through the SDK.
     java.util.regex.Matcher textDelay = Pattern.compile(
-        "retry in\\s+([0-9]+(?:\\.[0-9]+)?)s",
+        "(?:retry|try again)(?:\\s+after|\\s+in)?\\s+([0-9]+(?:\\.[0-9]+)?)\\s*(?:s|sec|seconds?)",
         Pattern.CASE_INSENSITIVE).matcher(message);
     if (textDelay.find()) {
       try {
         double seconds = Double.parseDouble(textDelay.group(1));
+        return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
+      } catch (NumberFormatException ignored) {
+      }
+    }
+
+    java.util.regex.Matcher headerDelay = Pattern.compile(
+        "retry-after[^0-9]*([0-9]+(?:\\.[0-9]+)?)",
+        Pattern.CASE_INSENSITIVE).matcher(message);
+    if (headerDelay.find()) {
+      try {
+        double seconds = Double.parseDouble(headerDelay.group(1));
         return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
       } catch (NumberFormatException ignored) {
       }
@@ -1249,26 +1375,27 @@ public class ConversationManager {
 
   private boolean scheduleTransientRetry(RequestJob job) {
     int maxRetries = Math.max(
-        plugin.getConfig().getInt("provider-retry.max-503-retries", 2),
+        plugin.getConfig().getInt("provider-retry.max-503-retries", 1),
         0);
     if (job.retryCount >= maxRetries) {
       return false;
     }
 
     long baseDelay = Math.max(
-        plugin.getConfig().getLong("provider-retry.initial-503-delay-ms", 2000L),
+        plugin.getConfig().getLong("provider-retry.initial-503-delay-ms", 1500L),
         250L);
     long maxDelay = Math.max(
-        plugin.getConfig().getLong("provider-retry.max-503-delay-ms", 10000L),
+        plugin.getConfig().getLong("provider-retry.max-503-delay-ms", 5000L),
         baseDelay);
     long delay = Math.min(maxDelay, baseDelay * (1L << Math.min(job.retryCount, 10)));
 
+    var settings = assistantManager.getProviderSettings(job.providerIndex);
     plugin.getLogger().warning(
-        assistantManager.getProviderSettings().displayName()
-            + " is temporarily unavailable (503). Retrying in " + delay
+        (settings == null ? "AI provider" : settings.displayName())
+            + " is temporarily unavailable. Retrying in " + delay
             + "ms (attempt " + (job.retryCount + 1) + "/" + maxRetries + ").");
 
-    requestQueue.addFirst(new RequestJob(job.session, job.depth, job.retryCount + 1));
+    requestQueue.addFirst(new RequestJob(job.session, job.depth, job.retryCount + 1, job.providerIndex));
     long ticks = Math.max(1L, (delay + 49L) / 50L);
     cancelTask(requestRateRetryTask);
     requestRateRetryTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
@@ -1617,7 +1744,10 @@ public class ConversationManager {
     session.expiryTask = null;
   }
 
-  private record RequestJob(ConversationSession session, int depth, int retryCount) {
+  private record RequestJob(ConversationSession session, int depth, int retryCount, int providerIndex) {
+    RequestJob withProvider(int newProviderIndex) {
+      return new RequestJob(session, depth, 0, newProviderIndex);
+    }
   }
 
   private record RecentPublicMessage(long timestampMs, String content) {

@@ -1,22 +1,17 @@
 # Changelog
 
-## 1.4.0
+## 1.4.1 - OpenAI primary + Gemini fallback
 
-- Provider-neutral `ai.*` configuration: Gemini, OpenAI and generic OpenAI-compatible endpoints can be selected without recompiling.
-- Removed the 1.3.x migration behavior that could rewrite an intentional `gpt-4o-mini` selection back to Gemini.
-- Provider throttle/cooldown state now survives `/sva reload`, preventing reload-driven 429 loops.
-- Added provider-side `max-output-tokens` and temperature configuration.
-- Compacted repeated core/request context to reduce input token use.
-- Default conversation history reduced to 8 logical messages for economical operation.
-- 503 retries reduced to one in the economical default config; retries still consume the shared request budget.
-- Rejected/failed fresh batches are no longer committed to history as unanswered ghost turns.
-- Per-player rate limiting moved outside participant session state so changing conversations does not reset it.
-- Provider-busy notices target only players involved in the rejected batch and have their own notice cooldown.
-- Added explicit recent-public-chat hand-off for cases such as `Iso responde a Kroattan`, without sending all global chat to the model.
-- Converted the empty ToolManager into an explicit allow-list registry; only the read-only wiki tool is registered in 1.4.0.
-- Added `/sva status` for provider/model/request/cooldown/queue diagnostics.
-- OpenAI-compatible HTTP client is closed on reload/shutdown.
-- GitHub workflow installs PyYAML explicitly and Maven now includes a small provider-throttle unit test suite.
+- Restored **OpenAI `gpt-4o-mini` as the default/primary provider**, matching the simple V1 request path.
+- Added an optional `ai.fallback` provider; MDVCRAFT defaults it to Gemini 3.7 Flash.
+- A primary 429 or transient 5xx/timeout can switch the **same uncommitted batch** to fallback without losing, duplicating, or restarting the player's conversation.
+- Primary and fallback keep independent rolling request buckets and provider cooldowns; `/sva reload` does not erase either cooldown.
+- If the primary is locally unavailable/missing but fallback is configured, the current request can still be served while the startup error remains visible in logs.
+- Gemini-only synthetic continuation messages are now sent only to Gemini; normal GPT-4o mini conversations keep the cleaner V1-style turn sequence.
+- `/sva status` now reports primary and fallback model, rolling request usage and cooldown independently.
+- V1 flat `api-key` + `ai-model` settings migrate to the provider-neutral primary `ai.*` section without silently forcing Gemini.
+- MDVCRAFT defaults: 60s smart conversation window, 12 logical history messages, 20 local OpenAI RPM, 4 local Gemini fallback RPM, 1s same-conversation request spacing and 1.2s batching.
+- Preserves all 1.4 conversation routing, group slots, human-chat release logic, explicit hand-off, bounded queues, output caps, wiki tools, tool iterations, plain-text response recovery, 429 handling and 503 retry protections.
 
 ## 1.3.2
 

@@ -42,24 +42,24 @@ public final class ServerAssistantPlugin extends JavaPlugin {
      * Unlike 1.3.x, it NEVER rewrites a user's OpenAI selection back to Gemini.
      */
     private void migrateLegacyProviderConfig() {
-        if (getConfig().contains("ai.provider")) {
+        if (getConfig().isSet("ai.provider")) {
             return;
         }
 
-        ProviderSettings legacy = ProviderSettings.from(this);
+        ProviderSettings legacy = ProviderSettings.primary(this);
         getConfig().set("ai.provider", legacy.type());
         getConfig().set("ai.api-key-env", legacy.apiKeyEnv());
         getConfig().set("ai.api-key", legacy.apiKey());
         getConfig().set("ai.base-url", legacy.baseUrl());
         getConfig().set("ai.model", legacy.model());
         if (!getConfig().contains("ai.max-output-tokens")) {
-            getConfig().set("ai.max-output-tokens", 96);
+            getConfig().set("ai.max-output-tokens", 160);
         }
         if (!getConfig().contains("ai.temperature")) {
             getConfig().set("ai.temperature", 0.75);
         }
         saveConfig();
-        getLogger().info("Migrated legacy AI settings to the provider-neutral ai.* section.");
+        getLogger().info("Migrated legacy V1 AI settings to the provider-neutral ai.* section (OpenAI-compatible).");
     }
 
     void initializePlugin() {
