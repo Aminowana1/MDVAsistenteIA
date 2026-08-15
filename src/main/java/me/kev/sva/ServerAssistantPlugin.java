@@ -8,6 +8,7 @@ import me.kev.sva.chat.ChatListener;
 import me.kev.sva.chat.ConversationManager;
 import me.kev.sva.chat.ProviderThrottleRegistry;
 import me.kev.sva.chat.assistant.ProviderSettings;
+import me.kev.sva.chat.tools.ToolManager;
 import me.kev.sva.commands.CommandManager;
 import me.kev.sva.constants.Constants;
 import me.kev.sva.utils.MessageSender;
@@ -16,6 +17,7 @@ public final class ServerAssistantPlugin extends JavaPlugin {
 
     private ConversationManager conversationManager;
     private ChatListener chatListener;
+    private ToolManager toolManager;
 
     /** Survives /sva reload so provider cooldowns cannot be bypassed by reloading. */
     private final ProviderThrottleRegistry providerThrottleRegistry = new ProviderThrottleRegistry();
@@ -79,6 +81,17 @@ public final class ServerAssistantPlugin extends JavaPlugin {
             chatListener = null;
         }
 
+        if (toolManager != null) {
+            try {
+                toolManager.shutdown();
+            } catch (Exception ignored) {
+            }
+            toolManager = null;
+        }
+
+        // Tools are created before ConversationManager because request-context
+        // construction and the assistant prompt use the local/action tool registry.
+        toolManager = new ToolManager(this);
         conversationManager = new ConversationManager(this);
         chatListener = new ChatListener(this, conversationManager);
         getServer().getPluginManager().registerEvents(chatListener, this);
@@ -90,6 +103,10 @@ public final class ServerAssistantPlugin extends JavaPlugin {
 
     public ProviderThrottleRegistry getProviderThrottleRegistry() {
         return providerThrottleRegistry;
+    }
+
+    public ToolManager getToolManager() {
+        return toolManager;
     }
 
     /** Reloads config and runtime routing while keeping provider throttle state. */
@@ -115,6 +132,14 @@ public final class ServerAssistantPlugin extends JavaPlugin {
             } catch (Exception ignored) {
             }
             chatListener = null;
+        }
+
+        if (toolManager != null) {
+            try {
+                toolManager.shutdown();
+            } catch (Exception ignored) {
+            }
+            toolManager = null;
         }
 
         MessageSender.Error("Plugin Disabled!");

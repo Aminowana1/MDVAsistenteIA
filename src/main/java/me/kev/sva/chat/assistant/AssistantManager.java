@@ -223,13 +223,19 @@ public class AssistantManager {
         plugin.getConfig().getInt("chat.max-assistant-message-length", 190),
         0);
 
-    // Stable prefix first so prompt caching can reuse CORE + personality + output rule.
+    // Stable prefix first so prompt caching can reuse CORE + personality + output/tool rules.
     paramsBuilder.addSystemMessage(
         "[OUTPUT] max_chars=" + maxAssistantMessageLength
             + ", max_chat_messages=1. Java enforces both limits.");
+    if (plugin.getToolManager() != null) {
+      paramsBuilder.addSystemMessage(plugin.getToolManager().getAvailableActionToolsPrompt());
+    } else {
+      paramsBuilder.addSystemMessage("[TOOLS] disabled; t must be []");
+    }
 
-    // Dynamic/local context follows the cache-friendly prefix. Local wiki retrieval
-    // happens in Java before this one model call; there is no model tool loop.
+    // Dynamic/local context follows the cache-friendly prefix. Wiki/player/inventory
+    // retrieval happens in Java before this one model call. Action tools execute
+    // from the same response, so there is no model tool loop.
     paramsBuilder.addSystemMessage(AssistantContextualizer.getLocalKnowledge(requestContext));
     paramsBuilder.addSystemMessage(AssistantContextualizer.getServerContext());
     paramsBuilder.addSystemMessage(AssistantContextualizer.getRequestContext(requestContext));

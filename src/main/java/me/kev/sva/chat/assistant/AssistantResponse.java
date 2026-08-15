@@ -368,9 +368,31 @@ public class AssistantResponse {
     return cleaned;
   }
 
-  /** 1.5 uses local Java wiki retrieval, so model tool calls are ignored. */
+  /**
+   * 1.6 keeps read/context tools local but allows a small explicit list of ACTION
+   * calls in the same model response. ToolManager performs the real allow-list and
+   * activation/approval checks before anything can affect the server.
+   */
   private List<String> normalizeToolCalls(List<String> input) {
-    return List.of();
+    if (!plugin.getConfig().getBoolean("tools.enabled", true)) {
+      return List.of();
+    }
+    int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
+    if (maxCalls == 0 || input == null || input.isEmpty()) {
+      return List.of();
+    }
+
+    List<String> result = new ArrayList<>();
+    for (String raw : input) {
+      if (result.size() >= maxCalls) break;
+      if (raw == null) continue;
+      String call = raw.replaceAll("[\r\n]+", " ")
+          .replaceAll("\\s{2,}", " ")
+          .trim();
+      if (call.isBlank() || call.length() > 220) continue;
+      result.add(call);
+    }
+    return List.copyOf(result);
   }
 
   private String toYaml(

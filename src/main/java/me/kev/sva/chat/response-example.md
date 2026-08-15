@@ -1,34 +1,27 @@
-## Normal reply
+## Compact 1.6 provider envelope
 
-```yml
-messages:
-  - "Hello world, I'm a really smart assistant."
-tool-calls: []
-close-conversation: false
+Normal reply:
+
+```json
+{"m":["hola, qué pasa?"],"t":[]}
 ```
 
-## Wiki tool call
+Reply + harmless action in the same model response:
 
-```yml
-messages: []
-tool-calls:
-  - "wiki commands"
-close-conversation: false
+```json
+{"m":["eso sonó bastante literal xd"],"t":["sound anvil"]}
 ```
 
-## Natural ending
+Moderation action requiring Java/admin approval when `mute.activation: ask`:
 
-```yml
-messages:
-  - "You're welcome!"
-tool-calls: []
-close-conversation: true
+```json
+{"m":["eso ya se está pasando un poco"],"t":["mute PlayerName"]}
 ```
 
-## No response
+No response:
 
-```yml
-messages: []
-tool-calls: []
-close-conversation: false
+```json
+{"m":[],"t":[]}
 ```
+
+Wiki/player-data/inventory are local context sources in 1.6 and therefore are not returned as model tool calls during normal scenes.

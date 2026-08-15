@@ -1,38 +1,64 @@
 # Changelog
 
-## Build system - automatic version propagation
+## 1.6.0 - Global conversation + alternate-branch feature merge
 
-- `pom.xml` is now the single source of truth for the project version.
-- `plugin.yml` receives `${project.version}` through Maven resource filtering.
-- GitHub Actions discovers the artifactId/version from `pom.xml` and uploads the generated JAR dynamically.
-- GitHub Actions no longer contains a hard-coded `target/ServerAssistant-X.Y.Z.jar` path.
-- Updated official GitHub actions to Node 24-capable majors (`checkout@v5`, `setup-java@v5`, `upload-artifact@v6`).
-- `build_replace.py` no longer requires `target/` to exist before the first build.
+### Preserved from MDVCRAFT 1.5.x
+
+- One global public conversation; no player/group slots and no busy notices.
+- Per-player smart follow-up timers.
+- Pre-trigger lookback + post-trigger scene capture.
+- Local involvement/relevance filtering before token caps.
+- Events are local context only and never create requests by themselves.
+- Small filtered scene history.
+- Local one-call wiki retrieval.
+- Serialized provider requests, local RPM/cooldown handling, optional fallback.
+- Protocol leak blocking, plain-text recovery and assistant self-prefix stripping.
+- Dynamic Maven/GitHub artifact versioning.
+
+### Merged/improved from the alternate branch
+
+- Added trusted current time/date/online-player context.
+- Admin authority is marked only from Bukkit OP/`sva.admin`, never from player-written text.
+- Added local Player Data context.
+- Added local Inventory context.
+- Added curated Sound action.
+- Added harmless visual Lightning action.
+- Added configurable Mute action.
+- Added Schedule action; unlike the alternate branch TODO, this is implemented and schedules an already-generated line without another AI request.
+- Added `smart` / `ask` / `never` tool modes.
+- `ask` now has a real Java approval queue instead of trusting the model to ask first.
+- Added `/sva approve <id>` and `/sva deny <id>`.
+- Added `/sva tools list|pending|set|run`.
+- Added `/sva trigger`.
+- Added `/sva listener` and `/sva listen` controls for chat modes/events.
+- Fixed the alternate event-toggle behavior so `disabled` actually stores `false`.
+- Added optional idle scheduling from the alternate config and implemented it for real; disabled by default to protect API spend.
+- Added `/sva listener idle <enabled|disabled>`.
+- Wiki loader accepts the MDVCRAFT `advanced-context.wiki` layout and alternate `tools.wiki.pages` layout.
+- Context tools are pre-resolved locally rather than causing tool-call -> second-model-request loops.
+- Action calls return in the same compact response and are validated by a Java allow-list.
+
+### Naturalness/context improvements
+
+- Bundled Isolda 2.1 prompt discourages RPG/NPC receptionist patterns, repetitive "aventuras/historias/Gamura" phrasing and forced questions.
+- Default temperature raised to `0.85` for a little more conversational variation.
+- Trusted recent-event lookup can answer questions like `quien llegó?` from local event memory without always sending event logs.
+- Server context exposes online names compactly so Isolda does not guess who is connected.
+
+### Safety/abuse limits
+
+- `mute` defaults to `ask` and protects OP/`sva.admin` targets by default.
+- Action tools are explicit allow-listed names only; arbitrary console commands are not exposed.
+- Max action calls per response and approval queue size/expiry are configurable.
+- Schedule delays/pending count are bounded.
+- Player/inventory local context and wiki chunks have configurable caps.
 
 ## 1.5.1 - Per-player smart follow-up
 
-- `smart-follow-up-ms` is now tracked independently per player.
-- Only players who directly addressed Isolda in the answered scene may continue without saying `Iso` again.
+- Smart continuation rights are tracked independently per player.
 - Context-only participants do not inherit follow-up rights.
-- Multiple direct addressers inside one capture each receive their own timer.
-- Expired/disconnected players are removed from the follow-up map.
-- `/sva status` now reports `smart_followups=<count>`.
-- Smart follow-up scenes no longer seed every actor from the previous scene into the new relevance filter; the compact scene history already provides continuity, reducing unrelated context/tokens.
 
 ## 1.5.0 - Single Global Conversation
 
-Major routing rewrite based on MDVCRAFT live testing.
-
-- Removed player conversation slots, warm sessions, participant join routing, hand-offs, busy notices and group-slot lifecycle.
-- Isolda now has one global public-chat conversation.
-- A direct mention (or short global smart follow-up) opens one scene window.
-- Scene defaults: 10s local lookback + 1.5s post-trigger capture, max 10 relevant chat lines and 2 relevant events.
-- Public chat/events are kept in local rolling logs and cost zero AI tokens until a scene is triggered.
-- Java expands an involvement graph (A -> B mentions A -> C mentions B -> C kills B) and filters unrelated players before sending context.
-- Events never trigger AI requests on their own.
-- One normal model request per scene. Removed the model wiki tool loop from the request path.
-- Wiki lookup is now local Java retrieval before the model request, with configurable max sections/size.
-- Short scene memory keeps only a configurable number of recent filtered lines/replies.
-- No "Isolda is busy with other conversations" message exists anymore.
-- Provider requests remain serialized; extra completed scenes can wait in a small global queue.
-- Kept OpenAI/Gemini provider fallback, rate-limit cooldown handling, output sanitation and self-prefix/protocol leak protections.
+- Replaced logical conversation slots/groups with one global scene pipeline.
+- Added local chat/event rolling logs, involvement filtering and one-call local wiki retrieval.

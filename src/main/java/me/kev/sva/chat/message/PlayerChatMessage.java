@@ -25,7 +25,7 @@ public class PlayerChatMessage extends ChatMessage {
     this.playerId = player.getUniqueId();
     this.playerName = player.getName();
     this.displayName = PlainTextComponentSerializer.plainText().serialize(player.displayName());
-    this.admin = player.isOp();
+    this.admin = player.isOp() || player.hasPermission("sva.admin");
     this.header = "[PLAYER name=" + playerName + " admin=" + admin + "] " + displayName + " > ";
   }
 

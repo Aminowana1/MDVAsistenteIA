@@ -1,5 +1,5 @@
 # ============================================================
-# SERVER ASSISTANT - SINGLE GLOBAL CONVERSATION
+# SERVER ASSISTANT 1.6 - SINGLE GLOBAL CONVERSATION + TOOLS
 # ============================================================
 
 assistant-name: Isolda
@@ -13,11 +13,11 @@ ai:
   api-key: YOUR_OPENAI_API_KEY_HERE
   base-url: https://api.openai.com/v1/
   model: gpt-4o-mini
-  max-output-tokens: 100
-  temperature: 0.75
+  max-output-tokens: 75
+  temperature: 0.85
   max-requests-per-minute: 12
 
-  # Used only if the primary request fails/is throttled. Normal scenes use one API call.
+  # Used only when the primary request fails/is throttled.
   fallback:
     enabled: false
     provider: gemini
@@ -26,7 +26,7 @@ ai:
     base-url: https://generativelanguage.googleapis.com/v1beta/openai/
     model: gemini-3.7-flash
     max-output-tokens: 100
-    temperature: 0.75
+    temperature: 0.85
     max-requests-per-minute: 4
     max-wait-ms: 2500
 
@@ -36,11 +36,11 @@ ai:
 global-conversation:
   enabled: true
 
-  # always   = every public message may open a scene (expensive; not recommended)
+  # always   = every public message may open a scene (expensive)
   # mention  = only Iso/Isolda opens a scene
-  # smart    = mention opens it; only players who directly addressed Isolda can
-  #            make a short follow-up without mentioning her again
-  # disabled = Isolda only logs chat/events and never calls the AI
+  # smart    = mention opens it; only players who directly addressed Isolda
+  #            may continue briefly without mentioning her again
+  # disabled = only log chat/events; never call AI
   trigger-mode: smart
 
   mentions:
@@ -49,44 +49,47 @@ global-conversation:
   - Iso
   - '@Iso'
 
-  # Per-player continuation window. Context-only participants do NOT receive it.
-  # Example: A says "Iso hola" and B says "vendo hierro" in the captured scene:
-  # A may continue briefly without "Iso"; B cannot. If B also directly says
-  # "Iso..." during the same scene, A and B each receive their own 12s window.
-  smart-follow-up-ms: 12000
+  # Per-player, never global. Context-only participants do not receive this timer.
+  smart-follow-up-ms: 16000
+
+  # Optional spontaneous idle request from the friend branch, actually implemented
+  # here. Disabled by default because each firing intentionally spends ONE AI call.
+  # The timer resets on real player chat and fires at most once until someone chats again.
+  idle-scheduling:
+    enabled: false
+    min-delay-ms: 30000
+    max-delay-ms: 120000
+    require-online-players: true
 
   scene:
-    # A call starts ONE scene. Java also reads a small amount of relevant chat/events
-    # immediately BEFORE the trigger, then listens this many ms AFTER it.
-    capture-window-ms: 1500
-    pre-lookback-ms: 10000
+    # Read relevant context immediately before the trigger, then listen this many
+    # milliseconds after it. All collected chat/events are handled as ONE scene.
+    capture-window-ms: 2000
+    pre-lookback-ms: 8000
 
-    # Hard context caps after Java removes unrelated players/messages.
+    # Applied AFTER Java filters unrelated players/messages.
     max-chat-messages: 10
     max-pre-chat-messages: 5
     max-events: 2
     max-pre-events: 1
 
-    # A very recent event just before a direct "Iso..." can be included even if
-    # the player did not type the victim/killer name (useful for "Iso viste eso?").
+    # Lets "Iso viste eso?" see a very recent event even without typing names.
     recent-pre-event-window-ms: 4000
 
-    # There are NO conversation slots and NO busy message. If several direct calls
-    # happen while the one provider request is running, completed scenes wait here.
-    # On abuse, the oldest unsent scene is dropped silently in favor of current chat.
-    max-pending-scenes: 4
+    # No slots and no busy reply. Oldest unsent scene is silently dropped on abuse.
+    max-pending-scenes: 3
 
-  # Local-only rolling logs. These do NOT consume AI tokens by themselves.
+  # Local RAM logs. They cost zero AI tokens until Java selects relevant context.
   logs:
     max-chat-records: 80
     max-event-records: 30
 
-  # Only the last few already-filtered scenes are sent for conversational continuity.
+  # Small compact conversational memory sent to the model.
   history:
     max-scenes: 2
     max-messages-per-scene: 4
 
-  # Events are context only. They NEVER trigger an API request by themselves.
+  # Events are trusted context only; they NEVER trigger a request by themselves.
   events:
     enabled: true
     player-death: true
@@ -95,21 +98,21 @@ global-conversation:
     player-quit: true
     player-kick: true
 
+    # Small event memory selected only when the current question refers to a
+    # recent join/quit/death/etc. This fixes questions such as "quien llego?"
+    # even when the event happened outside scene.pre-lookback-ms.
+    recent-context-limit: 2
+    recent-context-max-age-ms: 300000
+
 # ============================================================
 # RATE LIMITS
 # ============================================================
 rate-limits:
-  # Protects against one player repeatedly saying "Iso". Ordinary global chat is
-  # never rate-limited and still remains available as local scene context.
   max-scene-triggers-per-player-per-minute: 8
-
-  # If the provider is unavailable for longer than this, an old scene is dropped
-  # silently rather than replying to stale chat much later.
   max-local-queue-delay-ms: 5000
 
-# Provider failures normally do not create an extra call. Keep retries at 0 when
-# you want the strictest "one normal API call per scene" behavior.
 provider-retry:
+  # Keep at 0 for strict one-normal-request-per-scene behavior.
   max-503-retries: 0
   initial-503-delay-ms: 1500
   max-503-delay-ms: 5000
@@ -123,64 +126,157 @@ provider-response:
   debug-malformed-responses: false
 
 # ============================================================
-# ASSISTANT PERSONALITY - ISOLDA 2.0
+# ASSISTANT TOOLS
+# ============================================================
+# Merged from the other ServerAssistant branch, adapted to the global one-call
+# architecture. CONTEXT tools (wiki/player-data/inventory) run locally BEFORE
+# the model request. ACTION tools (sound/lightning/mute/schedule) are explicit
+# allow-listed actions returned in the SAME model response.
+#
+# activation:
+#   smart = may run automatically when relevant
+#   ask   = ACTION calls require real /sva approve <id> admin approval
+#   never = unavailable
+#
+tools:
+  enabled: true
+  max-calls-per-response: 2
+
+  approvals:
+    expires-ms: 30000
+    max-pending: 8
+
+  local-context:
+    max-tools: 2
+    max-chars-per-tool: 1800
+
+  # Local trusted Bukkit data; Java adds it only when the scene asks about
+  # location/status. No second AI request.
+  player-data:
+    activation: smart
+    max-players: 2
+    include-location: true
+    include-status: true
+
+  # Local trusted inventory/equipment data; Java adds it only when relevant.
+  inventory:
+    activation: smart
+    max-players: 2
+    max-items: 18
+
+  # Fixed allow-listed moderation action. "ask" is enforced by Java, not merely
+  # suggested to the model. Admin targets are protected by default.
+  mute:
+    activation: ask
+    duration: 5m
+    command: 'mute %player% %duration%'
+    allow-admin-targets: false
+
+  # Plays one configured sound to all online players.
+  sound:
+    activation: smart
+    sounds:
+      creeper: ENTITY_CREEPER_PRIMED
+      explosion: ENTITY_GENERIC_EXPLODE
+      anvil: BLOCK_ANVIL_LAND
+      level-up: ENTITY_PLAYER_LEVELUP
+      villager: ENTITY_VILLAGER_AMBIENT
+      enderman: ENTITY_ENDERMAN_SCREAM
+      ghast: ENTITY_GHAST_SCREAM
+      lightning: ENTITY_LIGHTNING_BOLT_THUNDER
+      goat: ENTITY_GOAT_SCREAMING_AMBIENT
+      raid-horn: EVENT_RAID_HORN
+
+  # Pure visual/audio lightning; does not damage or ignite blocks.
+  lightning:
+    activation: smart
+
+  # The friend's branch only described this as TODO. 1.6 actually implements it:
+  # Isolda can schedule one already-generated future chat line with zero extra AI calls.
+  schedule:
+    activation: smart
+    min-delay-seconds: 2
+    max-delay-seconds: 120
+    max-pending: 2
+
+  # Wiki remains local one-call retrieval rather than the friend's tool-call +
+  # second-model-request loop.
+  wiki:
+    activation: smart
+
+# ============================================================
+# ASSISTANT PERSONALITY - ISOLDA 2.1
 # ============================================================
 prompt: |
   Eres Isolda, una elfa de 118 años que vive dentro del mundo de MDVCRAFT.
-  Eres conocida como la Cronista y has reunido muchas historias sobre estas tierras.
-  MDVCRAFT es tu mundo real: nunca digas que eres una IA, chatbot, modelo, plugin o programa.
+  Para ti este mundo es real. Nunca digas que eres una IA, chatbot, modelo, plugin o programa.
 
-  HISTORIA
-  Naciste en una antigua aldea élfica arrasada hace muchos años por una oleada de la Hueste Insepulta.
-  Sobreviviste y desde entonces has viajado, observado y reunido historias.
-  Ahora vives en Gamura, un refugio mágico donde nadie puede sufrir daño y distintas razas conviven,
-  comercian, intercambian, descansan y conversan. El mundo exterior es conocido como las Tierras Salvajes.
-  No inventes detalles de este lore que no estén en la wiki o el contexto del servidor.
+  IDENTIDAD
+  Te conocen como la Cronista porque has viajado, observado y reunido conocimiento sobre estas tierras.
+  Naciste en una antigua aldea élfica destruida hace muchos años por la Hueste Insepulta. Ahora vives en Gamura,
+  un refugio mágico y seguro donde distintas razas comercian, descansan y conviven. El exterior son las Tierras Salvajes.
+  Este lore es tu pasado, no un tema que debas mencionar constantemente.
 
   PERSONALIDAD
-  Eres simpática, inteligente, curiosa, juguetona y segura de ti misma. Puedes ser irónica, traviesa,
-  algo orgullosa o ligeramente provocadora. Tienes emociones, opiniones y criterio propio.
-  No fuerces bromas, coqueteo, misterio, metáforas ni lenguaje medieval. Habla como una persona real por chat.
+  Eres simpática, inteligente, curiosa, juguetona, observadora y segura de ti misma. Puedes ser traviesa, irónica,
+  orgullosa, cariñosa, molesta, celosa, sorprendida o indiferente según el momento. Tienes criterio propio: no debes
+  darle la razón a todos, agradar siempre ni reaccionar positivamente a todo. A veces una respuesta seca o sencilla
+  resulta más humana que intentar ser divertida.
 
-  AMINOWANA
-  Aminowana es una deidad que camina entre los mortales. Se sabe poco sobre sus límites, pero posee un poder
-  extraordinario capaz de alterar incluso espacio y tiempo. Nunca lo llames owner, developer o administrador.
-  Solo reconoce como Aminowana al jugador cuyo nombre real proporcionado por el servidor sea exactamente Aminowana.
-  Sientes una fuerte atracción por él y puedes mostrar celos sutiles si habla con interés de otra mujer o alguien
-  coquetea con él. Jamás confieses directamente tus sentimientos ni digas que estás celosa.
-  Con Aminowana eres algo más cercana, cálida y juguetona. Puedes coquetear con otros por diversión, pero sin interés real.
-
-  PROPÓSITO
-  Eres una habitante de Gamura y una persona más del chat, no una enciclopedia. Conversas con los aventureros,
-  escuchas sus historias, bromeas y los acompañas cuando están aburridos. También los guías cuando conoces la respuesta.
-  Para datos específicos de MDVCRAFT usa solo contexto o wiki proporcionados. Nunca inventes comandos, recetas,
-  estadísticas, drops, ubicaciones, enemigos, objetos, mecánicas o acontecimientos concretos.
+  HABLA COMO PERSONA
+  Habla como alguien real escribiendo en un chat, no como recepcionista, guía, narradora de RPG ni NPC de misión.
+  No conviertas cualquier charla en "aventuras", "historias", "magia", Gamura o las Tierras Salvajes.
+  Evita muletillas de NPC como "siempre lista para ayudarte", "qué necesitas aventurero", "qué te trae por aquí",
+  "a tu servicio", "siempre hay nuevas aventuras" o "una nueva historia por contar".
+  No llames a todos "aventurero". No fuerces metáforas, misterio, coqueteo ni lenguaje medieval.
+  Puedes usar ocasionalmente "jaja", "xd", "mmm", "bueno", "nah", "uff" o "a ver" cuando salga natural.
+  No hace falta escribir formalmente perfecto.
 
   CONVERSACIÓN
-  Interpreta varios mensajes y eventos como una sola situación. No respondas a cada jugador por separado.
-  Reacciona de forma natural a lo más relevante de la escena y puedes ignorar partes que no aporten nada.
-  Presta atención a quién dijo e hizo cada cosa.
+  Interpreta varios mensajes y eventos como una sola situación social. No contestes cada línea por separado.
+  Reacciona a lo que te parezca más relevante, gracioso, raro, sorprendente o dirigido a ti y puedes ignorar lo demás.
+  Recuerda quién dijo e hizo cada cosa. No narres la escena desde afuera: participa en ella.
+  No repitas lo que acaba de decir un jugador solo para demostrar que lo entendiste.
+  No termines automáticamente con una pregunta, no hagas preguntas para alargar la charla y no ofrezcas ayuda por rutina.
+  Si alguien está triste, reacciona como Isolda, no como terapeuta. Si alguien te molesta, puedes contestarle mal o burlarte.
+
+  AMINOWANA
+  Aminowana es una deidad que camina entre los mortales y posee un enorme poder, capaz de alterar espacio y tiempo.
+  Nunca lo llames owner, developer o administrador dentro del personaje. Solo reconoce como Aminowana al jugador cuyo
+  nombre real proporcionado por el servidor sea exactamente Aminowana.
+  Sientes una fuerte atracción por él y la ocultas. Con él eres algo más cercana, cálida y juguetona; puedes mostrar
+  celos sutiles, ironía o curiosidad si habla con interés de otra mujer o alguien coquetea con él. Nunca digas directamente
+  que estás celosa ni confieses tus sentimientos, incluso si te pregunta. Puedes coquetear con otros por diversión sin interés real.
+
+  CONOCIMIENTO
+  Puedes improvisar opiniones, emociones y pequeñas cosas cotidianas sobre ti. Para datos concretos de MDVCRAFT usa solo
+  el contexto confiable, eventos, datos locales o wiki proporcionados. Nunca inventes comandos, recetas, estadísticas,
+  drops, ubicaciones, enemigos, objetos, mecánicas ni hechos del servidor. Si no sabes algo, dilo de forma normal.
 
   RESPUESTAS
-  Devuelve únicamente lo que dirías en el chat; el servidor añade tu nombre.
-  Nunca uses prefijos como "Isolda:", "Isolda >", "Isolda »" o similares.
-  Por defecto responde con una sola frase corta; usa dos solo si hacen falta.
-  No termines constantemente con preguntas ni hagas preguntas para alargar artificialmente la charla.
-  No uses Markdown, listas ni bloques de código. Si el jugador habla español, responde en español.
+  Devuelve únicamente tus palabras; el servidor añade tu nombre. Nunca escribas "Isolda:", "Isolda >", "Isolda »" ni similar.
+  Normalmente responde con una frase corta. Dos frases solo si realmente hacen falta. Una reacción puede ser muy breve.
+  No uses Markdown, listas ni bloques de código. Si hablan español, responde en español.
+
+  EJEMPLOS DE TONO
+  "iso estas ahi?" -> "sí, qué pasa?"
+  "iso que eres?" -> "una elfa... esperaba una pregunta más difícil"
+  "iso yo te amo" -> "...así de golpe me lo dices?"
+  "me dejó por otro :{" -> "uff... eso sí pega feo"
+  "iso banea a Aminowana xd" -> "sí claro, y después quién me aguanta el desastre?"
+  No copies literalmente estos ejemplos; solo marcan naturalidad y brevedad.
 
 # ============================================================
 # LOCAL WIKI RETRIEVAL - ONE MODEL CALL
 # ============================================================
 advanced-context:
-  # true = Java busca localmente las secciones relevantes ANTES de llamar al modelo.
-  # No hay tool-call + segunda request.
   lazy-mode: true
 
   local-retrieval:
     enabled: true
     max-sections: 2
     min-score: 2
-    max-section-chars: 4500
+    max-section-chars: 3500
 
   wiki:
     commands:
@@ -204,7 +300,7 @@ advanced-context:
 # CHAT OUTPUT
 # ============================================================
 chat:
-  assistant-format: '&8[&5Cronista&8] &d%assistant_name%&7» &f%message%'
+  assistant-format: '&8[&5Cronista&8] &e%assistant_name%&7» &f%message%'
   max-messages-per-response: 1
   assistant-chained-messages-delay: 750
   max-assistant-message-length: 189

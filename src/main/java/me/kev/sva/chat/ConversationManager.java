@@ -14,10 +14,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -32,7 +34,7 @@ import me.kev.sva.chat.message.SystemContextMessage;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 
 /**
- * ServerAssistant 1.5: one public global conversation.
+ * ServerAssistant 1.6: one public global conversation with local context/tools.
  *
  * <p>There are no player/group slots. A direct call (or a short smart follow-up)
  * opens one configurable scene window. Java reads a small amount of public chat
@@ -59,6 +61,7 @@ public final class ConversationManager {
   private ActiveCapture activeCapture;
   private BukkitTask captureTask;
   private BukkitTask requestRateRetryTask;
+  private BukkitTask idleScheduleTask;
   private boolean requestInFlight = false;
   private boolean shutdown = false;
   private long nextSceneId = 1L;
@@ -97,7 +100,10 @@ public final class ConversationManager {
         + ", chat_log=" + publicChatLog.size()
         + ", event_log=" + serverEventLog.size()
         + ", history_scenes=" + sceneHistory.size()
-        + ", smart_followups=" + activeSmartFollowUps();
+        + ", smart_followups=" + activeSmartFollowUps()
+        + ", idle_timer=" + (idleScheduleTask == null ? "off" : "scheduled")
+        + ", pending_tool_approvals=" + (plugin.getToolManager() == null
+            ? 0 : plugin.getToolManager().pendingApprovalSummaries().size());
   }
 
   private String providerStatus(String role, me.kev.sva.chat.assistant.ProviderSettings settings) {
@@ -116,8 +122,10 @@ public final class ConversationManager {
     shutdown = true;
     cancelTask(captureTask);
     cancelTask(requestRateRetryTask);
+    cancelTask(idleScheduleTask);
     captureTask = null;
     requestRateRetryTask = null;
+    idleScheduleTask = null;
     activeCapture = null;
     sceneQueue.clear();
     publicChatLog.clear();
@@ -154,6 +162,7 @@ public final class ConversationManager {
     long now = System.currentTimeMillis();
     PublicChatRecord record = snapshotPlayerMessage(player, content, now);
     rememberPublicChat(record);
+    scheduleIdleRequestAfterActivity();
 
     if (!plugin.getConfig().getBoolean("global-conversation.enabled", true)) {
       return;
@@ -202,6 +211,128 @@ public final class ConversationManager {
     }
   }
 
+  /**
+   * Administrative equivalent of the friend's /sva trigger command. It opens one
+   * normal global scene without broadcasting a fake player message to Minecraft.
+   * The synthetic admin line exists only inside the local log/model context.
+   */
+  public boolean forceTrigger(CommandSender sender) {
+    if (shutdown || activeCapture != null) {
+      return false;
+    }
+    long now = System.currentTimeMillis();
+    UUID id;
+    String name;
+    String display;
+    if (sender instanceof Player player) {
+      id = player.getUniqueId();
+      name = player.getName();
+      display = PlainTextComponentSerializer.plainText().serialize(player.displayName());
+    } else {
+      id = new UUID(0L, 0L);
+      name = "CONSOLE";
+      display = "CONSOLE";
+    }
+    String assistantName = plugin.getConfig().getString("assistant-name", "Isolda");
+    PublicChatRecord synthetic = new PublicChatRecord(
+        now, id, name, display, true,
+        (assistantName == null || assistantName.isBlank() ? "Isolda" : assistantName)
+            + ", reacciona al chat reciente si hay algo que valga la pena.");
+    rememberPublicChat(synthetic);
+    startCapture(synthetic, true, false);
+    return true;
+  }
+
+  /**
+   * Optional compatibility/improvement over the friend's request-triggers.scheduling
+   * idea. One timer is reset by real player chat. If the server then stays quiet,
+   * Java may enqueue ONE idle scene. Disabled by default because it intentionally
+   * spends an API request without requiring an Isolda mention.
+   */
+  private void scheduleIdleRequestAfterActivity() {
+    cancelTask(idleScheduleTask);
+    idleScheduleTask = null;
+
+    if (shutdown
+        || !plugin.getConfig().getBoolean("global-conversation.enabled", true)
+        || !plugin.getConfig().getBoolean("global-conversation.idle-scheduling.enabled", false)) {
+      return;
+    }
+
+    long min = Math.max(plugin.getConfig().getLong(
+        "global-conversation.idle-scheduling.min-delay-ms", 30_000L), 1_000L);
+    long max = Math.max(plugin.getConfig().getLong(
+        "global-conversation.idle-scheduling.max-delay-ms", 120_000L), min);
+    long delay = min == max ? min : ThreadLocalRandom.current().nextLong(min, max + 1L);
+    long ticks = Math.max(1L, (delay + 49L) / 50L);
+
+    idleScheduleTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+      idleScheduleTask = null;
+      enqueueIdleScene();
+    }, ticks);
+  }
+
+  private void enqueueIdleScene() {
+    if (shutdown
+        || !plugin.getConfig().getBoolean("global-conversation.enabled", true)
+        || !plugin.getConfig().getBoolean("global-conversation.idle-scheduling.enabled", false)) {
+      return;
+    }
+    if (plugin.getConfig().getBoolean(
+        "global-conversation.idle-scheduling.require-online-players", true)
+        && Bukkit.getOnlinePlayers().isEmpty()) {
+      return;
+    }
+
+    // Do not stack an autonomous thought behind active player interaction.
+    if (activeCapture != null || requestInFlight || requestRateRetryTask != null || !sceneQueue.isEmpty()) {
+      return;
+    }
+
+    long sceneId = nextSceneId++;
+    List<ChatMessage> modelMessages = new ArrayList<>();
+    int historyScenes = Math.max(
+        plugin.getConfig().getInt("global-conversation.history.max-scenes", 2), 0);
+    if (historyScenes > 0 && !sceneHistory.isEmpty()) {
+      List<SceneMemory> memories = new ArrayList<>(sceneHistory);
+      int start = Math.max(0, memories.size() - historyScenes);
+      for (int i = start; i < memories.size(); i++) {
+        SceneMemory memory = memories.get(i);
+        modelMessages.addAll(memory.messages());
+        if (!memory.assistantReply().isBlank()) {
+          modelMessages.add(new AssistantChatMessage(plugin, memory.assistantReply()));
+        }
+      }
+    }
+
+    SystemContextMessage idle = new SystemContextMessage(
+        plugin,
+        "[IDLE] ",
+        "El chat lleva un rato tranquilo. Puedes hacer un comentario espontaneo y natural basado solo en el contexto real disponible, o guardar silencio.");
+    modelMessages.add(idle);
+    List<ChatMessage> current = List.of(idle);
+
+    SceneRequest scene = new SceneRequest(
+        sceneId,
+        List.copyOf(modelMessages),
+        current,
+        Set.of(),
+        Set.of(),
+        Set.of(),
+        AssistantRequestContext.scene(
+            sceneId,
+            "none",
+            "trigger=idle_scheduling, chat_lines=0, events=0",
+            "",
+            "",
+            ""),
+        AssistantManager.PRIMARY,
+        0);
+
+    sceneQueue.addLast(scene);
+    processNextRequest();
+  }
+
   private String configuredTriggerMode() {
     String mode;
     if (plugin.getConfig().isSet("global-conversation.trigger-mode")) {
@@ -238,7 +369,7 @@ public final class ConversationManager {
         player.getUniqueId(),
         player.getName(),
         displayName,
-        player.isOp(),
+        player.isOp() || player.hasPermission("sva.admin"),
         content);
   }
 
@@ -475,6 +606,10 @@ public final class ConversationManager {
     modelMessages.addAll(currentMessages);
 
     String wiki = retrieveLocalWiki(currentMessages);
+    String localTools = plugin.getToolManager() == null
+        ? ""
+        : plugin.getToolManager().buildLocalContext(currentMessages, involvedNames);
+    String recentEvents = retrieveRecentEventContext(currentMessages);
     String involved = involvedNames.isEmpty() ? "none" : String.join(",", involvedNames);
     String meta = "window_ms=" + Math.max(0L, capture.endsAt() - capture.triggerAt())
         + ", chat_lines=" + selectedChats.size()
@@ -488,7 +623,7 @@ public final class ConversationManager {
         Set.copyOf(involvedIds),
         Set.copyOf(involvedNames),
         Set.copyOf(eligibleAddressers),
-        AssistantRequestContext.scene(capture.sceneId(), involved, meta, wiki),
+        AssistantRequestContext.scene(capture.sceneId(), involved, meta, wiki, localTools, recentEvents),
         AssistantManager.PRIMARY,
         0);
   }
@@ -612,11 +747,83 @@ public final class ConversationManager {
     }
   }
 
+  /**
+   * A tiny event memory lets questions such as "Iso quién llegó?" work even when
+   * the join happened before the normal 8-10 second chat lookback. It is selected
+   * only when the current scene semantically refers to a recent event.
+   */
+  private String retrieveRecentEventContext(List<ChatMessage> currentMessages) {
+    if (!plugin.getConfig().getBoolean("global-conversation.events.enabled", true)) {
+      return "";
+    }
+
+    StringBuilder raw = new StringBuilder();
+    for (ChatMessage message : currentMessages) {
+      if (message != null && message.content != null) raw.append(message.content).append(' ');
+    }
+    String query = normalizeForSearch(raw.toString());
+    if (query.isBlank()) return "";
+
+    Set<String> wanted = new LinkedHashSet<>();
+    if (containsAnyTerm(query, "llego", "llegado", "entro", "entrado", "conecto", "join", "online nuevo")) {
+      wanted.add("player-join");
+    }
+    if (containsAnyTerm(query, "se fue", "salio", "desconecto", "desconectado", "quit", "left")) {
+      wanted.add("player-quit");
+      wanted.add("player-kick");
+    }
+    if (containsAnyTerm(query, "murio", "mori", "muerte", "mato", "matado", "kill", "killed", "morir")) {
+      wanted.add("player-death");
+    }
+    if (containsAnyTerm(query, "logro", "avance", "advancement", "achievement")) {
+      wanted.add("player-advancement");
+    }
+    boolean genericRecentReference = containsAnyTerm(
+        query, "que paso", "q paso", "viste eso", "viste lo", "que ocurrio", "eso que fue");
+    if (wanted.isEmpty() && !genericRecentReference) return "";
+
+    int limit = Math.max(plugin.getConfig().getInt(
+        "global-conversation.events.recent-context-limit", 2), 0);
+    long maxAge = Math.max(plugin.getConfig().getLong(
+        "global-conversation.events.recent-context-max-age-ms", 300_000L), 0L);
+    if (limit == 0 || maxAge == 0L) return "";
+
+    long now = System.currentTimeMillis();
+    List<ServerEventRecord> candidates = new ArrayList<>(serverEventLog);
+    candidates.sort(Comparator.comparingLong(ServerEventRecord::timestampMs).reversed());
+    String currentText = raw.toString().toLowerCase(Locale.ROOT);
+    StringBuilder out = new StringBuilder();
+    int used = 0;
+    for (ServerEventRecord event : candidates) {
+      if (used >= limit) break;
+      long age = now - event.timestampMs();
+      if (age < 0L || age > maxAge) continue;
+      if (!wanted.isEmpty() && !wanted.contains(event.type())) continue;
+      // Do not duplicate an event already embedded as a current scene atom.
+      if (!event.text().isBlank() && currentText.contains(event.text().toLowerCase(Locale.ROOT))) continue;
+      if (!out.isEmpty()) out.append('\n');
+      out.append(Math.max(0L, age / 1000L)).append("s ago ")
+          .append(event.type()).append(": ").append(event.text());
+      used++;
+    }
+    return out.toString();
+  }
+
+  private static boolean containsAnyTerm(String text, String... terms) {
+    for (String term : terms) {
+      if (text.contains(term)) return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------------------
   // LOCAL WIKI RETRIEVAL - NO SECOND MODEL CALL
   // ---------------------------------------------------------------------------
 
   private String retrieveLocalWiki(List<ChatMessage> currentMessages) {
+    if (plugin.getToolManager() != null && !plugin.getToolManager().isToolEnabled("wiki")) {
+      return "";
+    }
     if (!plugin.getConfig().getBoolean("advanced-context.lazy-mode", true)) {
       return fullWikiContext();
     }
@@ -624,7 +831,7 @@ public final class ConversationManager {
       return "";
     }
 
-    ConfigurationSection wiki = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
+    ConfigurationSection wiki = wikiRoot();
     if (wiki == null) {
       return "";
     }
@@ -701,7 +908,7 @@ public final class ConversationManager {
   }
 
   private String fullWikiContext() {
-    ConfigurationSection wiki = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
+    ConfigurationSection wiki = wikiRoot();
     if (wiki == null) {
       return "";
     }
@@ -715,6 +922,13 @@ public final class ConversationManager {
       out.append('[').append(key).append("] ").append(content.trim());
     }
     return out.toString();
+  }
+
+  private ConfigurationSection wikiRoot() {
+    ConfigurationSection modern = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
+    if (modern != null) return modern;
+    // Compatibility with the friend's 1.2 config layout.
+    return plugin.getConfig().getConfigurationSection("tools.wiki.pages");
   }
 
   private static String normalizeForSearch(String input) {
@@ -854,6 +1068,9 @@ public final class ConversationManager {
     if (!reply.isBlank()) {
       response.broadcastMessages();
     }
+    if (plugin.getToolManager() != null && !response.getToolCalls().isEmpty()) {
+      plugin.getToolManager().processModelCalls(response.getToolCalls());
+    }
 
     rememberScene(scene, reply);
     long followUpMs = Math.max(plugin.getConfig().getLong(
@@ -900,8 +1117,15 @@ public final class ConversationManager {
         plugin.getConfig().getInt("global-conversation.history.max-messages-per-scene", 4),
         1);
     List<ChatMessage> source = scene.currentSceneMessages();
+    boolean idleScene = scene.context() != null
+        && scene.context().sceneMeta() != null
+        && scene.context().sceneMeta().contains("trigger=idle_scheduling");
     int start = Math.max(0, source.size() - maxMessages);
-    List<ChatMessage> compactMemory = List.copyOf(source.subList(start, source.size()));
+    // Do not preserve the internal [IDLE] instruction as future conversation text.
+    // The visible spontaneous Isolda line is still remembered through assistantReply.
+    List<ChatMessage> compactMemory = idleScene
+        ? List.of()
+        : List.copyOf(source.subList(start, source.size()));
     sceneHistory.addLast(new SceneMemory(compactMemory, assistantReply == null ? "" : assistantReply));
     while (sceneHistory.size() > keep) {
       sceneHistory.removeFirst();
@@ -982,6 +1206,7 @@ public final class ConversationManager {
     for (String mention : configuredAssistantMentions()) {
       if (mention == null || mention.isBlank()) continue;
       String clean = mention.startsWith("@") ? mention.substring(1) : mention;
+      if (clean.isBlank()) continue;
       if (containsWholeWordIgnoreCase(message, mention) || containsWholeWordIgnoreCase(message, clean)) {
         return true;
       }
@@ -990,7 +1215,7 @@ public final class ConversationManager {
       Pattern stretched = Pattern.compile(
           "(?iu)(?<![\\p{L}\\p{N}_])@?" + Pattern.quote(clean)
               + Pattern.quote(clean.substring(clean.length() - 1)) + "{0,3}(?![\\p{L}\\p{N}_])");
-      if (!clean.isBlank() && stretched.matcher(message).find()) {
+      if (stretched.matcher(message).find()) {
         return true;
       }
     }
