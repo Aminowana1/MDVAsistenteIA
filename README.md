@@ -1,130 +1,98 @@
 # ServerAssistant
 
-Open-source Paper plugin that adds a context-aware AI assistant to a Minecraft server.
+Open-source Paper plugin for a context-aware AI character inside Minecraft.
 
-## 1.3.0 highlights
+## 1.4.0 highlights
 
-Version 1.3.0 keeps the 1.2 group router and switches the AI backend to Gemini 3.7 Flash. Version 1.2 changed the chat router from **one conversation slot per player** to **one slot per logical conversation**. A conversation can contain several players while unrelated public chat remains excluded.
+1.4.0 focuses on reliability, provider independence and lower API/token use.
 
-- `smart` conversations may be individual or group conversations.
-- Default maximum: **2 simultaneous logical conversations**, not 2 players.
-- Default maximum: **6 participants inside one conversation**.
-- `A + B + C + SVA` consumes one slot; `D + SVA` may consume the second.
-- A newcomer can safely join a recent group by referencing an existing participant or using a conservative contextual continuation such as `@SVA y el báculo?`.
-- With several active SVA conversations, ambiguous messages open a new slot (if available) instead of being merged into the wrong group.
-- Every group message keeps its speaker label, so the model can distinguish who said what.
-- Each participant has their own timeout, follow-up limit, rate limit and human-conversation detection state.
-- Talking directly to another member of the same SVA group does not kick anyone out.
-- Talking to someone outside the group releases only that participant from SVA.
-- `gracias`, `chau`, etc. release only the participant who said it; they do not close the rest of the group.
-- AI requests remain globally serialized, keeping response order stable.
-- Player content remains **USER** content in the OpenAI-compatible request format, never SYSTEM content.
-- Tool-call and tool-iteration limits, hard output limits, private busy notices, and API-key environment-variable support remain enabled.
+- Conversation slots are logical conversations, so groups share one slot.
+- Player conversations remain isolated from unrelated public chat.
+- Explicit hand-offs such as `Iso responde a Kroattan` can import only Kroattan's very recent public line instead of exposing all global chat to the model.
+- Provider throttling survives `/sva reload`; reloading can no longer erase a Gemini 429 cooldown and immediately hit the same external quota again.
+- Fresh turns rejected by local/provider limits are no longer committed into conversation history as if the AI had answered them.
+- Per-player message rate limits no longer reset merely because a player leaves one SVA conversation and joins another.
+- 503 retries are bounded and still pass through the same request budget.
+- Output tokens are capped at the provider request (`ai.max-output-tokens`) instead of generating a long answer and discarding most of it afterward.
+- System/request prompts were compacted substantially to reduce repeated input tokens.
+- `ToolManager` is now an explicit allow-list/registry. Only `wiki` is registered in 1.4.0; there is still no arbitrary console-command tool.
+- The AI provider is configurable: Gemini, OpenAI, or another OpenAI-compatible endpoint can be selected from config without recompiling.
+- OpenAI selection is no longer auto-migrated back to Gemini.
+- The OpenAI-compatible client is closed correctly on reload/shutdown.
+- `/sva status` displays provider, model, local 60-second request count, cooldown, queue and active conversation count.
+- GitHub Actions installs its YAML validator explicitly and runs Maven tests/build.
 
 ## Requirements
 
 - Java 21
-- Paper-compatible server using the `1.21` API family
-- Maven 3.9+
-- A Gemini API key (Google AI Studio)
+- Paper-compatible 1.21 server
+- Maven 3.9+ for local builds
+- API key for the configured provider
 
-## Build locally
+## Provider configuration
+
+Gemini example:
+
+```yaml
+ai:
+  provider: "gemini"
+  api-key-env: "GEMINI_API_KEY"
+  api-key: "YOUR_GEMINI_API_KEY_HERE"
+  base-url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  model: "gemini-3.7-flash"
+  max-output-tokens: 128
+  temperature: 0.75
+```
+
+OpenAI / GPT-4o mini example:
+
+```yaml
+ai:
+  provider: "openai"
+  api-key-env: "OPENAI_API_KEY"
+  api-key: "YOUR_OPENAI_API_KEY_HERE"
+  base-url: "https://api.openai.com/v1/"
+  model: "gpt-4o-mini"
+  max-output-tokens: 128
+  temperature: 0.75
+```
+
+Legacy 1.3.x flat provider keys are migrated once into `ai.*` without changing the user's selected model/provider.
+
+## Building
 
 ```bash
 mvn clean package
 ```
 
-The shaded plugin jar is produced at:
+Output:
 
 ```text
-target/ServerAssistant-1.3.0.jar
+target/ServerAssistant-1.4.0.jar
 ```
 
-## Build on GitHub
+GitHub Actions is included at `.github/workflows/build.yml`.
 
-The repository includes `.github/workflows/build.yml`.
+## Free-tier recommendation
 
-1. Upload/push the project to GitHub.
-2. Open the **Actions** tab.
-3. Run **Build ServerAssistant** (or push to `main`/`master`).
-4. Open the finished workflow run.
-5. Download the `ServerAssistant-1.3.0` artifact.
-
-Do **not** commit a real API key. On the Minecraft host, either set the `GEMINI_API_KEY` environment variable or configure `api-key` locally in `plugins/ServerAssistant/config.yml`.
-
-When upgrading from 1.2.0, known default OpenAI placeholders/model values are migrated automatically to the Gemini defaults. A real custom API key is never overwritten; replace it manually with a Gemini key if necessary.
-
-### Updating from 1.1.0
-
-You do not have to delete an existing 1.1/1.2 config just to boot 1.3.0. The old `conversation-control.max-active-player-conversations` value is read as a compatibility fallback when the new `max-active-conversations` key is absent, and the group-routing options have safe Java defaults. Copy the new `group-conversations` block into your live config only if you want to tune those values explicitly.
-
-## How group routing works
-
-Default configuration:
+If the active Gemini project reports a 5 RPM limit, use a lower local limit such as:
 
 ```yaml
-request-triggers:
-  player-messages:
-    mode: smart
-    smart-active-time: 20000
+rate-limits:
+  max-ai-requests-per-minute: 4
+  min-conversation-request-gap-ms: 4000
+  max-local-queue-delay-ms: 5000
 
-conversation-control:
-  max-active-conversations: 2
-
-  group-conversations:
-    enabled: true
-    max-participants: 6
-    join-window-ms: 15000
-    join-on-contextual-follow-up: true
+provider-retry:
+  max-503-retries: 1
 ```
 
-Example:
+The plugin cannot bypass a provider quota. These settings prevent unnecessary 429 loops and reduce wasted calls.
 
-```text
-A: @SVA ¿cómo consigo el set lunar?
-SVA: ...
-B: @SVA y el báculo?
-SVA: ...
-A: ¿cuál pega más?
-B: creo que el báculo
-SVA: ...
-```
+## Security / future 2.0 tools
 
-A and B share one logical conversation and therefore one slot. Their messages carry separate speaker labels in the model context.
-
-An unrelated question stays separate:
-
-```text
-A: @SVA ¿cómo consigo el set lunar?
-D: @SVA ¿cuándo es la próxima raid?
-```
-
-`D` does not contain a contextual continuation or reference to A, so it opens another conversation instead of contaminating A's context.
-
-If two SVA conversations already exist, the router never guesses which one a newcomer meant unless the message explicitly references a participant from exactly one group.
-
-## Security note for future action tools
-
-Version 1.3.0 intentionally does **not** add generic console-command execution. Future 2.0 action tools should be narrowly scoped and validate permissions/arguments in Java. The model must never be the authority that decides whether an administrative action is allowed.
+1.4.0 still has no generic console execution. Plain model text is chat only. Tools must be explicitly registered in `ToolManager`, and unknown tool names are rejected. Future write/action tools should validate player permissions, arguments and current server state in Java before any action occurs.
 
 ## License
 
 MIT. See `LICENSE`.
-
-
-## Gemini 3.7 Flash
-
-ServerAssistant 1.3.0 uses Google's Gemini OpenAI-compatible endpoint by default.
-The default model is `gemini-3.7-flash`.
-
-Recommended configuration:
-
-```yaml
-api-key-env: "GEMINI_API_KEY"
-api-key: "YOUR_GEMINI_API_KEY_HERE"
-api-base-url: "https://generativelanguage.googleapis.com/v1beta/openai/"
-ai-model: "gemini-3.7-flash"
-```
-
-Prefer the `GEMINI_API_KEY` environment variable. Keep real API keys out of public repositories.
-The current plugin continues to use Chat Completions through Gemini's OpenAI-compatible API; the conversation routing, batching, wiki tools and anti-spam behavior are unchanged from 1.2.0.

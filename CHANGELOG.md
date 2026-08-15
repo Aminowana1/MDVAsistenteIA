@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.0
+
+- Provider-neutral `ai.*` configuration: Gemini, OpenAI and generic OpenAI-compatible endpoints can be selected without recompiling.
+- Removed the 1.3.x migration behavior that could rewrite an intentional `gpt-4o-mini` selection back to Gemini.
+- Provider throttle/cooldown state now survives `/sva reload`, preventing reload-driven 429 loops.
+- Added provider-side `max-output-tokens` and temperature configuration.
+- Compacted repeated core/request context to reduce input token use.
+- Default conversation history reduced to 8 logical messages for economical operation.
+- 503 retries reduced to one in the economical default config; retries still consume the shared request budget.
+- Rejected/failed fresh batches are no longer committed to history as unanswered ghost turns.
+- Per-player rate limiting moved outside participant session state so changing conversations does not reset it.
+- Provider-busy notices target only players involved in the rejected batch and have their own notice cooldown.
+- Added explicit recent-public-chat hand-off for cases such as `Iso responde a Kroattan`, without sending all global chat to the model.
+- Converted the empty ToolManager into an explicit allow-list registry; only the read-only wiki tool is registered in 1.4.0.
+- Added `/sva status` for provider/model/request/cooldown/queue diagnostics.
+- OpenAI-compatible HTTP client is closed on reload/shutdown.
+- GitHub workflow installs PyYAML explicitly and Maven now includes a small provider-throttle unit test suite.
+
 ## 1.3.2
 
 - Fixed Gemini responses being silently discarded when the model returns plain text instead of the requested YAML map.

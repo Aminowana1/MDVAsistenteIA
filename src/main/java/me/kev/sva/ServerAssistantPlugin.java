@@ -1,11 +1,13 @@
 package me.kev.sva;
 
 import org.bukkit.Bukkit;
-import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.event.HandlerList;
+import org.bukkit.plugin.java.JavaPlugin;
 
 import me.kev.sva.chat.ChatListener;
 import me.kev.sva.chat.ConversationManager;
+import me.kev.sva.chat.ProviderThrottleRegistry;
+import me.kev.sva.chat.assistant.ProviderSettings;
 import me.kev.sva.commands.CommandManager;
 import me.kev.sva.constants.Constants;
 import me.kev.sva.utils.MessageSender;
@@ -15,12 +17,14 @@ public final class ServerAssistantPlugin extends JavaPlugin {
     private ConversationManager conversationManager;
     private ChatListener chatListener;
 
+    /** Survives /sva reload so provider cooldowns cannot be bypassed by reloading. */
+    private final ProviderThrottleRegistry providerThrottleRegistry = new ProviderThrottleRegistry();
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        migrateLegacyAiDefaults();
+        migrateLegacyProviderConfig();
 
-        // Register command handler
         CommandManager commandManager = new CommandManager(this);
         if (getCommand("sva") != null) {
             getCommand("sva").setExecutor(commandManager);
@@ -33,49 +37,32 @@ public final class ServerAssistantPlugin extends JavaPlugin {
         MessageSender.Success("Plugin enabled successfully.");
     }
 
-
     /**
-     * Migrates only known 1.2.0 default AI settings. Real user secrets/custom
-     * model selections are never overwritten. This makes a drop-in 1.2 -> 1.3
-     * update point at Gemini without requiring users to delete their full config.
+     * One-time, non-destructive migration from the old flat provider keys.
+     * Unlike 1.3.x, it NEVER rewrites a user's OpenAI selection back to Gemini.
      */
-    private void migrateLegacyAiDefaults() {
-        boolean changed = false;
-
-        String keyEnv = getConfig().getString("api-key-env");
-        if (keyEnv == null || keyEnv.isBlank() || "OPENAI_API_KEY".equals(keyEnv)) {
-            getConfig().set("api-key-env", "GEMINI_API_KEY");
-            changed = true;
+    private void migrateLegacyProviderConfig() {
+        if (getConfig().contains("ai.provider")) {
+            return;
         }
 
-        String apiKey = getConfig().getString("api-key");
-        if (apiKey == null || apiKey.isBlank() || "YOUR_API_KEY_HERE".equals(apiKey)) {
-            getConfig().set("api-key", "YOUR_GEMINI_API_KEY_HERE");
-            changed = true;
+        ProviderSettings legacy = ProviderSettings.from(this);
+        getConfig().set("ai.provider", legacy.type());
+        getConfig().set("ai.api-key-env", legacy.apiKeyEnv());
+        getConfig().set("ai.api-key", legacy.apiKey());
+        getConfig().set("ai.base-url", legacy.baseUrl());
+        getConfig().set("ai.model", legacy.model());
+        if (!getConfig().contains("ai.max-output-tokens")) {
+            getConfig().set("ai.max-output-tokens", 96);
         }
-
-        String model = getConfig().getString("ai-model");
-        if (model == null || model.isBlank() || "gpt-4o-mini".equalsIgnoreCase(model)) {
-            getConfig().set("ai-model", "gemini-3.7-flash");
-            changed = true;
+        if (!getConfig().contains("ai.temperature")) {
+            getConfig().set("ai.temperature", 0.75);
         }
-
-        String baseUrl = getConfig().getString("api-base-url");
-        if (baseUrl == null || baseUrl.isBlank()) {
-            getConfig().set(
-                "api-base-url",
-                "https://generativelanguage.googleapis.com/v1beta/openai/");
-            changed = true;
-        }
-
-        if (changed) {
-            saveConfig();
-            getLogger().info("Migrated legacy AI defaults to Gemini 3.7 Flash.");
-        }
+        saveConfig();
+        getLogger().info("Migrated legacy AI settings to the provider-neutral ai.* section.");
     }
 
     void initializePlugin() {
-        // If already initialized, shut down previous services and unregister listener
         if (conversationManager != null) {
             try {
                 conversationManager.shutdown();
@@ -92,7 +79,6 @@ public final class ServerAssistantPlugin extends JavaPlugin {
             chatListener = null;
         }
 
-        // Create new conversation manager (reads updated config) and register listener
         conversationManager = new ConversationManager(this);
         chatListener = new ChatListener(this, conversationManager);
         getServer().getPluginManager().registerEvents(chatListener, this);
@@ -102,18 +88,19 @@ public final class ServerAssistantPlugin extends JavaPlugin {
         return conversationManager;
     }
 
-    /**
-     * Public reload helper used by the command handler to reload config and
-     * reinitialize.
-     */
+    public ProviderThrottleRegistry getProviderThrottleRegistry() {
+        return providerThrottleRegistry;
+    }
+
+    /** Reloads config and runtime routing while keeping provider throttle state. */
     public void reloadPlugin() {
         reloadConfig();
+        migrateLegacyProviderConfig();
         initializePlugin();
     }
 
     @Override
     public void onDisable() {
-        // Shutdown services and unregister listeners
         if (conversationManager != null) {
             try {
                 conversationManager.shutdown();
@@ -132,5 +119,4 @@ public final class ServerAssistantPlugin extends JavaPlugin {
 
         MessageSender.Error("Plugin Disabled!");
     }
-
 }

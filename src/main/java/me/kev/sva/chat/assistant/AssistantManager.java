@@ -21,30 +21,30 @@ import me.kev.sva.utils.MessageSender;
 
 public class AssistantManager {
   private final ServerAssistantPlugin plugin;
+  private final ProviderSettings provider;
   private final OpenAIClient client;
   private final ExecutorService requestExecutor;
   private volatile boolean shutdown = false;
 
   public AssistantManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
+    this.provider = ProviderSettings.from(plugin);
 
-    String apiKey = resolveApiKey(plugin);
-    String baseUrl = resolveBaseUrl(plugin);
-
+    String apiKey = provider.resolveApiKey();
     if (apiKey == null || apiKey.isBlank()
-        || apiKey.equals("YOUR_API_KEY_HERE")
-        || apiKey.equals("YOUR_GEMINI_API_KEY_HERE")) {
-      MessageSender.Error("Gemini API key not configured. AI features disabled.");
+        || apiKey.startsWith("YOUR_")
+        || provider.baseUrl() == null || provider.baseUrl().isBlank()) {
+      MessageSender.Error(provider.displayName() + " API key/provider not configured. AI features disabled.");
       client = null;
     } else {
       client = OpenAIOkHttpClient.builder()
           .apiKey(apiKey)
-          .baseUrl(baseUrl)
+          .baseUrl(provider.baseUrl())
           .build();
 
-      String model = plugin.getConfig().getString("ai-model", "gemini-3.7-flash");
-      plugin.getLogger().info("AI provider: Gemini (OpenAI-compatible endpoint)");
-      plugin.getLogger().info("AI model: " + model);
+      plugin.getLogger().info("AI provider: " + provider.displayName());
+      plugin.getLogger().info("AI model: " + provider.model());
+      plugin.getLogger().info("AI max output tokens: " + provider.maxOutputTokens());
     }
 
     AtomicInteger counter = new AtomicInteger();
@@ -56,33 +56,19 @@ public class AssistantManager {
     requestExecutor = Executors.newSingleThreadExecutor(factory);
   }
 
-  private static String resolveApiKey(ServerAssistantPlugin plugin) {
-    String envName = plugin.getConfig().getString("api-key-env", "GEMINI_API_KEY");
-    if (envName != null && !envName.isBlank()) {
-      String envValue = System.getenv(envName.trim());
-      if (envValue != null && !envValue.isBlank()) {
-        return envValue.trim();
-      }
-    }
-    return plugin.getConfig().getString("api-key");
-  }
-
-  private static String resolveBaseUrl(ServerAssistantPlugin plugin) {
-    String configured = plugin.getConfig().getString(
-        "api-base-url",
-        "https://generativelanguage.googleapis.com/v1beta/openai/");
-
-    if (configured == null || configured.isBlank()) {
-      return "https://generativelanguage.googleapis.com/v1beta/openai/";
-    }
-
-    String normalized = configured.trim();
-    return normalized.endsWith("/") ? normalized : normalized + "/";
+  public ProviderSettings getProviderSettings() {
+    return provider;
   }
 
   public void shutdown() {
     shutdown = true;
     requestExecutor.shutdownNow();
+    if (client != null) {
+      try {
+        client.close();
+      } catch (Exception ignored) {
+      }
+    }
   }
 
   /**
@@ -100,9 +86,8 @@ public class AssistantManager {
       return;
     }
 
-    String configuredModel = plugin.getConfig().getString("ai-model", "gemini-3.7-flash");
-    if (configuredModel == null || configuredModel.isBlank()) {
-      completion.accept(null, new IllegalStateException("ai-model is not configured."));
+    if (provider.model() == null || provider.model().isBlank()) {
+      completion.accept(null, new IllegalStateException("AI model is not configured."));
       return;
     }
 
@@ -113,7 +98,9 @@ public class AssistantManager {
 
     ChatCompletionCreateParams.Builder paramsBuilder = ChatCompletionCreateParams
         .builder()
-        .model(configuredModel);
+        .model(provider.model())
+        .maxCompletionTokens(provider.maxOutputTokens())
+        .temperature(provider.temperature());
 
     appendSystemPromptsToBuilder(paramsBuilder, requestContext);
     appendConversationMessagesToBuilder(paramsBuilder, chatMessages);
@@ -127,11 +114,13 @@ public class AssistantManager {
       try {
         if (!shutdown) {
           var response = client.chat().completions().create(params);
-          responseText = response.choices()
-              .get(0)
-              .message()
-              .content()
-              .orElse("");
+          if (!response.choices().isEmpty()) {
+            responseText = response.choices()
+                .get(0)
+                .message()
+                .content()
+                .orElse("");
+          }
         }
       } catch (Throwable error) {
         failure = error;
@@ -167,18 +156,16 @@ public class AssistantManager {
     paramsBuilder.addSystemMessage(AssistantContextualizer.getRequestContext(requestContext));
 
     int maxAssistantMessageLength = Math.max(
-        plugin.getConfig().getInt("chat.max-assistant-message-length", 250),
+        plugin.getConfig().getInt("chat.max-assistant-message-length", 220),
         0);
     int maxMessages = Math.max(
         plugin.getConfig().getInt("conversation-control.max-messages-per-response", 1),
         0);
 
-    paramsBuilder.addSystemMessage("""
-        [OUTPUT LIMITS]
-        Maximum characters per assistant chat message: %d
-        Maximum public chat messages in this response: %d
-        These limits are also enforced by Java after generation.
-        """.formatted(maxAssistantMessageLength, maxMessages));
+    paramsBuilder.addSystemMessage(
+        "[OUTPUT] max_chars=" + maxAssistantMessageLength
+            + ", max_chat_messages=" + maxMessages
+            + ". Java enforces both limits.");
 
     paramsBuilder.addSystemMessage(AssistantContextualizer.getKnowledgeAndTools(plugin));
   }
@@ -188,7 +175,7 @@ public class AssistantManager {
       List<ChatMessage> chatMessages) {
 
     int maxPlayerMessageLength = Math.max(
-        plugin.getConfig().getInt("chat.max-player-message-length", 250),
+        plugin.getConfig().getInt("chat.max-player-message-length", 220),
         0);
 
     boolean hasUserTurn = false;
@@ -207,7 +194,6 @@ public class AssistantManager {
           msg = msg.substring(0, maxPlayerMessageLength);
         }
 
-        // CRITICAL: player content is USER content, never SYSTEM content.
         paramsBuilder.addUserMessage(playerMessage.header + msg);
         hasUserTurn = true;
         lastConversationalTurnWasAssistant = false;
@@ -220,22 +206,15 @@ public class AssistantManager {
       }
 
       if (message instanceof BroadcastChatMessage broadcastMessage) {
-        // Trusted server events remain SYSTEM context. Gemini's OpenAI-compatible
-        // endpoint still requires a user turn after an assistant/model turn, so a
-        // controlled continuation trigger is appended below when needed.
         paramsBuilder.addSystemMessage(broadcastMessage.header + broadcastMessage.content);
       }
     }
 
-    // Gemini rejects requests whose effective conversation ends on a model turn.
-    // This happens naturally for ambient events and our YAML wiki-tool follow-ups:
-    // assistant -> trusted SYSTEM event/result -> next request. Add a plugin-owned
-    // USER turn so the model has something to answer without pretending that a
-    // real player sent it. This content is constant and never player-controlled.
+    // Gemini's compatibility endpoint rejects an effective turn sequence ending
+    // on the model. This trusted, constant continuation is never player-controlled.
     if (!hasUserTurn || lastConversationalTurnWasAssistant) {
       paramsBuilder.addUserMessage(
-          "[TRUSTED CONTINUATION] Use the trusted server context/tool results above. "
-              + "Respond only if a response is useful; otherwise return an empty messages list.");
+          "[TRUSTED CONTINUATION] Use the trusted context above. Reply only if useful; otherwise stay silent.");
     }
   }
 }

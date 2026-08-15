@@ -71,6 +71,16 @@ public class CommandManager implements TabExecutor {
       return true;
     }
 
+    // /sva status
+    if (args.length == 1 && args[0].equalsIgnoreCase("status")) {
+      if (plugin.getConversationManager() == null) {
+        sender.sendMessage(Component.text("ServerAssistant is not initialized."));
+      } else {
+        sender.sendMessage(Component.text("ServerAssistant: " + plugin.getConversationManager().getRuntimeStatus()));
+      }
+      return true;
+    }
+
     // /sva playerchatmode <mode>
     if (args.length == 2 && args[0].equalsIgnoreCase(PLAYER_CHAT_MODE_COMMAND)) {
       String mode = args[1].toLowerCase(Locale.ROOT);
@@ -95,7 +105,7 @@ public class CommandManager implements TabExecutor {
     }
 
     sender.sendMessage(Component.text(
-        "Usage: /sva reload | " + buildPlayerChatModeUsage()));
+        "Usage: /sva reload | /sva status | " + buildPlayerChatModeUsage()));
 
     return true;
   }
@@ -117,7 +127,7 @@ public class CommandManager implements TabExecutor {
 
     if (args.length == 1) {
       List<String> completions = new ArrayList<>(
-          List.of("reload", PLAYER_CHAT_MODE_COMMAND));
+          List.of("reload", "status", PLAYER_CHAT_MODE_COMMAND));
 
       List<String> matches = new ArrayList<>();
 

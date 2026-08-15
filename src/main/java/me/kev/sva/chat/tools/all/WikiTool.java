@@ -60,4 +60,12 @@ public class WikiTool extends Tool {
     // MessageSender.Success(section.getString("content", ""));
     return section.getString("content", "");
   }
+  @Override
+  public String execute(String arguments) {
+    if (arguments == null || arguments.isBlank()) {
+      return "Missing required wiki key.";
+    }
+    return getWiki(arguments.trim());
+  }
+
 }

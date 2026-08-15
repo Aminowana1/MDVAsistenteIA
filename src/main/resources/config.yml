@@ -1,56 +1,33 @@
 # ============================================================
-# SERVER ASSISTANT 1.3.2
+# SERVER ASSISTANT 1.4.0
 # ============================================================
 
-# Name shown in chat and automatically accepted as a mention.
 assistant-name: "ServerAssistant"
 
 # ============================================================
 # AI PROVIDER
 # ============================================================
+# provider: gemini | openai | openai-compatible
+# Changing provider/model no longer requires recompiling.
+ai:
+  provider: "gemini"
+  api-key-env: "GEMINI_API_KEY"
+  api-key: "YOUR_GEMINI_API_KEY_HERE"
+  base-url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  model: "gemini-3.7-flash"
 
-# ServerAssistant 1.3.1 uses Gemini through Google's OpenAI-compatible API.
-# This lets us keep the stable Java client while using Gemini models.
-#
-# Preferred: put the key in this environment variable.
-# If it exists, it takes priority over api-key below.
-api-key-env: "GEMINI_API_KEY"
+  # Provider-side output cap. This saves tokens before Java truncates chat text.
+  max-output-tokens: 128
+  temperature: 0.75
 
-# Fallback Gemini API key. Never commit a real key to a public repository.
-# Create one in Google AI Studio if your host does not support environment variables.
-api-key: "YOUR_GEMINI_API_KEY_HERE"
+# Recent logical messages sent to the model. Lower = cheaper and faster.
+message-history-limit: 8
 
-# Official Gemini OpenAI-compatible endpoint.
-api-base-url: "https://generativelanguage.googleapis.com/v1beta/openai/"
-
-# Stable Gemini Flash model used by default.
-# Gemini 3.7 Flash supports function calling and structured outputs, which will
-# be useful when ServerAssistant 2.0 gains controlled server actions/tools.
-ai-model: "gemini-3.7-flash"
-
-# Maximum amount of recent logical conversation messages sent to the model.
-# The current batch is always kept even when this value is small.
-message-history-limit: 15
-
-# ============================================================
-# REQUEST TRIGGERS
-# ============================================================
 request-triggers:
   player-messages:
-    # always   = any player message can open a conversation (subject to slot limits)
-    # mention  = every request must explicitly mention SVA
-    # smart    = mention opens or joins a logical conversation. Short follow-ups
-    #            from accepted participants do not need another mention.
-    # disabled = player chat never triggers the assistant
     mode: smart
-
-    # Per-participant smart timeout. Activity from another group member does not
-    # keep you attached forever; each participant expires independently.
     smart-active-time: 20000
-
-    # Also treat assistant-name as a mention automatically.
     include-assistant-name-as-mention: true
-
     mentions:
       - "Server Assistant"
       - "ServerAssistant"
@@ -58,59 +35,32 @@ request-triggers:
       - "SVA"
 
   global-events:
-    enabled: true
-
-    # Prevent death/advancement bursts from generating one AI request per event.
-    # Events are still remembered as trusted recent server context.
-    minimum-request-interval-ms: 30000
-
-    # Bounds memory/cost during event storms while a previous request is running.
-    max-pending-events: 10
-
-    # Player questions take priority over ambient reactions.
+    # Keep false while using a very small free quota. Events are optional AI calls.
+    enabled: false
+    minimum-request-interval-ms: 120000
+    max-pending-events: 5
     defer-while-player-conversations-active: true
-
     events:
       player-death: true
-      player-advancement: true
+      player-advancement: false
       player-join: false
       player-quit: false
       player-kick: false
 
-  # Optional ambient speech after public chat has been quiet.
-  # Disabled by default because unsolicited AI messages can become noisy.
   scheduling:
     enabled: false
-    min-delay: 30000
-    max-delay: 120000
+    min-delay: 60000
+    max-delay: 180000
 
-# ============================================================
-# NATURAL CONVERSATION / ANTI-SPAM
-# ============================================================
 conversation-control:
-  # Main anti-chat-flood setting. THIS COUNTS CONVERSATIONS, NOT PLAYERS.
-  # Example: A + B + C + SVA is ONE slot. D + SVA can use the second slot.
-  # A fifth player may still join an existing group when the router can safely
-  # identify that their message belongs there. 0 = unlimited (not recommended).
   max-active-conversations: 2
 
   group-conversations:
     enabled: true
-
-    # Safety cap inside one logical conversation. This does NOT consume extra slots.
     max-participants: 6
-
-    # A newcomer can only auto-join a recent conversation inside this window.
-    # Explicitly referencing a participant is the strongest join signal.
     join-window-ms: 15000
-
-    # When there is exactly one eligible SVA conversation, a direct mention such
-    # as "@SVA y el báculo?" can join it instead of opening another slot.
     join-on-contextual-follow-up: true
 
-    # Conservative prefixes that imply the new message depends on recent context.
-    # Keep this list narrow: broad words such as "como" or "cuando" would cause
-    # unrelated questions to merge into the wrong group.
     contextual-follow-up-prefixes:
       - "y"
       - "eso"
@@ -119,7 +69,6 @@ conversation-control:
       - "entonces"
       - "pero"
 
-    # These may appear later in the sentence, e.g. "@SVA el báculo también?".
     contextual-follow-up-contains:
       - "tambien"
       - "también"
@@ -129,54 +78,46 @@ conversation-control:
       - "lo que dijo"
       - "lo que dice"
 
-  # Smart mode accepts at most this many follow-up messages from each participant
-  # without a fresh mention. Prevents SVA from sticking to someone indefinitely.
+    # Explicit hand-off: "Iso responde a Kroattan" can import Kroattan's
+    # very recent PUBLIC chat line without feeding all global chat to the AI.
+    explicit-handoff:
+      enabled: true
+      phrases:
+        - "responde a"
+        - "contesta a"
+        - "contestale a"
+        - "contéstale a"
+        - "lo que dijo"
+        - "lo que dice"
+        - "pregunta de"
+        - "habla con"
+
+  recent-public-chat:
+    messages-per-player: 2
+    handoff-max-age-ms: 30000
+
   max-follow-up-messages-without-mention: 4
 
-  # Deterministic human-chat signals. These do not send extra chat to the AI.
   human-conversation-detection:
-    # If a participant writes "OtherPlayer, ..." or "@OtherPlayer ..." without
-    # mentioning SVA, release ONLY that participant when OtherPlayer is outside
-    # the group. Addressing a co-participant does not break the group.
     release-when-user-addresses-other-player: true
-
-    # If a human OUTSIDE the SVA group explicitly addresses a participant by
-    # name/@name, mark a likely context switch. That participant's next unmentioned
-    # message leaves SVA; the remaining group continues normally.
     release-when-other-player-addresses-user: true
 
-  # Maximum queued messages from one player while SVA is answering.
   max-pending-messages-per-player: 8
-
-  # Hard Java-side output limit. One message feels much more natural in global
-  # chat and prevents fragmented AI spam.
   max-messages-per-response: 1
-
-  # Safety limits for the current YAML wiki-tool system.
   max-tool-calls-per-response: 2
   max-tool-iterations: 3
-
-  # Do not broadcast "let me check..." messages before a wiki lookup by default.
-  # The final answer is still broadcast normally.
   broadcast-tool-progress-messages: false
+  recent-server-events-limit: 6
 
-  # Number of trusted server events remembered and exposed as recent context.
-  recent-server-events-limit: 8
-
-  # Deterministic fallback for obvious natural endings. The AI can ALSO ask Java
-  # to close the session through close-conversation: true.
   closing-phrases:
     enabled: true
     phrases:
       - "thanks"
       - "thank you"
-      - "thanks a lot"
       - "bye"
       - "goodbye"
-      - "got it thanks"
       - "gracias"
       - "muchas gracias"
-      - "gracias bro"
       - "listo gracias"
       - "perfecto gracias"
       - "dale gracias"
@@ -189,137 +130,65 @@ conversation-control:
     cooldown-ms: 10000
     message: "&bSVA &7está atendiendo otras conversaciones. Inténtalo de nuevo en unos segundos."
 
-# ============================================================
-# RATE LIMITS
-# ============================================================
 rate-limits:
-  # Accepted messages from one participant per rolling minute.
-  # 0 = unlimited.
   max-player-messages-per-minute: 12
 
-  # Includes tool follow-up requests. Requests are serialized and, when this
-  # limit is reached, queued briefly instead of being fired concurrently.
-  # 0 = unlimited.
-  # 4/min is a conservative default for Gemini Free Tier testing.
-  # Raise it only if AI Studio shows a higher active quota for your project.
+  # Gemini Free showed 5 external RPM in the server logs. Use 4 locally to leave margin.
   max-ai-requests-per-minute: 4
 
-  # If a fresh player request would need to wait longer than this because of the
-  # local/API quota, answer privately with provider-limit-message instead of
-  # silently holding the question for tens of seconds.
+  # Multiple fast lines from the same group are accumulated instead of each
+  # creating an immediate provider call.
+  min-conversation-request-gap-ms: 4000
+
+  # Reject a fresh turn instead of silently holding it for a long time.
   max-local-queue-delay-ms: 5000
+  provider-notice-cooldown-ms: 10000
 
-  provider-limit-message: "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... inténtalo nuevamente en un momento."
+  provider-limit-message: "&bSVA &7necesita unos segundos antes de responder otra vez."
+  player-limit-message: "&bSVA &7necesita un momento antes de seguir con tantos mensajes tuyos."
 
-  player-limit-message: "&bSVA &7necesita un momento antes de procesar más mensajes tuyos."
-
-# ============================================================
-# PROVIDER RESPONSE COMPATIBILITY
-# ============================================================
 provider-response:
-  # Gemini can occasionally return the natural-language answer without the
-  # requested YAML envelope. Keep chat usable instead of silently discarding it.
-  # Plain-text fallback can NEVER create tool calls or execute actions.
   accept-plain-text-fallback: true
-
-  # Useful while developing providers; normally keep both false to avoid log spam.
   log-fallbacks: false
   debug-malformed-responses: false
 
-# ============================================================
-# PROVIDER RETRY / BACKOFF
-# ============================================================
 provider-retry:
-  # 429 responses are not blindly retried. The plugin reads Google's retry delay,
-  # pauses new requests and avoids hammering the quota.
+  # A retry is another paid/quota request. One retry is enough for economical mode.
+  max-503-retries: 1
+  initial-503-delay-ms: 2500
+  max-503-delay-ms: 5000
 
-  # 503/high-demand responses are temporary and get a short bounded retry.
-  max-503-retries: 2
-  initial-503-delay-ms: 2000
-  max-503-delay-ms: 10000
-
-# ============================================================
-# MESSAGE BATCHING
-# ============================================================
 message-batching:
-  # Small delay to combine "hey SVA" + "how do I...?" into one request.
-  wait-time: 1200
-
-  max-wait-time: 5000
-
-  # 0 disables this trigger. The per-player pending cap above is still enforced.
+  wait-time: 1600
+  max-wait-time: 3500
   max-size: 6
 
-# ============================================================
-# ASSISTANT PERSONALITY
-# ============================================================
 prompt: |
-  You are Server Assistant, SVA for short, a helpful friend that lives inside a Minecraft server.
+  You are ServerAssistant, a natural character living inside this Minecraft server.
+  Be concise, helpful and human. Never invent server-specific information.
 
-  Help players understand the server, its mechanics and its content. Be friendly,
-  concise and natural. Speak like a character who belongs in the server rather
-  than like a generic AI chatbot.
-
-  Reply in the language used by the current speaker. In a group, follow the
-  language of the message you are answering unless the group asks otherwise.
-
-  Do not force yourself into conversations. If there is no useful response, stay
-  silent. Prefer one natural chat message over multiple fragments.
-
-  Use server-provided information whenever possible. Never invent commands,
-  rules, items, locations or mechanics. If a server-specific answer requires wiki
-  information, use the wiki tool. If the information is unavailable, say that you
-  do not know instead of making it up.
-
-  When the player naturally ends the exchange (thanks, goodbye, "that's all",
-  etc.) give a short natural closing if appropriate and close the conversation.
-
-# ============================================================
-# ADVANCED CONTEXT / WIKI
-# ============================================================
 advanced-context:
-  # true  = only wiki index is sent; SVA fetches individual chunks when needed
-  # false = ALL wiki entries are preloaded into every request
   lazy-mode: true
-
   wiki:
     commands:
       description: Commands available on the server.
       content: |
-        /spawn
-        Teleports the player to the server spawn.
-
-        /home
-        Teleports the player to their personal home.
-
-        /sethome
-        Sets the player's current location as their home.
-
-        /tpa <player>
-        Sends a teleport request to another player.
+        /spawn - Teleports the player to spawn.
+        /home - Teleports the player to their home.
+        /sethome - Sets the player's home.
+        /tpa <player> - Sends a teleport request.
 
     server-rules:
-      description: Rules that players must follow while playing on the server.
+      description: Server rules.
       content: |
         1. No cheating or hacked clients.
-        2. No exploiting bugs for personal advantage.
-        3. Do not spam the chat.
-        4. Do not intentionally harass other players.
-        5. Follow staff instructions when necessary.
+        2. No bug abuse.
+        3. No chat spam.
+        4. Do not intentionally harass players.
+        5. Follow staff instructions.
 
-# ============================================================
-# CHAT OUTPUT
-# ============================================================
 chat:
-  assistant-format: "&b🤖 &b&l%assistant_name%: &r%message%"
-
-  # Internal formatting example; never shown to players on startup.
-  assistant-initial-message: "hello world!"
-
+  assistant-format: "&b%assistant_name%&7» &f%message%"
   assistant-chained-messages-delay: 750
-
-  # Enforced in Java, not only requested in the prompt.
-  max-assistant-message-length: 250
-
-  # Player content is truncated before being sent to the model.
-  max-player-message-length: 250
+  max-assistant-message-length: 220
+  max-player-message-length: 220

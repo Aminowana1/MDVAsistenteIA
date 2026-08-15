@@ -26,7 +26,7 @@ import me.kev.sva.chat.message.BroadcastChatMessage;
 import me.kev.sva.chat.message.ChatMessage;
 import me.kev.sva.chat.message.PlayerChatMessage;
 import me.kev.sva.chat.message.SystemContextMessage;
-import me.kev.sva.chat.tools.all.WikiTool;
+import me.kev.sva.chat.tools.ToolManager;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -42,6 +42,7 @@ public class ConversationManager {
 
   private final ServerAssistantPlugin plugin;
   private final AssistantManager assistantManager;
+  private final ToolManager toolManager;
 
   /** Active/recent logical player conversations, keyed by internal id. */
   private final Map<Long, ConversationSession> conversations = new LinkedHashMap<>();
@@ -51,15 +52,17 @@ public class ConversationManager {
 
   private final ConversationSession globalSession;
   private final Deque<RequestJob> requestQueue = new ArrayDeque<>();
-  private final Deque<Long> aiRequestTimes = new ArrayDeque<>();
   private final Deque<String> recentServerEvents = new ArrayDeque<>();
   private final Map<UUID, Long> lastBusyNotice = new HashMap<>();
   private final Map<UUID, Long> lastRateNotice = new HashMap<>();
+  private final Map<UUID, Long> lastProviderNotice = new HashMap<>();
+  private final Map<UUID, Deque<Long>> playerMessageTimes = new HashMap<>();
+  private final Map<UUID, Deque<RecentPublicMessage>> recentPublicChat = new HashMap<>();
+  private final ProviderThrottleRegistry providerThrottle;
 
   private boolean requestInFlight = false;
   private boolean shutdown = false;
   private long lastGlobalRequestAt = 0;
-  private long providerCooldownUntil = 0;
   private long nextConversationId = 1;
   private BukkitTask requestRateRetryTask;
   private BukkitTask idleTask;
@@ -67,11 +70,26 @@ public class ConversationManager {
   public ConversationManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
     this.assistantManager = new AssistantManager(plugin);
+    this.toolManager = new ToolManager(plugin);
+    this.providerThrottle = plugin.getProviderThrottleRegistry();
     this.globalSession = createGlobalSession();
   }
 
   public AssistantManager getAssistantManager() {
     return assistantManager;
+  }
+
+  public String getRuntimeStatus() {
+    String key = assistantManager.getProviderSettings().throttleKey();
+    long cooldownMs = providerThrottle.cooldownRemainingMs(key);
+    int used = providerThrottle.requestsLastMinute(key);
+    int limit = Math.max(plugin.getConfig().getInt("rate-limits.max-ai-requests-per-minute", 4), 0);
+    return "provider=" + assistantManager.getProviderSettings().displayName()
+        + ", model=" + assistantManager.getProviderSettings().model()
+        + ", requests_60s=" + used + "/" + (limit == 0 ? "unlimited" : limit)
+        + ", provider_cooldown=" + Math.max(0L, (cooldownMs + 999L) / 1000L) + "s"
+        + ", queue=" + requestQueue.size()
+        + ", active_conversations=" + countActivePlayerConversations();
   }
 
   public void shutdown() {
@@ -116,6 +134,7 @@ public class ConversationManager {
       return;
     }
 
+    rememberPublicMessage(player, content);
     observePlayerActivity();
     cleanupExpiredParticipantsAndSessions();
     markParticipantsAddressedByExternalHuman(player, content);
@@ -251,6 +270,10 @@ public class ConversationManager {
       return;
     }
 
+    if (directMention) {
+      importExplicitlyReferencedRecentSpeakers(session, player, content);
+    }
+
     session.pending.add(new PlayerChatMessage(plugin, player, content));
     session.lastSpeakerId = playerId;
     session.lastInteractionAt = System.currentTimeMillis();
@@ -263,6 +286,10 @@ public class ConversationManager {
     if (playerId == null) {
       return;
     }
+    lastBusyNotice.remove(playerId);
+    lastRateNotice.remove(playerId);
+    lastProviderNotice.remove(playerId);
+    recentPublicChat.remove(playerId);
     ConversationSession session = playerConversationIndex.get(playerId);
     if (session == null) {
       return;
@@ -435,11 +462,14 @@ public class ConversationManager {
     }
 
     long now = System.currentTimeMillis();
-    pruneOlderThan(participant.playerMessageTimes, now - 60000L);
-    if (participant.playerMessageTimes.size() >= maxPerMinute) {
+    Deque<Long> times = playerMessageTimes.computeIfAbsent(
+        participant.playerId,
+        ignored -> new ArrayDeque<>());
+    pruneOlderThan(times, now - 60000L);
+    if (times.size() >= maxPerMinute) {
       return false;
     }
-    participant.playerMessageTimes.addLast(now);
+    times.addLast(now);
     return true;
   }
 
@@ -457,6 +487,94 @@ public class ConversationManager {
   private void removePendingMessagesFrom(ConversationSession session, UUID playerId) {
     session.pending.removeIf(message -> message instanceof PlayerChatMessage playerMessage
         && playerMessage.playerId.equals(playerId));
+  }
+
+  private void rememberPublicMessage(Player player, String content) {
+    if (player == null || content == null || content.isBlank()) {
+      return;
+    }
+    int keep = Math.max(plugin.getConfig().getInt(
+        "conversation-control.recent-public-chat.messages-per-player", 2), 1);
+    Deque<RecentPublicMessage> messages = recentPublicChat.computeIfAbsent(
+        player.getUniqueId(), ignored -> new ArrayDeque<>());
+    messages.addLast(new RecentPublicMessage(System.currentTimeMillis(), content));
+    while (messages.size() > keep) {
+      messages.removeFirst();
+    }
+  }
+
+  /**
+   * Handles explicit hand-offs such as "Iso responde a Kroattan" without feeding
+   * all public chat to the model. Only the named player's very recent PUBLIC line
+   * is imported, and only when a clear hand-off phrase is present.
+   */
+  private void importExplicitlyReferencedRecentSpeakers(
+      ConversationSession session, Player requester, String content) {
+    if (session == null || session.global || requester == null || content == null) {
+      return;
+    }
+    if (!plugin.getConfig().getBoolean(
+        "conversation-control.group-conversations.explicit-handoff.enabled", true)) {
+      return;
+    }
+
+    String lower = stripAssistantMentions(content).toLowerCase(Locale.ROOT);
+    List<String> triggers = plugin.getConfig().getStringList(
+        "conversation-control.group-conversations.explicit-handoff.phrases");
+    if (triggers.isEmpty()) {
+      triggers = List.of("responde a", "contestale a", "contéstale a", "contesta a",
+          "lo que dijo", "lo que dice", "pregunta de", "habla con");
+    }
+    boolean handoff = false;
+    for (String trigger : triggers) {
+      if (trigger != null && !trigger.isBlank()
+          && lower.contains(trigger.toLowerCase(Locale.ROOT))) {
+        handoff = true;
+        break;
+      }
+    }
+    if (!handoff) {
+      return;
+    }
+
+    int maxParticipants = Math.max(plugin.getConfig().getInt(
+        "conversation-control.group-conversations.max-participants", 6), 1);
+    long maxAge = Math.max(plugin.getConfig().getLong(
+        "conversation-control.recent-public-chat.handoff-max-age-ms", 30000L), 1000L);
+    long now = System.currentTimeMillis();
+
+    for (Player target : Bukkit.getOnlinePlayers()) {
+      if (target.getUniqueId().equals(requester.getUniqueId())) {
+        continue;
+      }
+      if (!containsWholeWordIgnoreCase(content, target.getName())
+          && !content.toLowerCase(Locale.ROOT).contains("@" + target.getName().toLowerCase(Locale.ROOT))) {
+        continue;
+      }
+      if (session.participants.containsKey(target.getUniqueId())) {
+        continue;
+      }
+      ConversationSession otherSession = playerConversationIndex.get(target.getUniqueId());
+      if (otherSession != null && otherSession != session) {
+        continue;
+      }
+      if (session.participants.size() >= maxParticipants) {
+        continue;
+      }
+
+      Deque<RecentPublicMessage> messages = recentPublicChat.get(target.getUniqueId());
+      if (messages == null || messages.isEmpty()) {
+        continue;
+      }
+      RecentPublicMessage recent = messages.peekLast();
+      if (recent == null || now - recent.timestampMs > maxAge) {
+        continue;
+      }
+
+      addOrRefreshParticipant(session, target);
+      session.pending.add(new PlayerChatMessage(plugin, target, recent.content));
+      break; // one explicit hand-off per message keeps routing conservative
+    }
   }
 
   private boolean containsAssistantMention(String message) {
@@ -760,6 +878,22 @@ public class ConversationManager {
       return;
     }
 
+    if (!session.global) {
+      long minConversationGap = Math.max(
+          plugin.getConfig().getLong("rate-limits.min-conversation-request-gap-ms", 4000L),
+          0L);
+      long remainingGap = minConversationGap - (System.currentTimeMillis() - session.lastProviderRequestAt);
+      if (session.lastProviderRequestAt > 0 && remainingGap > 0) {
+        cancelTask(session.batchTask);
+        long ticks = Math.max(1L, (remainingGap + 49L) / 50L);
+        session.batchTask = plugin.getServer().getScheduler().runTaskLater(
+            plugin,
+            () -> processSessionBatch(session),
+            ticks);
+        return;
+      }
+    }
+
     if (session.global) {
       if (plugin.getConfig().getBoolean(
           "request-triggers.global-events.defer-while-player-conversations-active",
@@ -796,9 +930,9 @@ public class ConversationManager {
     session.maxBatchTask = null;
     session.batchStartTime = 0;
 
-    session.history.addAll(session.pending);
+    session.currentBatch.clear();
+    session.currentBatch.addAll(session.pending);
     session.pending.clear();
-    trimStoredHistory(session);
 
     session.processing = true;
     if (!session.queued) {
@@ -839,6 +973,7 @@ public class ConversationManager {
       // would strand an answer half-way through a tool chain.
       if (!job.session.global && job.depth == 0 && maxQueueDelay > 0 && rateDelay > maxQueueDelay) {
         notifyProviderBusy(job.session);
+        discardCurrentBatch(job.session);
         finishSessionRequest(job.session, false, false);
         processNextRequest();
         return;
@@ -878,6 +1013,7 @@ public class ConversationManager {
     if (!session.global) {
       cleanupExpiredParticipants(session);
       if (session.participants.isEmpty()) {
+        discardCurrentBatch(session);
         finishSessionRequest(session, false, false);
         processNextRequest();
         return;
@@ -885,6 +1021,7 @@ public class ConversationManager {
     }
 
     if (session.global && Bukkit.getOnlinePlayers().isEmpty()) {
+      discardCurrentBatch(session);
       finishSessionRequest(session, false, false);
       processNextRequest();
       return;
@@ -892,7 +1029,8 @@ public class ConversationManager {
 
     requestInFlight = true;
     long now = System.currentTimeMillis();
-    aiRequestTimes.addLast(now);
+    providerThrottle.recordAttempt(assistantManager.getProviderSettings().throttleKey());
+    session.lastProviderRequestAt = now;
     if (session.global && job.depth == 0) {
       lastGlobalRequestAt = now;
     }
@@ -924,14 +1062,17 @@ public class ConversationManager {
 
       if (isRateLimitError(error)) {
         long retryAfter = parseProviderRetryDelay(error, 60000L);
-        providerCooldownUntil = Math.max(
-            providerCooldownUntil,
-            System.currentTimeMillis() + retryAfter);
+        providerThrottle.applyCooldown(
+            assistantManager.getProviderSettings().throttleKey(),
+            retryAfter);
 
         plugin.getLogger().warning(
-            "Gemini rate limit reached (429). Pausing AI requests for about "
-                + Math.max(1, retryAfter / 1000L) + "s instead of repeatedly retrying.");
+            assistantManager.getProviderSettings().displayName()
+                + " rate limit reached (429). Cooling down for about "
+                + Math.max(1, retryAfter / 1000L)
+                + "s. /sva reload will NOT bypass this cooldown.");
         notifyProviderBusy(session);
+        discardCurrentBatch(session);
         finishSessionRequest(session, false, false);
         processNextRequest();
         return;
@@ -943,6 +1084,7 @@ public class ConversationManager {
 
       plugin.getLogger().warning(
           "AI request failed: " + error.getClass().getSimpleName() + ": " + error.getMessage());
+      discardCurrentBatch(session);
       finishSessionRequest(session, false, false);
       processNextRequest();
       return;
@@ -952,6 +1094,7 @@ public class ConversationManager {
       response = new AssistantResponse(plugin, List.of(), List.of(), false);
     }
 
+    commitCurrentBatch(session);
     session.history.add(new AssistantChatMessage(plugin, response));
     trimStoredHistory(session);
 
@@ -999,40 +1142,10 @@ public class ConversationManager {
   }
 
   private String executeTools(List<String> toolCalls) {
-    StringBuilder results = new StringBuilder();
-    WikiTool wikiTool = new WikiTool(plugin);
-
     int maxToolCalls = Math.max(
         plugin.getConfig().getInt("conversation-control.max-tool-calls-per-response", 2),
         0);
-    int processed = 0;
-
-    for (String toolCall : toolCalls) {
-      if (maxToolCalls > 0 && processed >= maxToolCalls) {
-        results.append("Tool call limit reached for this response.\n");
-        break;
-      }
-      processed++;
-
-      String[] parts = toolCall.trim().split("\\s+", 2);
-      if (parts.length == 0 || parts[0].isBlank()) {
-        continue;
-      }
-
-      String toolName = parts[0];
-      if (toolName.equalsIgnoreCase("wiki")) {
-        if (parts.length < 2 || parts[1].isBlank()) {
-          results.append("wiki: Missing required key.\n");
-          continue;
-        }
-        String key = parts[1].trim();
-        results.append("wiki ").append(key).append(":\n")
-            .append(wikiTool.getWiki(key)).append("\n");
-      } else {
-        results.append("Unknown tool: ").append(toolName).append("\n");
-      }
-    }
-    return results.toString().trim();
+    return toolManager.executeCalls(toolCalls, maxToolCalls);
   }
 
   /**
@@ -1083,24 +1196,12 @@ public class ConversationManager {
   }
 
   private long getGlobalRequestRateDelay() {
-    long now = System.currentTimeMillis();
-    long providerDelay = Math.max(0L, providerCooldownUntil - now);
-
     int maxPerMinute = Math.max(
         plugin.getConfig().getInt("rate-limits.max-ai-requests-per-minute", 4),
         0);
-    if (maxPerMinute == 0) {
-      return providerDelay;
-    }
-
-    pruneOlderThan(aiRequestTimes, now - 60000L);
-    long localDelay = 0L;
-    if (aiRequestTimes.size() >= maxPerMinute) {
-      Long oldest = aiRequestTimes.peekFirst();
-      localDelay = oldest == null ? 0L : Math.max(50L, 60000L - (now - oldest));
-    }
-
-    return Math.max(providerDelay, localDelay);
+    return providerThrottle.getDelay(
+        assistantManager.getProviderSettings().throttleKey(),
+        maxPerMinute);
   }
 
   private boolean isRateLimitError(Throwable error) {
@@ -1163,7 +1264,8 @@ public class ConversationManager {
     long delay = Math.min(maxDelay, baseDelay * (1L << Math.min(job.retryCount, 10)));
 
     plugin.getLogger().warning(
-        "Gemini is temporarily unavailable (503). Retrying in " + delay
+        assistantManager.getProviderSettings().displayName()
+            + " is temporarily unavailable (503). Retrying in " + delay
             + "ms (attempt " + (job.retryCount + 1) + "/" + maxRetries + ").");
 
     requestQueue.addFirst(new RequestJob(job.session, job.depth, job.retryCount + 1));
@@ -1180,15 +1282,37 @@ public class ConversationManager {
     if (session == null || session.global) {
       return;
     }
-    String fallback = "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... inténtalo nuevamente en un momento.";
+
+    String fallback = "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... dame unos segundos.";
     String text = plugin.getConfig().getString("rate-limits.provider-limit-message", fallback);
     if (text == null || text.isBlank()) {
       return;
     }
+
+    long noticeCooldown = Math.max(
+        plugin.getConfig().getLong("rate-limits.provider-notice-cooldown-ms", 10000L),
+        0L);
+    long now = System.currentTimeMillis();
+
+    java.util.LinkedHashSet<UUID> recipients = new java.util.LinkedHashSet<>();
+    for (ChatMessage message : session.currentBatch) {
+      if (message instanceof PlayerChatMessage playerMessage) {
+        recipients.add(playerMessage.playerId);
+      }
+    }
+    if (recipients.isEmpty() && session.lastSpeakerId != null) {
+      recipients.add(session.lastSpeakerId);
+    }
+
     Component component = legacyComponent(text);
-    for (ParticipantState participant : session.participants.values()) {
-      Player player = Bukkit.getPlayer(participant.playerId);
+    for (UUID playerId : recipients) {
+      long last = lastProviderNotice.getOrDefault(playerId, 0L);
+      if (noticeCooldown > 0 && now - last < noticeCooldown) {
+        continue;
+      }
+      Player player = Bukkit.getPlayer(playerId);
       if (player != null) {
+        lastProviderNotice.put(playerId, now);
         player.sendMessage(component);
       }
     }
@@ -1369,21 +1493,38 @@ public class ConversationManager {
   }
 
   private List<ChatMessage> getConversationSnapshot(ConversationSession session) {
-    int configuredHistory = Math.max(plugin.getConfig().getInt("message-history-limit", 15), 0);
-    int batchSize = Math.max(plugin.getConfig().getInt("message-batching.max-size", 10), 1);
+    int configuredHistory = Math.max(plugin.getConfig().getInt("message-history-limit", 8), 0);
+    int batchSize = Math.max(plugin.getConfig().getInt("message-batching.max-size", 6), 1);
     int limit = configuredHistory == 0
-        ? batchSize + 4
-        : Math.max(configuredHistory, batchSize + 4);
+        ? batchSize + 2
+        : Math.max(configuredHistory, batchSize + 2);
 
-    int size = session.history.size();
+    List<ChatMessage> combined = new ArrayList<>(session.history.size() + session.currentBatch.size());
+    combined.addAll(session.history);
+    combined.addAll(session.currentBatch);
+
+    int size = combined.size();
     if (size <= limit) {
-      return List.copyOf(session.history);
+      return List.copyOf(combined);
     }
-    return List.copyOf(session.history.subList(size - limit, size));
+    return List.copyOf(combined.subList(size - limit, size));
+  }
+
+  private void commitCurrentBatch(ConversationSession session) {
+    if (session.currentBatch.isEmpty()) {
+      return;
+    }
+    session.history.addAll(session.currentBatch);
+    session.currentBatch.clear();
+    trimStoredHistory(session);
+  }
+
+  private void discardCurrentBatch(ConversationSession session) {
+    session.currentBatch.clear();
   }
 
   private void trimStoredHistory(ConversationSession session) {
-    int configuredHistory = Math.max(plugin.getConfig().getInt("message-history-limit", 15), 0);
+    int configuredHistory = Math.max(plugin.getConfig().getInt("message-history-limit", 8), 0);
     int keep = Math.max(configuredHistory * 3, 30);
     while (session.history.size() > keep) {
       session.history.remove(0);
@@ -1479,6 +1620,9 @@ public class ConversationManager {
   private record RequestJob(ConversationSession session, int depth, int retryCount) {
   }
 
+  private record RecentPublicMessage(long timestampMs, String content) {
+  }
+
   private static final class ParticipantState {
     final UUID playerId;
     String playerName = "";
@@ -1488,7 +1632,6 @@ public class ConversationManager {
     boolean humanConversationSignal = false;
     int followUpsWithoutMention = 0;
     long activeUntil = 0;
-    final Deque<Long> playerMessageTimes = new ArrayDeque<>();
 
     ParticipantState(UUID playerId) {
       this.playerId = playerId;
@@ -1505,10 +1648,12 @@ public class ConversationManager {
     boolean suppressResponse = false;
     UUID lastSpeakerId;
     long lastInteractionAt = 0;
+    long lastProviderRequestAt = 0;
     long batchStartTime = 0;
 
     final List<ChatMessage> history = new ArrayList<>();
     final List<ChatMessage> pending = new ArrayList<>();
+    final List<ChatMessage> currentBatch = new ArrayList<>();
 
     BukkitTask batchTask;
     BukkitTask maxBatchTask;
