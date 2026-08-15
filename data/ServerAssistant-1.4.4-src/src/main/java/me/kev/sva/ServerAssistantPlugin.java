@@ -1,0 +1,122 @@
+package me.kev.sva;
+
+import org.bukkit.Bukkit;
+import org.bukkit.event.HandlerList;
+import org.bukkit.plugin.java.JavaPlugin;
+
+import me.kev.sva.chat.ChatListener;
+import me.kev.sva.chat.ConversationManager;
+import me.kev.sva.chat.ProviderThrottleRegistry;
+import me.kev.sva.chat.assistant.ProviderSettings;
+import me.kev.sva.commands.CommandManager;
+import me.kev.sva.constants.Constants;
+import me.kev.sva.utils.MessageSender;
+
+public final class ServerAssistantPlugin extends JavaPlugin {
+
+    private ConversationManager conversationManager;
+    private ChatListener chatListener;
+
+    /** Survives /sva reload so provider cooldowns cannot be bypassed by reloading. */
+    private final ProviderThrottleRegistry providerThrottleRegistry = new ProviderThrottleRegistry();
+
+    @Override
+    public void onEnable() {
+        saveDefaultConfig();
+        migrateLegacyProviderConfig();
+
+        CommandManager commandManager = new CommandManager(this);
+        if (getCommand("sva") != null) {
+            getCommand("sva").setExecutor(commandManager);
+            getCommand("sva").setTabCompleter(commandManager);
+        }
+
+        initializePlugin();
+
+        Bukkit.getConsoleSender().sendMessage(Constants.ASCII_LOGO);
+        MessageSender.Success("Plugin enabled successfully.");
+    }
+
+    /**
+     * One-time, non-destructive migration from the old flat provider keys.
+     * Unlike 1.3.x, it NEVER rewrites a user's OpenAI selection back to Gemini.
+     */
+    private void migrateLegacyProviderConfig() {
+        if (getConfig().isSet("ai.provider")) {
+            return;
+        }
+
+        ProviderSettings legacy = ProviderSettings.primary(this);
+        getConfig().set("ai.provider", legacy.type());
+        getConfig().set("ai.api-key-env", legacy.apiKeyEnv());
+        getConfig().set("ai.api-key", legacy.apiKey());
+        getConfig().set("ai.base-url", legacy.baseUrl());
+        getConfig().set("ai.model", legacy.model());
+        if (!getConfig().contains("ai.max-output-tokens")) {
+            getConfig().set("ai.max-output-tokens", 160);
+        }
+        if (!getConfig().contains("ai.temperature")) {
+            getConfig().set("ai.temperature", 0.75);
+        }
+        saveConfig();
+        getLogger().info("Migrated legacy V1 AI settings to the provider-neutral ai.* section (OpenAI-compatible).");
+    }
+
+    void initializePlugin() {
+        if (conversationManager != null) {
+            try {
+                conversationManager.shutdown();
+            } catch (Exception ignored) {
+            }
+            conversationManager = null;
+        }
+
+        if (chatListener != null) {
+            try {
+                HandlerList.unregisterAll(chatListener);
+            } catch (Exception ignored) {
+            }
+            chatListener = null;
+        }
+
+        conversationManager = new ConversationManager(this);
+        chatListener = new ChatListener(this, conversationManager);
+        getServer().getPluginManager().registerEvents(chatListener, this);
+    }
+
+    public ConversationManager getConversationManager() {
+        return conversationManager;
+    }
+
+    public ProviderThrottleRegistry getProviderThrottleRegistry() {
+        return providerThrottleRegistry;
+    }
+
+    /** Reloads config and runtime routing while keeping provider throttle state. */
+    public void reloadPlugin() {
+        reloadConfig();
+        migrateLegacyProviderConfig();
+        initializePlugin();
+    }
+
+    @Override
+    public void onDisable() {
+        if (conversationManager != null) {
+            try {
+                conversationManager.shutdown();
+            } catch (Exception ignored) {
+            }
+            conversationManager = null;
+        }
+
+        if (chatListener != null) {
+            try {
+                HandlerList.unregisterAll(chatListener);
+            } catch (Exception ignored) {
+            }
+            chatListener = null;
+        }
+
+        MessageSender.Error("Plugin Disabled!");
+    }
+}
