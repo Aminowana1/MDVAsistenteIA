@@ -12,6 +12,7 @@ import me.kev.sva.chat.tools.ToolManager;
 import me.kev.sva.commands.CommandManager;
 import me.kev.sva.config.ConfigurationManager;
 import me.kev.sva.constants.Constants;
+import me.kev.sva.integrations.IntegrationManager;
 import me.kev.sva.utils.MessageSender;
 
 public final class ServerAssistantPlugin extends JavaPlugin {
@@ -19,6 +20,7 @@ public final class ServerAssistantPlugin extends JavaPlugin {
     private ConversationManager conversationManager;
     private ChatListener chatListener;
     private ToolManager toolManager;
+    private IntegrationManager integrationManager;
     private ConfigurationManager configurationManager;
 
     /** Survives /sva reload so provider cooldowns cannot be bypassed by reloading. */
@@ -93,6 +95,12 @@ public final class ServerAssistantPlugin extends JavaPlugin {
             toolManager = null;
         }
 
+        integrationManager = null;
+
+        // Optional read-only integrations are created before tools so the profile
+        // context tool can query MMOCore/MDVSocial without hard dependencies.
+        integrationManager = new IntegrationManager(this);
+
         // Tools are created before ConversationManager because request-context
         // construction and the assistant prompt use the local/action tool registry.
         toolManager = new ToolManager(this);
@@ -113,12 +121,24 @@ public final class ServerAssistantPlugin extends JavaPlugin {
         return toolManager;
     }
 
+    public IntegrationManager getIntegrationManager() {
+        return integrationManager;
+    }
+
     public org.bukkit.configuration.file.FileConfiguration getPersonalityConfig() {
         return configurationManager.personality();
     }
 
     public org.bukkit.configuration.file.FileConfiguration getWikiConfig() {
         return configurationManager.wiki();
+    }
+
+    public org.bukkit.configuration.file.FileConfiguration getIntegrationsConfig() {
+        return configurationManager.integrations();
+    }
+
+    public void saveIntegrationsConfig() {
+        configurationManager.saveIntegrations();
     }
 
     /** Reloads config and runtime routing while keeping provider throttle state. */
@@ -156,6 +176,8 @@ public final class ServerAssistantPlugin extends JavaPlugin {
             }
             toolManager = null;
         }
+
+        integrationManager = null;
 
         MessageSender.Error("Plugin Disabled!");
     }

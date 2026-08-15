@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.6.5 - Grounded observation + deterministic moderation
+
+- Fixed held-item intent matching for natural possessive phrases such as `que tengo en mi mano?`; `mano` is now matched as a token instead of relying on a few exact phrases.
+- Inventory context is query-specific (`requested=held|armor|general`) so hand/armor questions receive a small unambiguous trusted block instead of a noisy full inventory dump.
+- Added target-aware local context selection: explicit named players are preferred for inventory, player-data and profile queries. `donde esta tablos16?` now supplies Tablos' row rather than leading with the requester.
+- Added an auto-updated `personality.yml` `capabilities-note` plus a dynamic `[CAPABILITIES]` system summary. Isolda is explicitly told that supplied inventory/player/profile data is direct in-world observation and must not answer `no puedo verlo` when the fact is present.
+- Moderation now includes a built-in Spanish profanity lexicon combined with the user's `strike-terms`, plus optional one-edit/adjacent-transposition typo tolerance.
+- Added deterministic `tools.mute.policy.auto-action-on-threshold`: with `activation=ask`, reaching the configured threshold automatically creates a real admin approval; with `activation=smart`, it executes immediately. The model no longer has to decide to request the mute.
+- `/sva tools moderation` now reports `strikes`, `eligible`, `pending` and a reason such as `admin-protected`, `below-threshold`, `approval-pending` or `cooldown`.
+- Admin protection remains unchanged: OP/`sva.admin` targets cannot be muted while `allow-admin-targets: false`, although their strikes may still be visible for testing.
+- Added moderation debug logging switch and new auto-updated config keys without overwriting existing user values.
+
+## 1.6.4 - Modular MMOCore + MDVSocial profile integrations
+
+- Added `integrations.yml`, auto-created and non-destructively updated alongside the existing runtime/personality/wiki files.
+- Added independently toggleable read-only integrations for MMOCore and MDVSocial; both are soft dependencies and safely disappear when the external plugin is absent.
+- Added the local `profile` CONTEXT tool. It merges relevant external player data before the same single model request, so it does not create a tool-call/model-call loop.
+- MMOCore profile context can expose class-as-race, RPG level/experience, configured professions, attributes, selected/auto-discovered stats, resources and unspent points.
+- MMOCore uses reflection first and PlaceholderAPI as a configurable fallback, avoiding a hard compile dependency. Profession/attribute/stat outputs are bounded to protect prompt size.
+- MDVSocial integration reads the equipped title through the public `MDVSocialAPI` when available, with PlaceholderAPI fallback.
+- Added `/sva integrations [list|set <mmocore|mdvsocial|all> <enabled|disabled>]`. Runtime toggles are persisted to `integrations.yml` and do not require a restart.
+- Added `/sva tools run profile <player>` for deterministic integration testing.
+- Removed generic RPG `nivel/xp` intent from vanilla `player-data` so MMOCore level is not confused with Minecraft experience level; explicit `nivel vanilla/xp vanilla` still uses player-data.
+- Added trusted PROFILE grounding to CORE so Isolda uses the supplied race/title/RPG values rather than guessing.
+
 ## 1.6.3 - Split YAML configuration + non-destructive auto-update
 
 - Split the old monolithic `config.yml` into `config.yml` (runtime), `personality.yml` (character prompt), and `wiki.yml` (retrieval + knowledge).

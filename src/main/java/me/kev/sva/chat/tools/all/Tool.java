@@ -43,6 +43,17 @@ public abstract class Tool {
     return "";
   }
 
+  /**
+   * Scene-aware variant used by context tools that need the exact current intent.
+   * Existing tools automatically fall back to the simpler overload.
+   */
+  public String buildLocalContext(
+      List<String> involvedPlayerNames,
+      String normalizedSceneText,
+      List<ChatMessage> currentSceneMessages) {
+    return buildLocalContext(involvedPlayerNames);
+  }
+
   /** Optional cleanup hook, for example cancelling scheduled tasks on reload. */
   public void shutdown() {
   }

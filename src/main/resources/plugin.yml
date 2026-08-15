@@ -7,6 +7,8 @@ description:
 
 author: k3vndev
 
+softdepend: [PlaceholderAPI, MMOCore, MDVSocial]
+
 commands:
   sva:
     description: ServerAssistant main command

@@ -16,21 +16,24 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import me.kev.sva.ServerAssistantPlugin;
 
 /**
- * Owns ServerAssistant's three YAML files and performs non-destructive schema updates.
+ * Owns ServerAssistant's four YAML files and performs non-destructive schema updates.
  *
  * <p>Technical/runtime settings stay in config.yml, character text lives in
- * personality.yml, and local knowledge lives in wiki.yml. On every startup/reload,
- * missing keys from the bundled files are copied into the user's files while existing
+ * personality.yml, local knowledge lives in wiki.yml, and optional plugin hooks live in
+ * integrations.yml. On every startup/reload, missing keys from the bundled files are
+ * copied into the user's files while existing
  * values are preserved. Explicit migrations handle schema moves such as the 1.6.2
  * single-file layout.</p>
  */
 public final class ConfigurationManager {
   private static final String PERSONALITY_FILE = "personality.yml";
   private static final String WIKI_FILE = "wiki.yml";
+  private static final String INTEGRATIONS_FILE = "integrations.yml";
 
   private final ServerAssistantPlugin plugin;
   private FileConfiguration personalityConfig;
   private FileConfiguration wikiConfig;
+  private FileConfiguration integrationsConfig;
 
   public ConfigurationManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
@@ -41,29 +44,35 @@ public final class ConfigurationManager {
     plugin.getDataFolder().mkdirs();
     ensureResource(PERSONALITY_FILE);
     ensureResource(WIKI_FILE);
+    ensureResource(INTEGRATIONS_FILE);
 
     File mainFile = new File(plugin.getDataFolder(), "config.yml");
     File personalityFile = new File(plugin.getDataFolder(), PERSONALITY_FILE);
     File wikiFile = new File(plugin.getDataFolder(), WIKI_FILE);
+    File integrationsFile = new File(plugin.getDataFolder(), INTEGRATIONS_FILE);
 
     YamlConfiguration main = loadUserFile(mainFile);
     YamlConfiguration personality = loadUserFile(personalityFile);
     YamlConfiguration wiki = loadUserFile(wikiFile);
+    YamlConfiguration integrations = loadUserFile(integrationsFile);
 
     boolean migrated = migrateSingleFileLayout(main, personality, wiki, mainFile);
     boolean mainChanged = migrated | mergeBundledDefaults(main, "config.yml");
     boolean personalityChanged = migrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
+    boolean integrationsChanged = mergeBundledDefaults(integrations, INTEGRATIONS_FILE);
 
     mainChanged |= syncSchemaVersion(main, "config.yml");
     personalityChanged |= syncSchemaVersion(personality, PERSONALITY_FILE);
     wikiChanged |= syncSchemaVersion(wiki, WIKI_FILE);
+    integrationsChanged |= syncSchemaVersion(integrations, INTEGRATIONS_FILE);
 
     try {
       if (mainChanged) main.save(mainFile);
       if (personalityChanged) personality.save(personalityFile);
       if (wikiChanged) wiki.save(wikiFile);
+      if (integrationsChanged) integrations.save(integrationsFile);
     } catch (IOException ex) {
       throw new IllegalStateException("Could not save updated ServerAssistant YAML files", ex);
     }
@@ -72,6 +81,7 @@ public final class ConfigurationManager {
     plugin.reloadConfig();
     personalityConfig = loadUserFile(personalityFile);
     wikiConfig = loadUserFile(wikiFile);
+    integrationsConfig = loadUserFile(integrationsFile);
 
     if (migrated) {
       plugin.getLogger().info("Migrated character prompt to personality.yml and local wiki to wiki.yml.");
@@ -86,6 +96,20 @@ public final class ConfigurationManager {
     return wikiConfig;
   }
 
+  public FileConfiguration integrations() {
+    return integrationsConfig;
+  }
+
+  /** Saves integrations.yml after a runtime toggle without touching the other YAML files. */
+  public void saveIntegrations() {
+    if (integrationsConfig == null) return;
+    File file = new File(plugin.getDataFolder(), INTEGRATIONS_FILE);
+    try {
+      integrationsConfig.save(file);
+    } catch (IOException ex) {
+      throw new IllegalStateException("Could not save integrations.yml", ex);
+    }
+  }
 
   /** Loads a user file strictly. Invalid YAML aborts reload instead of being overwritten. */
   private YamlConfiguration loadUserFile(File file) {

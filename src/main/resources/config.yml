@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.6.3 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.6.5 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 3
+config-version: 5
 
 assistant-name: Isolda
 
@@ -136,7 +136,7 @@ provider-response:
 # ASSISTANT TOOLS
 # ============================================================
 # Merged from the other ServerAssistant branch, adapted to the global one-call
-# architecture. CONTEXT tools (wiki/player-data/inventory) run locally BEFORE
+# architecture. CONTEXT tools (wiki/player-data/inventory/profile) run locally BEFORE
 # the model request. ACTION tools (sound/lightning/mute/schedule) are explicit
 # allow-listed actions returned in the SAME model response.
 #
@@ -174,6 +174,11 @@ tools:
     include-location: true
     include-status: true
 
+  # Optional external profile context (MMOCore + MDVSocial). Details and module
+  # toggles live in integrations.yml. It only runs when race/level/title/etc. is relevant.
+  profile:
+    activation: smart
+
   # Local trusted inventory/equipment data; Java adds it only when relevant.
   inventory:
     activation: smart
@@ -197,10 +202,28 @@ tools:
     policy:
       enabled: true
       require-eligibility-for-ai: true
+
+      # Only chat currently directed at Isolda (direct mention or active smart follow-up)
+      # can register strikes. Ordinary profanity elsewhere in public chat is ignored.
       directed-only: true
+
+      # Built-in multilingual/Spanish profanity coverage is combined with strike-terms.
+      # This catches common variants such as chingas/verga/zorra and does not replace
+      # your custom list. Small one-character/adjacent-swap typos can also count.
+      builtin-lexicon: true
+      fuzzy-typos: true
+
+      # Once the threshold is reached Java enforces the policy deterministically:
+      # activation=ask -> queues /sva approve; activation=smart -> mutes immediately.
+      # The model no longer has to decide whether to request the mute.
+      auto-action-on-threshold: true
+
       strikes-required: 3
       window-ms: 60000
       cooldown-ms: 300000
+      debug-log: false
+
+      # Optional custom additions. Built-in terms remain active when enabled above.
       strike-terms:
       - idiota
       - imbecil

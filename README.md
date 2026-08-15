@@ -1,18 +1,23 @@
-# ServerAssistant 1.6.3
+# ServerAssistant 1.6.5
 
-ServerAssistant 1.6.3 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+ServerAssistant 1.6.5 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+
+1.6.5 hardens direct observation and moderation: held-item/armor/location context is target-aware and query-specific, personality gains a capability framing note without overwriting the main prompt, and moderation can deterministically queue/execute mute policy actions once configurable directed-abuse strikes reach the threshold.
 
 
-## 1.6.3 split YAML + automatic config updates
+## 1.6.5 reliability + modular integrations
 
-ServerAssistant now keeps configuration in three focused files:
+ServerAssistant now keeps configuration in four focused files:
 
 ```text
 plugins/ServerAssistant/
-├── config.yml       # runtime, providers, scenes, tools, moderation, chat output
-├── personality.yml  # Isolda character/tone prompt only
-└── wiki.yml         # local retrieval settings + wiki entries
+├── config.yml        # runtime, providers, scenes, tools, moderation, chat output
+├── personality.yml   # Isolda character/tone prompt only
+├── wiki.yml          # local retrieval settings + wiki entries
+└── integrations.yml  # optional external plugin profile hooks
 ```
+
+`integrations.yml` is created automatically when upgrading. MMOCore and MDVSocial are independent soft integrations: they can be enabled/disabled without removing either plugin, and missing plugins are skipped safely. Profile context is local and read-only, so it does not add another AI request.
 
 On startup and `/sva reload`, each file is compared with the bundled defaults. **Only missing schema/settings keys are added**; existing user values and personality text are preserved. `wiki.*` entries are treated as user content, so deleted/custom wiki pages are not silently resurrected or overwritten. This lets newer plugin versions introduce config options without making the admin manually copy them.
 
@@ -32,7 +37,7 @@ OpenAI primary requests use JSON-object response mode by default so a normal ans
 3. Java listens for the configured capture window (default 2 seconds).
 4. A local involvement graph removes unrelated players/messages.
 5. The scene is capped after filtering (default 10 chat lines + 2 events).
-6. Wiki/player/inventory context is selected locally before the model call.
+6. Wiki/player/inventory/profile context is selected locally before the model call.
 7. One normal model request is made and Isolda reacts to the scene as a whole.
 8. Optional action tool calls may be returned in that same model response and are allow-listed/executed by Java.
 
@@ -53,6 +58,21 @@ There are no conversation slots, group routers or "assistant busy" replies. Ordi
 - Schedule action tool (the alternate branch documented it as TODO; 1.6 implements it without a second AI call).
 - Wiki is stored in `wiki.yml`; 1.6.3 automatically migrates the old `advanced-context.wiki` / `tools.wiki.pages` layouts.
 
+## Optional MMOCore / MDVSocial profile integrations
+
+The `profile` context tool activates only for relevant questions such as race/class, RPG level, professions, attributes, stats, mana/stamina/points, or equipped title. MMOCore classes can be labeled as races with `mmocore.class-as-race: true`. MDVSocial equipped titles are read through its public API.
+
+```text
+/sva integrations
+/sva integrations set mmocore enabled
+/sva integrations set mmocore disabled
+/sva integrations set mdvsocial enabled
+/sva integrations set all disabled
+/sva tools run profile <player>
+```
+
+Profession/attribute/stat counts and individual sections are bounded/configurable in `integrations.yml`, so a large RPG profile cannot dump unlimited data into the prompt. Normal unrelated chat receives no profile block.
+
 ## Tool architecture
 
 `CONTEXT` tools are resolved locally before the one model request:
@@ -60,6 +80,7 @@ There are no conversation slots, group routers or "assistant busy" replies. Ordi
 - `wiki`
 - `player-data`
 - `inventory`
+- `profile` (optional MMOCore/MDVSocial data)
 
 `ACTION` tools may be emitted in the same structured model response:
 
@@ -87,7 +108,7 @@ The model never receives an arbitrary console-command tool. Only explicitly regi
 /sva deny <id>
 ```
 
-`mute` defaults to `ask`, refuses OP/`sva.admin` targets unless explicitly allowed, and uses a configurable command template.
+`mute` defaults to `ask`, refuses OP/`sva.admin` targets unless explicitly allowed, and uses a configurable command template. In 1.6.5 the moderation policy can automatically act when directed-abuse strikes reach the configured threshold: `ask` queues a real approval, while `smart` executes the allow-listed mute immediately. Built-in Spanish profanity coverage is combined with custom `strike-terms`, and `/sva tools moderation` shows threshold/protection/pending state.
 
 ## Per-player smart follow-up
 
@@ -118,10 +139,10 @@ This is separate from the `schedule` tool: `schedule` delays an already-generate
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-To release 1.6.3, for example, change only:
+To release 1.6.5, for example, change only:
 
 ```xml
-<version>1.6.3</version>
+<version>1.6.5</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.6.3.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.6.5.jar`.

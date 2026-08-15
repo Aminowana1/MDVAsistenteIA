@@ -1,0 +1,81 @@
+# ============================================================
+# SERVER ASSISTANT - OPTIONAL INTEGRATIONS
+# Read-only external plugin context. No integration creates extra AI requests.
+# Missing keys are auto-added on updates while your values are preserved.
+# ============================================================
+
+config-version: 1
+
+# Master switch for every external integration.
+enabled: true
+
+# One bounded profile context block can merge multiple integrations while counting
+# as a single local CONTEXT tool.
+profile-context:
+  enabled: true
+  max-players: 2
+
+# ============================================================
+# MMOCORE
+# In MDVCRAFT, MMOCore classes are used as player races.
+# ServerAssistant first tries MMOCore's API via reflection and can fall back to
+# PlaceholderAPI when available. There is no hard compile/runtime dependency.
+# ============================================================
+mmocore:
+  enabled: true
+  class-as-race: true
+  placeholder-fallback: true
+
+  basic:
+    race: true
+    race-id: false
+    level: true
+    experience: false
+
+  # ids: [] = auto-discover configured MMOCore professions, bounded by max.
+  professions:
+    enabled: true
+    max: 8
+    ids: []
+
+  # ids: [] = use the player's configured MMOCore attributes, bounded by max.
+  attributes:
+    enabled: true
+    max: 8
+    ids: []
+
+  # Stats can be numerous, so they are only included when the scene asks for stats
+  # unless include-on-general is enabled. ids: [] auto-discovers MMOCore/stats.yml.
+  stats:
+    enabled: true
+    include-on-general: false
+    auto-discover: true
+    max: 8
+    ids: []
+
+  resources:
+    enabled: true
+    include-on-general: false
+    mana: true
+    stamina: true
+    stellium: false
+
+  points:
+    enabled: true
+    include-on-general: false
+    skill-points: true
+    class-points: true
+    attribute-points: true
+
+# ============================================================
+# MDVSOCIAL
+# Uses MDVSocialAPI when available, with PlaceholderAPI as an optional fallback.
+# ============================================================
+mdvsocial:
+  enabled: true
+  placeholder-fallback: true
+
+  title:
+    include-display: true
+    include-id: false
+    include-unlocked-count: false

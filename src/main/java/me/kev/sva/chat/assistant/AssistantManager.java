@@ -225,8 +225,13 @@ public class AssistantManager {
     String personalityPrompt = plugin.getPersonalityConfig().getString(
         "prompt",
         AssistantContextualizer.DEFAULT_PERSONALITY_PROMPT);
-    paramsBuilder.addSystemMessage(
-        AssistantContextualizer.PERSONALITY_PROMPT_HEADER + personalityPrompt);
+    String capabilitiesNote = plugin.getPersonalityConfig().getString("capabilities-note", "");
+    StringBuilder personalitySystem = new StringBuilder(
+        AssistantContextualizer.PERSONALITY_PROMPT_HEADER).append(personalityPrompt);
+    if (capabilitiesNote != null && !capabilitiesNote.isBlank()) {
+      personalitySystem.append("\n\n[WORLD CAPABILITIES]\n").append(capabilitiesNote.trim());
+    }
+    paramsBuilder.addSystemMessage(personalitySystem.toString());
 
     int maxAssistantMessageLength = Math.max(
         plugin.getConfig().getInt("chat.max-assistant-message-length", 190),
@@ -237,8 +242,10 @@ public class AssistantManager {
         "[OUTPUT] max_chars=" + maxAssistantMessageLength
             + ", max_chat_messages=1. Java enforces both limits.");
     if (plugin.getToolManager() != null) {
+      paramsBuilder.addSystemMessage(plugin.getToolManager().getCapabilitiesPrompt());
       paramsBuilder.addSystemMessage(plugin.getToolManager().getAvailableActionToolsPrompt());
     } else {
+      paramsBuilder.addSystemMessage("[CAPABILITIES] no local tool capabilities available");
       paramsBuilder.addSystemMessage("[TOOLS] disabled; t must be []");
     }
 

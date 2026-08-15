@@ -22,6 +22,7 @@ import me.kev.sva.chat.tools.all.InventoryTool;
 import me.kev.sva.chat.tools.all.LightningTool;
 import me.kev.sva.chat.tools.all.MuteTool;
 import me.kev.sva.chat.tools.all.PlayerDataTool;
+import me.kev.sva.chat.tools.all.ProfileTool;
 import me.kev.sva.chat.tools.all.ScheduleTool;
 import me.kev.sva.chat.tools.all.SoundTool;
 import me.kev.sva.chat.tools.all.Tool;
@@ -37,6 +38,14 @@ import me.kev.sva.utils.MessageSender;
  * instead of merely trusting the model to ask first.</p>
  */
 public final class ToolManager {
+  private static final List<String> BUILTIN_STRIKE_TERMS = List.of(
+      "idiota", "imbecil", "pelotudo", "boludo", "estupido", "estupida",
+      "inutil", "basura", "callate", "mierda", "puta", "puto", "forro", "forra",
+      "zorra", "cabron", "cabrona", "pendejo", "pendeja", "tarado", "tarada",
+      "chingas", "chingar", "chingada", "chingado", "verga", "culero", "culera",
+      "malparido", "malparida", "mamaguevo", "hijo de puta", "hdp",
+      "vete a la verga", "vete al carajo");
+
   private final ServerAssistantPlugin plugin;
   private final Map<String, Tool> tools = new LinkedHashMap<>();
   private final Map<Long, PendingApproval> pendingApprovals = new LinkedHashMap<>();
@@ -49,6 +58,7 @@ public final class ToolManager {
     register(new WikiTool(plugin));
     register(new PlayerDataTool(plugin));
     register(new InventoryTool(plugin));
+    register(new ProfileTool(plugin));
     register(new LightningTool(plugin));
     register(new SoundTool(plugin));
     register(new MuteTool(plugin));
@@ -102,6 +112,37 @@ public final class ToolManager {
     plugin.getConfig().set("tools." + tool.name + ".activation", parsed.configValue());
     plugin.saveConfig();
     return true;
+  }
+
+  /** Compact, cache-friendly summary of what Isolda can actually observe. */
+  public String getCapabilitiesPrompt() {
+    if (!plugin.getConfig().getBoolean("tools.enabled", true)) {
+      return "[CAPABILITIES] local observation/actions disabled";
+    }
+
+    List<String> observations = new ArrayList<>();
+    if (isToolEnabled("inventory")) {
+      observations.add("inventory, held item, offhand and armor when [INVENTORY] is supplied");
+    }
+    if (isToolEnabled("player-data")) {
+      observations.add("online player location/status when [PLAYER-DATA] is supplied");
+    }
+    if (isToolEnabled("profile")
+        && plugin.getIntegrationsConfig() != null
+        && plugin.getIntegrationsConfig().getBoolean("enabled", true)
+        && plugin.getIntegrationsConfig().getBoolean("profile-context.enabled", true)) {
+      observations.add("race/class, RPG level, professions, attributes and equipped title when [PROFILE] is supplied");
+    }
+    if (isToolEnabled("wiki")) {
+      observations.add("server knowledge selected into [WIKI]");
+    }
+
+    if (observations.isEmpty()) {
+      return "[CAPABILITIES] no local observation capability enabled";
+    }
+    return "[CAPABILITIES] Treat supplied trusted context as direct in-world observation. You can inspect: "
+        + String.join("; ", observations)
+        + ". Never say you cannot see a fact that is present in that context.";
   }
 
   /** Static/cache-friendly action tool catalog for the model. */
@@ -162,7 +203,7 @@ public final class ToolManager {
       if (!tool.shouldPrefetch(normalized, currentSceneMessages)) continue;
       String context;
       try {
-        context = tool.buildLocalContext(names);
+        context = tool.buildLocalContext(names, normalized, currentSceneMessages);
       } catch (Exception ex) {
         plugin.getLogger().warning("Local context tool '" + tool.name + "' failed: " + ex.getMessage());
         continue;
@@ -202,34 +243,132 @@ public final class ToolManager {
     Deque<Long> strikes = moderationStrikes.computeIfAbsent(player.getUniqueId(), ignored -> new ArrayDeque<>());
     pruneOlderThan(strikes, now - windowMs);
     strikes.addLast(now);
+
+    if (plugin.getConfig().getBoolean("tools.mute.policy.debug-log", false)) {
+      plugin.getLogger().info("Moderation strike: " + player.getName() + " -> "
+          + strikes.size() + "/"
+          + Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1)
+          + " message='" + normalized + "'");
+    }
+
+    handleModerationThreshold(player);
   }
 
   private boolean containsConfiguredStrikeTerm(String normalizedMessage) {
-    List<String> terms = plugin.getConfig().getStringList("tools.mute.policy.strike-terms");
-    if (terms == null || terms.isEmpty()) return false;
+    List<String> terms = new ArrayList<>();
+    if (plugin.getConfig().getBoolean("tools.mute.policy.builtin-lexicon", true)) {
+      terms.addAll(BUILTIN_STRIKE_TERMS);
+    }
+    List<String> configured = plugin.getConfig().getStringList("tools.mute.policy.strike-terms");
+    if (configured != null) terms.addAll(configured);
+    if (terms.isEmpty()) return false;
+
     String haystack = " " + normalizedMessage + " ";
+    List<String> messageTokens = List.of(normalizedMessage.split(" "));
+    boolean fuzzy = plugin.getConfig().getBoolean("tools.mute.policy.fuzzy-typos", true);
+
     for (String raw : terms) {
       String term = normalize(raw);
       if (term.isBlank()) continue;
       if (haystack.contains(" " + term + " ")) return true;
+
+      // Conservative typo tolerance only for single profanity tokens (e.g. ptua -> puta).
+      // Only adjacent swaps or one inserted/deleted character are accepted; ordinary
+      // one-letter substitutions are NOT fuzzy-matched to reduce false positives.
+      if (fuzzy && !term.contains(" ") && term.length() >= 4) {
+        for (String token : messageTokens) {
+          if (token.length() < 4 || Math.abs(token.length() - term.length()) > 1) continue;
+          if (damerauDistanceAtMostOne(token, term)) return true;
+        }
+      }
     }
     return false;
+  }
+
+  private void handleModerationThreshold(Player player) {
+    if (!plugin.getConfig().getBoolean("tools.mute.policy.auto-action-on-threshold", true)) return;
+    if (!isMuteEligible(player)) return;
+
+    Tool mute = getTool("mute");
+    if (mute == null || !mute.enabled() || mute.activation() == ToolActivation.NEVER) return;
+    if (hasPendingMuteApproval(player.getName())) return;
+
+    if (mute.activation() == ToolActivation.ASK) {
+      queueApproval(mute, player.getName(), "mute " + player.getName());
+    } else {
+      executeAndLog(mute, player.getName(), "moderation-policy");
+    }
+  }
+
+  private boolean hasPendingMuteApproval(String playerName) {
+    if (playerName == null || playerName.isBlank()) return false;
+    pruneExpiredApprovals();
+    return pendingApprovals.values().stream().anyMatch(p ->
+        "mute".equalsIgnoreCase(p.toolName())
+            && playerName.equalsIgnoreCase(p.arguments()));
+  }
+
+  private static boolean damerauDistanceAtMostOne(String a, String b) {
+    if (a.equals(b)) return true;
+    if (Math.abs(a.length() - b.length()) > 1) return false;
+
+    // Same length: only one adjacent transposition.
+    if (a.length() == b.length()) {
+      int first = -1;
+      int second = -1;
+      int mismatches = 0;
+      for (int i = 0; i < a.length(); i++) {
+        if (a.charAt(i) == b.charAt(i)) continue;
+        if (mismatches == 0) first = i;
+        else if (mismatches == 1) second = i;
+        mismatches++;
+        if (mismatches > 2) return false;
+      }
+      if (mismatches != 2) return false;
+      return second == first + 1
+          && a.charAt(first) == b.charAt(second)
+          && a.charAt(second) == b.charAt(first);
+    }
+
+    // One insertion/deletion.
+    String shorter = a.length() < b.length() ? a : b;
+    String longer = a.length() < b.length() ? b : a;
+    int i = 0;
+    int j = 0;
+    boolean skipped = false;
+    while (i < shorter.length() && j < longer.length()) {
+      if (shorter.charAt(i) == longer.charAt(j)) {
+        i++;
+        j++;
+      } else if (!skipped) {
+        skipped = true;
+        j++;
+      } else {
+        return false;
+      }
+    }
+    return true;
   }
 
   private String buildModerationContext() {
     if (!plugin.getConfig().getBoolean("tools.mute.policy.enabled", true)) return "";
     pruneModerationState();
-    List<String> eligible = new ArrayList<>();
+    List<String> rows = new ArrayList<>();
+    int required = Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1);
     for (Player player : plugin.getServer().getOnlinePlayers()) {
       int strikes = currentStrikeCount(player.getUniqueId());
-      int required = Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1);
-      if (isMuteEligible(player)) {
-        eligible.add(player.getName() + " eligible=true strikes=" + strikes + "/" + required);
-      }
+      if (strikes <= 0) continue;
+      boolean eligible = isMuteEligible(player);
+      boolean pending = hasPendingMuteApproval(player.getName());
+      rows.add(player.getName() + " strikes=" + strikes + "/" + required
+          + " eligible=" + eligible
+          + " pending=" + pending
+          + " reason=" + moderationReason(player));
     }
-    return eligible.isEmpty()
-        ? "no mute-eligible players; do not call mute"
-        : String.join("; ", eligible) + ". mute may target ONLY players marked eligible=true.";
+    return rows.isEmpty()
+        ? "no recent moderation strikes; do not call mute"
+        : String.join("; ", rows)
+            + ". Only an eligible=true target may be muted; pending=true means approval is already queued.";
   }
 
   public List<String> moderationSummaries() {
@@ -238,11 +377,26 @@ public final class ToolManager {
     List<String> rows = new ArrayList<>();
     for (Player player : plugin.getServer().getOnlinePlayers()) {
       int strikes = currentStrikeCount(player.getUniqueId());
-      if (strikes > 0 || isMuteEligible(player)) {
-        rows.add(player.getName() + " strikes=" + strikes + "/" + required + " eligible=" + isMuteEligible(player));
+      if (strikes > 0 || isMuteEligible(player) || hasPendingMuteApproval(player.getName())) {
+        rows.add(player.getName()
+            + " strikes=" + strikes + "/" + required
+            + " eligible=" + isMuteEligible(player)
+            + " pending=" + hasPendingMuteApproval(player.getName())
+            + " reason=" + moderationReason(player));
       }
     }
     return rows;
+  }
+
+  private String moderationReason(Player player) {
+    if (player == null) return "offline";
+    if (!plugin.getConfig().getBoolean("tools.mute.allow-admin-targets", false)
+        && (player.isOp() || player.hasPermission("sva.admin"))) return "admin-protected";
+    if (muteCooldownUntil.getOrDefault(player.getUniqueId(), 0L) > System.currentTimeMillis()) return "cooldown";
+    int required = Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1);
+    if (currentStrikeCount(player.getUniqueId()) < required) return "below-threshold";
+    if (hasPendingMuteApproval(player.getName())) return "approval-pending";
+    return "threshold-met";
   }
 
   /** Process model-generated ACTION calls from the same response. */
@@ -360,6 +514,9 @@ public final class ToolManager {
 
   private void queueApproval(Tool tool, String arguments, String rawCall) {
     pruneExpiredApprovals();
+    if ("mute".equalsIgnoreCase(tool.name) && hasPendingMuteApproval(arguments)) {
+      return;
+    }
     int maxPending = Math.max(plugin.getConfig().getInt("tools.approvals.max-pending", 8), 1);
     while (pendingApprovals.size() >= maxPending) {
       Long oldest = pendingApprovals.keySet().iterator().next();

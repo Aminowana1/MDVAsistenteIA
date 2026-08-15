@@ -53,6 +53,7 @@ public final class CommandManager implements TabExecutor {
       case "playerchatmode" -> handlePlayerChatMode(sender, args);
       case "listener", "listen" -> handleListener(sender, args);
       case "tools", "tool" -> handleTools(sender, args);
+      case "integrations", "integration" -> handleIntegrations(sender, args);
       case "approve" -> handleApprove(sender, args);
       case "deny" -> handleDeny(sender, args);
       default -> sendHelp(sender);
@@ -231,6 +232,34 @@ public final class CommandManager implements TabExecutor {
     MessageSender.Error(sender, "Usage: /sva tools [list|pending|moderation|set|run]");
   }
 
+
+  private void handleIntegrations(CommandSender sender, String[] args) {
+    if (plugin.getIntegrationManager() == null) {
+      MessageSender.Error(sender, "Integration manager is not initialized.");
+      return;
+    }
+    if (args.length == 1 || (args.length == 2 && args[1].equalsIgnoreCase("list"))) {
+      MessageSender.Success(sender, "Integrations: " + String.join(" | ", plugin.getIntegrationManager().statusLines()));
+      return;
+    }
+    if (args.length == 4 && args[1].equalsIgnoreCase("set")) {
+      String state = args[3].toLowerCase(Locale.ROOT);
+      if (!ENABLE_OPTIONS.contains(state)) {
+        MessageSender.Error(sender, "State must be enabled or disabled.");
+        return;
+      }
+      boolean enabled = state.equals("enabled");
+      if (!plugin.getIntegrationManager().setEnabled(args[2], enabled)) {
+        MessageSender.Error(sender, "Unknown integration. Use: "
+            + String.join(", ", plugin.getIntegrationManager().integrationIds()));
+        return;
+      }
+      MessageSender.Success(sender, "Integration '" + args[2] + "' set to " + state + ".");
+      return;
+    }
+    MessageSender.Error(sender, "Usage: /sva integrations [list|set <mmocore|mdvsocial|all> <enabled|disabled>]");
+  }
+
   private void handleApprove(CommandSender sender, String[] args) {
     if (args.length != 2) {
       MessageSender.Error(sender, "Usage: /sva approve <id>");
@@ -259,7 +288,7 @@ public final class CommandManager implements TabExecutor {
 
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(Component.text(
-        "SVA: /sva reload | status | trigger | listener playerchat <mode> | listener events <event> <enabled|disabled> | listener idle <enabled|disabled> | tools [list|pending|set|run] | approve <id> | deny <id>"));
+        "SVA: /sva reload | status | trigger | listener playerchat <mode> | listener events <event> <enabled|disabled> | listener idle <enabled|disabled> | tools [list|pending|moderation|set|run] | integrations [list|set] | approve <id> | deny <id>"));
   }
 
   @Override
@@ -269,7 +298,7 @@ public final class CommandManager implements TabExecutor {
     }
     if (args.length == 1) {
       return complete(args[0], List.of(
-          "reload", "status", "trigger", "listener", "listen", "playerchatmode", "tools", "approve", "deny"));
+          "reload", "status", "trigger", "listener", "listen", "playerchatmode", "tools", "integrations", "approve", "deny"));
     }
     if (args.length == 2 && args[0].equalsIgnoreCase("playerchatmode")) {
       return complete(args[1], MODES);
@@ -287,6 +316,17 @@ public final class CommandManager implements TabExecutor {
       return complete(args[2], ENABLE_OPTIONS);
     }
     if (args.length == 4 && isListener(args[0]) && args[1].equalsIgnoreCase("events")) {
+      return complete(args[3], ENABLE_OPTIONS);
+    }
+    if (args.length == 2 && (args[0].equalsIgnoreCase("integrations") || args[0].equalsIgnoreCase("integration"))) {
+      return complete(args[1], List.of("list", "set"));
+    }
+    if (args.length == 3 && (args[0].equalsIgnoreCase("integrations") || args[0].equalsIgnoreCase("integration"))
+        && args[1].equalsIgnoreCase("set") && plugin.getIntegrationManager() != null) {
+      return complete(args[2], plugin.getIntegrationManager().integrationIds());
+    }
+    if (args.length == 4 && (args[0].equalsIgnoreCase("integrations") || args[0].equalsIgnoreCase("integration"))
+        && args[1].equalsIgnoreCase("set")) {
       return complete(args[3], ENABLE_OPTIONS);
     }
     if (args.length == 2 && (args[0].equalsIgnoreCase("tools") || args[0].equalsIgnoreCase("tool"))) {

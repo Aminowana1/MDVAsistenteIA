@@ -9,13 +9,16 @@ import org.bukkit.entity.Player;
 
 import me.kev.sva.ServerAssistantPlugin;
 import me.kev.sva.chat.message.ChatMessage;
+import me.kev.sva.chat.tools.ContextTargetResolver;
 import me.kev.sva.chat.tools.ToolKind;
 
-/** Local one-call player status context inspired by the upstream player-data tool. */
+/** Local trusted online-player location/status context. */
 public final class PlayerDataTool extends Tool {
-  private static final List<String> INTENT_TERMS = List.of(
-      "donde", "ubicacion", "coordenad", "coords", "position", "location",
-      "vida", "health", "hambre", "food", "nivel", "level", "xp", "experiencia",
+  private static final List<String> LOCATION_TERMS = List.of(
+      "donde", "ubicacion", "coordenad", "coords", "position", "location");
+  private static final List<String> STATUS_TERMS = List.of(
+      "vida", "health", "hambre", "food",
+      "nivel vanilla", "level vanilla", "xp vanilla", "experiencia vanilla",
       "estado", "status", "gamemode", "modo de juego", "volando", "flying",
       "sprint", "nadando", "swimming", "invisible");
 
@@ -35,12 +38,33 @@ public final class PlayerDataTool extends Tool {
 
   @Override
   public boolean shouldPrefetch(String normalizedSceneText, List<ChatMessage> currentSceneMessages) {
-    for (String term : INTENT_TERMS) {
-      if (normalizedSceneText.contains(term)) {
-        return true;
-      }
+    return containsAny(normalizedSceneText, LOCATION_TERMS) || containsAny(normalizedSceneText, STATUS_TERMS);
+  }
+
+  @Override
+  public String buildLocalContext(
+      List<String> involvedPlayerNames,
+      String normalizedSceneText,
+      List<ChatMessage> currentSceneMessages) {
+
+    int maxPlayers = Math.max(plugin.getConfig().getInt("tools.player-data.max-players", 2), 1);
+    boolean queryLocation = containsAny(normalizedSceneText, LOCATION_TERMS);
+    boolean queryStatus = containsAny(normalizedSceneText, STATUS_TERMS);
+    if (!queryLocation && !queryStatus) {
+      queryLocation = plugin.getConfig().getBoolean("tools.player-data.include-location", true);
+      queryStatus = plugin.getConfig().getBoolean("tools.player-data.include-status", true);
     }
-    return false;
+
+    List<String> targets = ContextTargetResolver.resolve(
+        involvedPlayerNames, normalizedSceneText, currentSceneMessages, maxPlayers);
+    List<String> rows = new ArrayList<>();
+    for (String name : targets) {
+      if (rows.size() >= maxPlayers) break;
+      Player player = Bukkit.getPlayerExact(name);
+      if (player == null) continue;
+      rows.add(compact(player, queryLocation, queryStatus));
+    }
+    return String.join("\n", rows);
   }
 
   @Override
@@ -78,8 +102,8 @@ public final class PlayerDataTool extends Tool {
         + ", health=" + String.format(Locale.ROOT, "%.1f", player.getHealth())
         + ", food=" + player.getFoodLevel()
         + ", saturation=" + String.format(Locale.ROOT, "%.1f", player.getSaturation())
-        + ", level=" + player.getLevel()
-        + ", exp=" + String.format(Locale.ROOT, "%.2f", player.getExp())
+        + ", vanilla_level=" + player.getLevel()
+        + ", vanilla_exp=" + String.format(Locale.ROOT, "%.2f", player.getExp())
         + ", flying=" + player.isFlying()
         + ", sneaking=" + player.isSneaking()
         + ", sprinting=" + player.isSprinting()
@@ -89,21 +113,29 @@ public final class PlayerDataTool extends Tool {
   }
 
   private String compact(Player player, boolean includeLocation, boolean includeStatus) {
-    StringBuilder out = new StringBuilder("PLAYER_DATA ").append(player.getName());
+    StringBuilder out = new StringBuilder("PLAYER_DATA player=").append(player.getName());
     if (includeLocation) {
       var loc = player.getLocation();
-      out.append(" world=").append(player.getWorld().getName())
-          .append(" xyz=").append(loc.getBlockX()).append(',').append(loc.getBlockY()).append(',').append(loc.getBlockZ());
+      out.append(" | world=").append(player.getWorld().getName())
+          .append(" | xyz=").append(loc.getBlockX()).append(',').append(loc.getBlockY()).append(',').append(loc.getBlockZ());
     }
     if (includeStatus) {
-      out.append(" mode=").append(player.getGameMode().name())
-          .append(" hp=").append(String.format(Locale.ROOT, "%.1f", player.getHealth()))
-          .append(" food=").append(player.getFoodLevel())
-          .append(" lvl=").append(player.getLevel())
-          .append(" flying=").append(player.isFlying())
-          .append(" sneaking=").append(player.isSneaking())
-          .append(" sprinting=").append(player.isSprinting());
+      out.append(" | mode=").append(player.getGameMode().name())
+          .append(" | hp=").append(String.format(Locale.ROOT, "%.1f", player.getHealth()))
+          .append(" | food=").append(player.getFoodLevel())
+          .append(" | vanilla_level=").append(player.getLevel())
+          .append(" | flying=").append(player.isFlying())
+          .append(" | sneaking=").append(player.isSneaking())
+          .append(" | sprinting=").append(player.isSprinting());
     }
     return out.toString();
+  }
+
+  private static boolean containsAny(String text, List<String> terms) {
+    if (text == null || text.isBlank()) return false;
+    for (String term : terms) {
+      if (text.contains(term)) return true;
+    }
+    return false;
   }
 }
