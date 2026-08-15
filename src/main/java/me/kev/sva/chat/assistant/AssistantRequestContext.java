@@ -1,38 +1,21 @@
 package me.kev.sva.chat.assistant;
 
-/** Immutable metadata describing the logical conversation being answered. */
+/** Immutable metadata for one global public-chat scene. */
 public record AssistantRequestContext(
-    boolean global,
-    long conversationId,
-    String participants,
-    int participantCount,
-    int activePlayerConversations,
-    String recentServerEvents) {
+    long sceneId,
+    String involvedPlayers,
+    String sceneMeta,
+    String locallyRetrievedWiki) {
 
-  public static AssistantRequestContext conversation(
-      long conversationId,
-      String participants,
-      int participantCount,
-      int activePlayerConversations,
-      String recentServerEvents) {
+  public static AssistantRequestContext scene(
+      long sceneId,
+      String involvedPlayers,
+      String sceneMeta,
+      String locallyRetrievedWiki) {
     return new AssistantRequestContext(
-        false,
-        conversationId,
-        participants,
-        participantCount,
-        activePlayerConversations,
-        recentServerEvents);
-  }
-
-  public static AssistantRequestContext global(
-      int activePlayerConversations,
-      String recentServerEvents) {
-    return new AssistantRequestContext(
-        true,
-        0,
-        "",
-        0,
-        activePlayerConversations,
-        recentServerEvents);
+        sceneId,
+        involvedPlayers == null ? "" : involvedPlayers,
+        sceneMeta == null ? "" : sceneMeta,
+        locallyRetrievedWiki == null ? "" : locallyRetrievedWiki);
   }
 }

@@ -1,19 +1,23 @@
 package me.kev.sva.chat;
 
+import java.text.Normalizer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 import org.bukkit.Bukkit;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -22,57 +26,57 @@ import me.kev.sva.chat.assistant.AssistantManager;
 import me.kev.sva.chat.assistant.AssistantRequestContext;
 import me.kev.sva.chat.assistant.AssistantResponse;
 import me.kev.sva.chat.message.AssistantChatMessage;
-import me.kev.sva.chat.message.BroadcastChatMessage;
 import me.kev.sva.chat.message.ChatMessage;
 import me.kev.sva.chat.message.PlayerChatMessage;
 import me.kev.sva.chat.message.SystemContextMessage;
-import me.kev.sva.chat.tools.ToolManager;
-import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 
 /**
- * Owns all conversation state.
+ * ServerAssistant 1.5: one public global conversation.
  *
- * <p>Version 1.2 changes the routing model from "one slot per player" to
- * "one slot per logical conversation". A conversation may contain multiple
- * players. All Bukkit/session state is still mutated only on the Bukkit main
- * thread; the OpenAI network request is the only off-thread operation.</p>
+ * <p>There are no player/group slots. A direct call (or a short smart follow-up)
+ * opens one configurable scene window. Java reads a small amount of public chat
+ * and trusted events immediately before the trigger, listens for a short period
+ * afterwards, filters unrelated lines locally, and sends the resulting scene in
+ * one normal model request. Events never create their own AI request.</p>
  */
-public class ConversationManager {
-  private static final String GLOBAL_SESSION_KEY = "__GLOBAL__";
-
+public final class ConversationManager {
   private final ServerAssistantPlugin plugin;
   private final AssistantManager assistantManager;
-  private final ToolManager toolManager;
-
-  /** Active/recent logical player conversations, keyed by internal id. */
-  private final Map<Long, ConversationSession> conversations = new LinkedHashMap<>();
-
-  /** A player may actively belong to at most one SVA conversation. */
-  private final Map<UUID, ConversationSession> playerConversationIndex = new HashMap<>();
-
-  private final ConversationSession globalSession;
-  private final Deque<RequestJob> requestQueue = new ArrayDeque<>();
-  private final Deque<String> recentServerEvents = new ArrayDeque<>();
-  private final Map<UUID, Long> lastBusyNotice = new HashMap<>();
-  private final Map<UUID, Long> lastRateNotice = new HashMap<>();
-  private final Map<UUID, Long> lastProviderNotice = new HashMap<>();
-  private final Map<UUID, Deque<Long>> playerMessageTimes = new HashMap<>();
-  private final Map<UUID, Deque<RecentPublicMessage>> recentPublicChat = new HashMap<>();
   private final ProviderThrottleRegistry providerThrottle;
 
+  /** Rolling local logs. These cost zero AI tokens until a scene is actually built. */
+  private final Deque<PublicChatRecord> publicChatLog = new ArrayDeque<>();
+  private final Deque<ServerEventRecord> serverEventLog = new ArrayDeque<>();
+  private final Deque<SceneMemory> sceneHistory = new ArrayDeque<>();
+
+  /** Finished scenes waiting for the single serialized AI pipeline. */
+  private final Deque<SceneRequest> sceneQueue = new ArrayDeque<>();
+
+  /** Per-player trigger timestamps only; ordinary public messages are never rate-limited. */
+  private final Map<UUID, Deque<Long>> triggerTimes = new HashMap<>();
+
+  private ActiveCapture activeCapture;
+  private BukkitTask captureTask;
+  private BukkitTask requestRateRetryTask;
   private boolean requestInFlight = false;
   private boolean shutdown = false;
-  private long lastGlobalRequestAt = 0;
-  private long nextConversationId = 1;
-  private BukkitTask requestRateRetryTask;
-  private BukkitTask idleTask;
+  private long nextSceneId = 1L;
+
+  /**
+   * Smart-mode continuity is per player, not a global chat latch. Only players who
+   * actually addressed Isolda in the last answered scene receive a short follow-up
+   * window. Merely appearing as context never grants trigger rights.
+   */
+  private final Map<UUID, Long> smartFollowUpUntilByPlayer = new HashMap<>();
+
+  /** Direct addressers collected while the current 1.5s scene window is open. */
+  private final Set<UUID> activeAddressers = new LinkedHashSet<>();
 
   public ConversationManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
     this.assistantManager = new AssistantManager(plugin);
-    this.toolManager = new ToolManager(plugin);
     this.providerThrottle = plugin.getProviderThrottleRegistry();
-    this.globalSession = createGlobalSession();
   }
 
   public AssistantManager getAssistantManager() {
@@ -81,19 +85,19 @@ public class ConversationManager {
 
   public String getRuntimeStatus() {
     var primary = assistantManager.getPrimaryProviderSettings();
-    String primaryStatus = providerStatus("primary", primary);
-
     var fallback = assistantManager.getFallbackProviderSettings();
-    String fallbackStatus = fallback == null
-        ? "fallback=disabled"
-        : providerStatus("fallback", fallback);
+    String sceneState = activeCapture != null
+        ? "collecting"
+        : requestInFlight ? "in_flight" : sceneQueue.isEmpty() ? "idle" : "queued";
 
-    return primaryStatus
-        + ", " + fallbackStatus
-        + ", queue=" + requestQueue.size()
-        + ", in_flight=" + requestInFlight
-        + ", busy_conversations=" + countBusyPlayerConversations()
-        + ", warm_conversations=" + countActivePlayerConversations();
+    return providerStatus("primary", primary)
+        + ", " + (fallback == null ? "fallback=disabled" : providerStatus("fallback", fallback))
+        + ", global_scene=" + sceneState
+        + ", queued_scenes=" + sceneQueue.size()
+        + ", chat_log=" + publicChatLog.size()
+        + ", event_log=" + serverEventLog.size()
+        + ", history_scenes=" + sceneHistory.size()
+        + ", smart_followups=" + activeSmartFollowUps();
   }
 
   private String providerStatus(String role, me.kev.sva.chat.assistant.ProviderSettings settings) {
@@ -110,29 +114,26 @@ public class ConversationManager {
 
   public void shutdown() {
     shutdown = true;
-
+    cancelTask(captureTask);
     cancelTask(requestRateRetryTask);
-    cancelTask(idleTask);
+    captureTask = null;
     requestRateRetryTask = null;
-    idleTask = null;
-
-    for (ConversationSession session : conversations.values()) {
-      cancelSessionTasks(session);
-    }
-    cancelSessionTasks(globalSession);
-
-    requestQueue.clear();
-    conversations.clear();
-    playerConversationIndex.clear();
-    recentServerEvents.clear();
+    activeCapture = null;
+    sceneQueue.clear();
+    publicChatLog.clear();
+    serverEventLog.clear();
+    sceneHistory.clear();
+    triggerTimes.clear();
+    smartFollowUpUntilByPlayer.clear();
+    activeAddressers.clear();
     assistantManager.shutdown();
   }
 
   // ---------------------------------------------------------------------------
-  // PLAYER CHAT ROUTING
+  // PUBLIC CHAT -> GLOBAL SCENE
   // ---------------------------------------------------------------------------
 
-  /** Must be invoked on the Bukkit main thread. */
+  /** Must ultimately run on Bukkit's main thread. */
   public void handlePlayerMessage(Player player, String content) {
     if (shutdown || player == null || content == null || content.isBlank()) {
       return;
@@ -150,361 +151,79 @@ public class ConversationManager {
       return;
     }
 
-    rememberPublicMessage(player, content);
-    observePlayerActivity();
-    cleanupExpiredParticipantsAndSessions();
-    markParticipantsAddressedByExternalHuman(player, content);
+    long now = System.currentTimeMillis();
+    PublicChatRecord record = snapshotPlayerMessage(player, content, now);
+    rememberPublicChat(record);
 
-    String mode = plugin.getConfig().getString(
-        "request-triggers.player-messages.mode",
-        "smart");
-    mode = mode == null ? "smart" : mode.toLowerCase(Locale.ROOT);
-
-    if (mode.equals("disabled")) {
+    if (!plugin.getConfig().getBoolean("global-conversation.enabled", true)) {
       return;
     }
 
-    if (!mode.equals("always") && !mode.equals("mention") && !mode.equals("smart")) {
-      plugin.getLogger().warning("Unknown player message trigger mode: " + mode);
+    String mode = configuredTriggerMode();
+    if ("disabled".equals(mode)) {
       return;
     }
 
     boolean directMention = containsAssistantMention(content);
-    UUID playerId = player.getUniqueId();
-    ConversationSession session = playerConversationIndex.get(playerId);
-    ParticipantState participant = session == null ? null : session.participants.get(playerId);
 
-    if (mode.equals("mention") && !directMention) {
+    // Once a scene is open, all lines are merely local candidates and never create
+    // an extra request. A player who directly calls Isolda during the same window is
+    // remembered as an addresser so they may continue briefly after the reply.
+    if (activeCapture != null) {
+      if (directMention) {
+        activeAddressers.add(player.getUniqueId());
+      }
       return;
     }
 
-    // Existing group participant: smart follow-ups belong to that same logical
-    // conversation until deterministic human-chat/timeout rules release them.
-    if (mode.equals("smart") && !directMention) {
-      if (session == null || participant == null || !participant.active || isExpired(participant)) {
-        removeParticipant(session, playerId, false);
-        return;
-      }
+    boolean smartFollowUp = "smart".equals(mode)
+        && hasActiveSmartFollowUp(player.getUniqueId(), now);
 
-      if (participant.humanConversationSignal) {
-        removeParticipant(session, playerId, false);
-        return;
-      }
+    boolean shouldTrigger = switch (mode) {
+      case "always" -> true;
+      case "mention" -> directMention;
+      case "smart" -> directMention || smartFollowUp;
+      default -> directMention;
+    };
 
-      if (plugin.getConfig().getBoolean(
-          "conversation-control.human-conversation-detection.release-when-user-addresses-other-player",
-          true)
-          && isClearlyAddressedToPlayerOutsideConversation(player, content, session)) {
-        removeParticipant(session, playerId, false);
-        return;
-      }
-
-      int maxFollowUps = Math.max(
-          plugin.getConfig().getInt(
-              "conversation-control.max-follow-up-messages-without-mention",
-              4),
-          0);
-
-      if (maxFollowUps > 0 && participant.followUpsWithoutMention >= maxFollowUps) {
-        removeParticipant(session, playerId, false);
-        return;
-      }
-    }
-
-    // A direct mention from someone who is not already participating may join a
-    // recent group conversation if the relationship is unambiguous. Otherwise it
-    // opens a new logical conversation and therefore consumes a slot.
-    if (directMention && (session == null || participant == null || !participant.active)) {
-      ConversationSession joinCandidate = findGroupJoinCandidate(player, content);
-      if (joinCandidate != null) {
-        session = joinCandidate;
-        participant = addOrRefreshParticipant(session, player);
-      } else {
-        if (!hasFreeConversationSlot()) {
-          sendBusyNotice(player);
-          return;
-        }
-        session = createPlayerConversation();
-        participant = addOrRefreshParticipant(session, player);
-        conversations.put(session.id, session);
-      }
-    }
-
-    // always mode may open a conversation without a mention. Smart/mention only
-    // reach here without a session when a direct mention opened one above.
-    if (session == null || participant == null) {
-      if (!mode.equals("always")) {
-        return;
-      }
-      if (!hasFreeConversationSlot()) {
-        sendBusyNotice(player);
-        return;
-      }
-      session = createPlayerConversation();
-      participant = addOrRefreshParticipant(session, player);
-      conversations.put(session.id, session);
-    }
-
-    // A remembered smart-mode session does not reserve an AI slot while idle.
-    // When it becomes active again, however, it must compete for the same turn
-    // capacity as a brand-new conversation. Existing pending/processing sessions
-    // already own their slot and may continue batching messages normally.
-    if (!occupiesConversationSlot(session) && !hasFreeConversationSlot()) {
-      sendBusyNotice(player);
+    if (!shouldTrigger || !allowSceneTrigger(player.getUniqueId())) {
       return;
     }
 
-    refreshParticipantSnapshot(participant, player);
-    session.suppressResponse = false;
-
-    if (!allowPlayerMessage(participant)) {
-      sendRateNotice(player);
-      return;
-    }
-
-    boolean closingMessage = isConfiguredConversationCloser(content);
-
-    if (directMention) {
-      participant.followUpsWithoutMention = 0;
-      participant.closeAfterCurrent = false;
-      participant.humanConversationSignal = false;
-    } else if (mode.equals("smart")) {
-      participant.followUpsWithoutMention++;
-      // A fresh non-closing follow-up means the participant changed their mind
-      // about ending the exchange (for example: "gracias" followed by a new question).
-      if (!closingMessage) {
-        participant.closeAfterCurrent = false;
-      }
-    }
-
-    if (mode.equals("mention")) {
-      participant.closeAfterCurrent = true;
-    }
-
-    if (closingMessage) {
-      // In a group, only this participant leaves after SVA has had a chance to
-      // answer naturally. The rest of the group conversation stays alive.
-      participant.closeAfterCurrent = true;
-    }
-
-    int maxPendingPerPlayer = Math.max(
-        plugin.getConfig().getInt("conversation-control.max-pending-messages-per-player", 8),
-        1);
-    if (countPendingMessagesFrom(session, playerId) >= maxPendingPerPlayer) {
-      sendRateNotice(player);
-      return;
-    }
-
-    if (directMention) {
-      importExplicitlyReferencedRecentSpeakers(session, player, content);
-    }
-
-    session.pending.add(new PlayerChatMessage(plugin, player, content));
-    session.lastSpeakerId = playerId;
-    session.lastInteractionAt = System.currentTimeMillis();
-    refreshParticipantExpiry(session, participant);
-    scheduleBatch(session);
+    startCapture(record, directMention, smartFollowUp);
   }
 
-  /** Removes this player from their SVA group without necessarily ending the group. */
+  /** There are no player sessions to release in the global model. */
   public void handlePlayerDisconnect(UUID playerId) {
-    if (playerId == null) {
-      return;
-    }
-    lastBusyNotice.remove(playerId);
-    lastRateNotice.remove(playerId);
-    lastProviderNotice.remove(playerId);
-    recentPublicChat.remove(playerId);
-    ConversationSession session = playerConversationIndex.get(playerId);
-    if (session == null) {
-      return;
-    }
-
-    removePendingMessagesFrom(session, playerId);
-    removeParticipant(session, playerId, false);
-
-    if (session.participants.isEmpty() && session.processing) {
-      session.suppressResponse = true;
+    if (playerId != null) {
+      triggerTimes.remove(playerId);
+      smartFollowUpUntilByPlayer.remove(playerId);
+      activeAddressers.remove(playerId);
     }
   }
 
-  /**
-   * A conversation slot represents work currently waiting for/using the AI, not a
-   * warm smart-mode memory window. Otherwise two idle players would reserve both
-   * slots for the full smart timeout and a third direct mention would be rejected.
-   */
-  private boolean hasFreeConversationSlot() {
-    int maxActive = plugin.getConfig().contains("conversation-control.max-active-conversations")
-        ? plugin.getConfig().getInt("conversation-control.max-active-conversations", 2)
-        : plugin.getConfig().getInt("conversation-control.max-active-player-conversations", 2);
-    maxActive = Math.max(maxActive, 0);
-    return maxActive == 0 || countBusyPlayerConversations() < maxActive;
+  private String configuredTriggerMode() {
+    String mode;
+    if (plugin.getConfig().isSet("global-conversation.trigger-mode")) {
+      mode = plugin.getConfig().getString("global-conversation.trigger-mode", "smart");
+    } else {
+      // Non-destructive compatibility for users upgrading with a 1.4.x config.
+      mode = plugin.getConfig().getString("request-triggers.player-messages.mode", "smart");
+    }
+    mode = mode == null ? "smart" : mode.toLowerCase(Locale.ROOT).trim();
+    return Set.of("always", "mention", "smart", "disabled").contains(mode) ? mode : "smart";
   }
 
-  private boolean occupiesConversationSlot(ConversationSession session) {
-    return session != null
-        && !session.global
-        && (session.processing
-            || session.queued
-            || !session.pending.isEmpty()
-            || !session.currentBatch.isEmpty());
-  }
-
-  private ConversationSession findGroupJoinCandidate(Player player, String message) {
-    if (!plugin.getConfig().getBoolean("conversation-control.group-conversations.enabled", true)) {
-      return null;
-    }
-
-    int maxParticipants = Math.max(
-        plugin.getConfig().getInt("conversation-control.group-conversations.max-participants", 6),
-        1);
-    long joinWindow = Math.max(
-        plugin.getConfig().getLong("conversation-control.group-conversations.join-window-ms", 15000),
-        0);
-    long now = System.currentTimeMillis();
-
-    List<ConversationSession> eligible = new ArrayList<>();
-    for (ConversationSession session : new ArrayList<>(conversations.values())) {
-      cleanupExpiredParticipants(session);
-      if (session.participants.isEmpty()) {
-        continue;
-      }
-      if (session.participants.size() >= maxParticipants) {
-        continue;
-      }
-      if (joinWindow > 0 && now - session.lastInteractionAt > joinWindow) {
-        continue;
-      }
-      eligible.add(session);
-    }
-
-    if (eligible.isEmpty()) {
-      return null;
-    }
-
-    // Strongest signal: the newcomer explicitly references a participant from
-    // exactly one active SVA conversation.
-    List<ConversationSession> referenced = new ArrayList<>();
-    for (ConversationSession session : eligible) {
-      if (messageReferencesAnyParticipant(message, session, player.getUniqueId())) {
-        referenced.add(session);
-      }
-    }
-    if (referenced.size() == 1) {
-      return referenced.get(0);
-    }
-
-    // With more than one active conversation we refuse to guess. This is what
-    // prevents an unrelated SVA question from being inserted into the wrong group.
-    if (eligible.size() != 1) {
-      return null;
-    }
-
-    ConversationSession only = eligible.get(0);
-    if (!plugin.getConfig().getBoolean(
-        "conversation-control.group-conversations.join-on-contextual-follow-up",
-        true)) {
-      return null;
-    }
-
-    return looksLikeContextualFollowUp(message) ? only : null;
-  }
-
-  private boolean looksLikeContextualFollowUp(String message) {
-    String normalized = stripAssistantMentions(message)
-        .toLowerCase(Locale.ROOT)
-        .trim()
-        .replaceFirst("^[¿¡!?.,:;\\-]+", "")
-        .trim();
-
-    if (normalized.isEmpty()) {
-      return false;
-    }
-
-    List<String> prefixes = plugin.getConfig().getStringList(
-        "conversation-control.group-conversations.contextual-follow-up-prefixes");
-    if (prefixes.isEmpty()) {
-      prefixes = List.of("y", "eso", "esa", "ese", "entonces", "pero");
-    }
-
-    for (String cue : prefixes) {
-      if (cue == null || cue.isBlank()) {
-        continue;
-      }
-      String normalizedCue = cue.toLowerCase(Locale.ROOT).trim();
-      if (normalized.equals(normalizedCue)
-          || normalized.startsWith(normalizedCue + " ")
-          || normalized.startsWith(normalizedCue + "?")
-          || normalized.startsWith(normalizedCue + ",")) {
-        return true;
-      }
-    }
-
-    List<String> containsCues = plugin.getConfig().getStringList(
-        "conversation-control.group-conversations.contextual-follow-up-contains");
-    if (containsCues.isEmpty()) {
-      containsCues = List.of(
-          "tambien", "también", "lo mismo", "sobre eso", "de eso", "lo que dijo", "lo que dice");
-    }
-    for (String cue : containsCues) {
-      if (cue != null && !cue.isBlank()
-          && containsWholeWordPhraseIgnoreCase(normalized, cue.trim())) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private boolean messageReferencesAnyParticipant(
-      String message,
-      ConversationSession session,
-      UUID senderId) {
-    String lower = message.toLowerCase(Locale.ROOT);
-    for (ParticipantState participant : session.participants.values()) {
-      if (participant.playerId.equals(senderId)) {
-        continue;
-      }
-      String name = participant.playerName.toLowerCase(Locale.ROOT);
-      if (lower.contains("@" + name)
-          || containsWholeWordIgnoreCase(message, participant.playerName)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private ParticipantState addOrRefreshParticipant(ConversationSession session, Player player) {
-    ParticipantState participant = session.participants.get(player.getUniqueId());
-    if (participant == null) {
-      participant = new ParticipantState(player.getUniqueId());
-      session.participants.put(player.getUniqueId(), participant);
-    }
-
-    participant.active = true;
-    participant.humanConversationSignal = false;
-    participant.closeAfterCurrent = false;
-    participant.followUpsWithoutMention = 0;
-    refreshParticipantSnapshot(participant, player);
-    playerConversationIndex.put(player.getUniqueId(), session);
-    refreshParticipantExpiry(session, participant);
-    session.lastInteractionAt = System.currentTimeMillis();
-    return participant;
-  }
-
-  private boolean allowPlayerMessage(ParticipantState participant) {
+  private boolean allowSceneTrigger(UUID playerId) {
     int maxPerMinute = Math.max(
-        plugin.getConfig().getInt("rate-limits.max-player-messages-per-minute", 12),
+        plugin.getConfig().getInt("rate-limits.max-scene-triggers-per-player-per-minute", 8),
         0);
-
     if (maxPerMinute == 0) {
       return true;
     }
-
     long now = System.currentTimeMillis();
-    Deque<Long> times = playerMessageTimes.computeIfAbsent(
-        participant.playerId,
-        ignored -> new ArrayDeque<>());
-    pruneOlderThan(times, now - 60000L);
+    Deque<Long> times = triggerTimes.computeIfAbsent(playerId, ignored -> new ArrayDeque<>());
+    pruneOlderThan(times, now - 60_000L);
     if (times.size() >= maxPerMinute) {
       return false;
     }
@@ -512,544 +231,562 @@ public class ConversationManager {
     return true;
   }
 
-  private int countPendingMessagesFrom(ConversationSession session, UUID playerId) {
-    int count = 0;
-    for (ChatMessage message : session.pending) {
-      if (message instanceof PlayerChatMessage playerMessage
-          && playerMessage.playerId.equals(playerId)) {
-        count++;
-      }
-    }
-    return count;
+  private PublicChatRecord snapshotPlayerMessage(Player player, String content, long timestamp) {
+    String displayName = PlainTextComponentSerializer.plainText().serialize(player.displayName());
+    return new PublicChatRecord(
+        timestamp,
+        player.getUniqueId(),
+        player.getName(),
+        displayName,
+        player.isOp(),
+        content);
   }
 
-  private void removePendingMessagesFrom(ConversationSession session, UUID playerId) {
-    session.pending.removeIf(message -> message instanceof PlayerChatMessage playerMessage
-        && playerMessage.playerId.equals(playerId));
-  }
-
-  private void rememberPublicMessage(Player player, String content) {
-    if (player == null || content == null || content.isBlank()) {
-      return;
-    }
-    int keep = Math.max(plugin.getConfig().getInt(
-        "conversation-control.recent-public-chat.messages-per-player", 2), 1);
-    Deque<RecentPublicMessage> messages = recentPublicChat.computeIfAbsent(
-        player.getUniqueId(), ignored -> new ArrayDeque<>());
-    messages.addLast(new RecentPublicMessage(System.currentTimeMillis(), content));
-    while (messages.size() > keep) {
-      messages.removeFirst();
+  private void rememberPublicChat(PublicChatRecord record) {
+    publicChatLog.addLast(record);
+    int max = Math.max(plugin.getConfig().getInt("global-conversation.logs.max-chat-records", 80), 20);
+    while (publicChatLog.size() > max) {
+      publicChatLog.removeFirst();
     }
   }
 
-  /**
-   * Handles explicit hand-offs such as "Iso responde a Kroattan" without feeding
-   * all public chat to the model. Only the named player's very recent PUBLIC line
-   * is imported, and only when a clear hand-off phrase is present.
-   */
-  private void importExplicitlyReferencedRecentSpeakers(
-      ConversationSession session, Player requester, String content) {
-    if (session == null || session.global || requester == null || content == null) {
-      return;
-    }
-    if (!plugin.getConfig().getBoolean(
-        "conversation-control.group-conversations.explicit-handoff.enabled", true)) {
-      return;
-    }
-
-    String lower = stripAssistantMentions(content).toLowerCase(Locale.ROOT);
-    List<String> triggers = plugin.getConfig().getStringList(
-        "conversation-control.group-conversations.explicit-handoff.phrases");
-    if (triggers.isEmpty()) {
-      triggers = List.of("responde a", "contestale a", "contéstale a", "contesta a",
-          "lo que dijo", "lo que dice", "pregunta de", "habla con");
-    }
-    boolean handoff = false;
-    for (String trigger : triggers) {
-      if (trigger != null && !trigger.isBlank()
-          && lower.contains(trigger.toLowerCase(Locale.ROOT))) {
-        handoff = true;
-        break;
-      }
-    }
-    if (!handoff) {
-      return;
-    }
-
-    int maxParticipants = Math.max(plugin.getConfig().getInt(
-        "conversation-control.group-conversations.max-participants", 6), 1);
-    long maxAge = Math.max(plugin.getConfig().getLong(
-        "conversation-control.recent-public-chat.handoff-max-age-ms", 30000L), 1000L);
+  private void startCapture(PublicChatRecord trigger, boolean directMention, boolean smartFollowUp) {
+    long windowMs = Math.max(
+        plugin.getConfig().getLong("global-conversation.scene.capture-window-ms", 1500L),
+        0L);
     long now = System.currentTimeMillis();
+    activeCapture = new ActiveCapture(
+        nextSceneId++,
+        trigger.timestampMs(),
+        now + windowMs,
+        trigger.playerId(),
+        trigger.playerName(),
+        directMention,
+        smartFollowUp);
 
-    for (Player target : Bukkit.getOnlinePlayers()) {
-      if (target.getUniqueId().equals(requester.getUniqueId())) {
-        continue;
-      }
-      if (!containsWholeWordIgnoreCase(content, target.getName())
-          && !content.toLowerCase(Locale.ROOT).contains("@" + target.getName().toLowerCase(Locale.ROOT))) {
-        continue;
-      }
-      if (session.participants.containsKey(target.getUniqueId())) {
-        continue;
-      }
-      ConversationSession otherSession = playerConversationIndex.get(target.getUniqueId());
-      if (otherSession != null && otherSession != session) {
-        continue;
-      }
-      if (session.participants.size() >= maxParticipants) {
-        continue;
-      }
-
-      Deque<RecentPublicMessage> messages = recentPublicChat.get(target.getUniqueId());
-      if (messages == null || messages.isEmpty()) {
-        continue;
-      }
-      RecentPublicMessage recent = messages.peekLast();
-      if (recent == null || now - recent.timestampMs > maxAge) {
-        continue;
-      }
-
-      addOrRefreshParticipant(session, target);
-      session.pending.add(new PlayerChatMessage(plugin, target, recent.content));
-      break; // one explicit hand-off per message keeps routing conservative
-    }
-  }
-
-  private boolean containsAssistantMention(String message) {
-    if (message == null || message.isBlank()) {
-      return false;
+    activeAddressers.clear();
+    // A direct mention grants continuity. A smart follow-up renews continuity for
+    // the same player only after Isolda successfully completes this scene.
+    if (directMention || smartFollowUp) {
+      activeAddressers.add(trigger.playerId());
     }
 
-    List<String> mentions = configuredAssistantMentions();
-    String lowerMessage = message.toLowerCase(Locale.ROOT);
-    for (String mention : mentions) {
-      if (mention == null || mention.isBlank()) {
-        continue;
-      }
-      String lowerMention = mention.toLowerCase(Locale.ROOT).trim();
-      if (lowerMention.startsWith("@")) {
-        if (lowerMessage.contains(lowerMention)) {
-          return true;
-        }
-        continue;
-      }
-
-      Pattern pattern = Pattern.compile(
-          "(?iu)(?<![\\p{L}\\p{N}_])" + Pattern.quote(mention.trim()) + "(?![\\p{L}\\p{N}_])");
-      if (pattern.matcher(message).find()) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private List<String> configuredAssistantMentions() {
-    List<String> mentions = new ArrayList<>(plugin.getConfig().getStringList(
-        "request-triggers.player-messages.mentions"));
-
-    if (plugin.getConfig().getBoolean(
-        "request-triggers.player-messages.include-assistant-name-as-mention",
-        true)) {
-      String assistantName = plugin.getConfig().getString("assistant-name", "ServerAssistant");
-      if (assistantName != null && !assistantName.isBlank()) {
-        mentions.add(assistantName);
-      }
-    }
-    return mentions;
-  }
-
-  private String stripAssistantMentions(String message) {
-    String result = message == null ? "" : message;
-    for (String mention : configuredAssistantMentions()) {
-      if (mention == null || mention.isBlank()) {
-        continue;
-      }
-      result = result.replaceAll("(?iu)" + Pattern.quote(mention.trim()), " ");
-    }
-    return result.replaceAll("\\s+", " ").trim();
-  }
-
-  private void markParticipantsAddressedByExternalHuman(Player sender, String message) {
-    // A message that explicitly calls SVA is not evidence that the sender is
-    // pulling a participant into a separate human-only conversation.
-    if (containsAssistantMention(message)) {
-      return;
-    }
-
-    if (!plugin.getConfig().getBoolean(
-        "conversation-control.human-conversation-detection.release-when-other-player-addresses-user",
-        true)) {
-      return;
-    }
-
-    ConversationSession senderSession = playerConversationIndex.get(sender.getUniqueId());
-    String lower = message.trim().toLowerCase(Locale.ROOT);
-
-    for (ConversationSession session : conversations.values()) {
-      if (senderSession == session) {
-        // Participants in the same SVA group are allowed to address one another;
-        // that does not mean they have left the shared conversation.
-        continue;
-      }
-
-      for (ParticipantState participant : session.participants.values()) {
-        if (!participant.active || participant.playerId.equals(sender.getUniqueId())) {
-          continue;
-        }
-
-        String name = participant.playerName.toLowerCase(Locale.ROOT);
-        if (lower.contains("@" + name)
-            || lower.equals(name)
-            || lower.startsWith(name + " ")
-            || lower.startsWith(name + ",")
-            || lower.startsWith(name + ":")) {
-          participant.humanConversationSignal = true;
-        }
-      }
-    }
-  }
-
-  private boolean isClearlyAddressedToPlayerOutsideConversation(
-      Player sender,
-      String message,
-      ConversationSession currentSession) {
-    if (containsAssistantMention(message)) {
-      return false;
-    }
-
-    String lower = message.trim().toLowerCase(Locale.ROOT);
-
-    for (Player other : Bukkit.getOnlinePlayers()) {
-      if (other.getUniqueId().equals(sender.getUniqueId())) {
-        continue;
-      }
-
-      // Addressing a co-participant is part of the group context, not a signal to
-      // leave SVA. Only people outside this logical conversation release the sender.
-      if (currentSession != null && currentSession.participants.containsKey(other.getUniqueId())) {
-        continue;
-      }
-
-      String name = other.getName().toLowerCase(Locale.ROOT);
-      if (lower.contains("@" + name)
-          || lower.equals(name)
-          || lower.startsWith(name + " ")
-          || lower.startsWith(name + ",")
-          || lower.startsWith(name + ":")
-          || lower.startsWith("@" + name + " ")
-          || lower.startsWith("@" + name + ",")
-          || lower.startsWith("@" + name + ":")) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private boolean isConfiguredConversationCloser(String message) {
-    if (!plugin.getConfig().getBoolean("conversation-control.closing-phrases.enabled", true)) {
-      return false;
-    }
-
-    String normalized = stripAssistantMentions(message)
-        .toLowerCase(Locale.ROOT)
-        .replaceAll("[^\\p{L}\\p{N}]+", " ")
-        .trim()
-        .replaceAll("\\s+", " ");
-
-    if (normalized.isEmpty()) {
-      return false;
-    }
-
-    for (String phrase : plugin.getConfig().getStringList(
-        "conversation-control.closing-phrases.phrases")) {
-      if (phrase == null) {
-        continue;
-      }
-      String normalizedPhrase = phrase.toLowerCase(Locale.ROOT)
-          .replaceAll("[^\\p{L}\\p{N}]+", " ")
-          .trim()
-          .replaceAll("\\s+", " ");
-      if (!normalizedPhrase.isEmpty() && normalized.equals(normalizedPhrase)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private static boolean containsWholeWordIgnoreCase(String text, String word) {
-    if (text == null || word == null || word.isBlank()) {
-      return false;
-    }
-    Pattern pattern = Pattern.compile(
-        "(?iu)(?<![\\p{L}\\p{N}_])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}_])");
-    return pattern.matcher(text).find();
-  }
-
-  private static boolean containsWholeWordPhraseIgnoreCase(String text, String phrase) {
-    if (text == null || phrase == null || phrase.isBlank()) {
-      return false;
-    }
-    Pattern pattern = Pattern.compile(
-        "(?iu)(?<![\\p{L}\\p{N}_])" + Pattern.quote(phrase) + "(?![\\p{L}\\p{N}_])");
-    return pattern.matcher(text).find();
-  }
-
-  // ---------------------------------------------------------------------------
-  // GLOBAL EVENTS / OPTIONAL AMBIENT SCHEDULING
-  // ---------------------------------------------------------------------------
-
-  public void queueGlobalEvent(String message) {
-    if (shutdown || message == null || message.isBlank()) {
-      return;
-    }
-
-    rememberServerEvent(message);
-
-    int maxPendingEvents = Math.max(
-        plugin.getConfig().getInt("request-triggers.global-events.max-pending-events", 10),
-        1);
-    while (globalSession.pending.size() >= maxPendingEvents) {
-      globalSession.pending.remove(0);
-    }
-
-    globalSession.pending.add(new BroadcastChatMessage(plugin, message));
-    scheduleBatch(globalSession);
-  }
-
-  private void rememberServerEvent(String message) {
-    int limit = Math.max(
-        plugin.getConfig().getInt("conversation-control.recent-server-events-limit", 8),
-        0);
-    if (limit == 0) {
-      return;
-    }
-
-    recentServerEvents.addLast(message);
-    while (recentServerEvents.size() > limit) {
-      recentServerEvents.removeFirst();
-    }
-  }
-
-  private void observePlayerActivity() {
-    cancelTask(idleTask);
-    idleTask = null;
-
-    if (!plugin.getConfig().getBoolean("request-triggers.scheduling.enabled", false)) {
-      return;
-    }
-
-    long min = Math.max(
-        plugin.getConfig().getLong("request-triggers.scheduling.min-delay", 30000),
-        1000);
-    long max = Math.max(
-        plugin.getConfig().getLong("request-triggers.scheduling.max-delay", 120000),
-        min);
-    long delayMs = ThreadLocalRandom.current().nextLong(min, max + 1);
-    long ticks = Math.max(1, (delayMs + 49) / 50);
-
-    idleTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-      idleTask = null;
-      if (shutdown || Bukkit.getOnlinePlayers().isEmpty() || countBusyPlayerConversations() > 0) {
-        return;
-      }
-
-      globalSession.pending.add(new SystemContextMessage(
-          plugin,
-          "[IDLE MOMENT] ",
-          "The public chat has been quiet for a while. Decide whether a single short ambient message would feel natural and useful. Usually remain silent."));
-      scheduleBatch(globalSession);
+    cancelTask(captureTask);
+    long ticks = Math.max(1L, (windowMs + 49L) / 50L);
+    captureTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+      captureTask = null;
+      finishCapture();
     }, ticks);
   }
 
-  // ---------------------------------------------------------------------------
-  // BATCHING
-  // ---------------------------------------------------------------------------
+  private void finishCapture() {
+    if (shutdown || activeCapture == null) {
+      return;
+    }
+    ActiveCapture capture = activeCapture;
+    Set<UUID> addressers = Set.copyOf(activeAddressers);
+    activeAddressers.clear();
+    activeCapture = null;
 
-  private void scheduleBatch(ConversationSession session) {
-    if (shutdown || session.processing || session.pending.isEmpty()) {
+    SceneRequest scene = buildScene(capture, addressers);
+    if (scene == null || scene.messages().isEmpty()) {
       return;
     }
 
-    long now = System.currentTimeMillis();
-    if (session.batchStartTime == 0) {
-      session.batchStartTime = now;
-      scheduleMaxBatchWait(session);
+    int maxPending = Math.max(
+        plugin.getConfig().getInt("global-conversation.scene.max-pending-scenes", 4),
+        1);
+    while (sceneQueue.size() >= maxPending) {
+      // Global chat should never say "I'm busy". Keep the newest context by
+      // dropping the oldest not-yet-sent scene if the queue is abused.
+      sceneQueue.pollFirst();
     }
-
-    int maxMessages = Math.max(plugin.getConfig().getInt("message-batching.max-size", 10), 0);
-    if (maxMessages > 0 && session.pending.size() >= maxMessages) {
-      processSessionBatch(session);
-      return;
-    }
-
-    cancelTask(session.batchTask);
-
-    long delayMs = Math.max(plugin.getConfig().getLong("message-batching.wait-time", 1500), 0);
-    long maxWaitMs = Math.max(plugin.getConfig().getLong("message-batching.max-wait-time", 10000), 0);
-    long elapsed = now - session.batchStartTime;
-    long remainingMaxWait = maxWaitMs <= 0 ? delayMs : Math.max(0, maxWaitMs - elapsed);
-    long actualDelay = maxWaitMs <= 0 ? delayMs : Math.min(delayMs, remainingMaxWait);
-    long delayTicks = Math.max(1, (actualDelay + 49) / 50);
-
-    session.batchTask = plugin.getServer().getScheduler().runTaskLater(
-        plugin,
-        () -> processSessionBatch(session),
-        delayTicks);
-  }
-
-  private void scheduleMaxBatchWait(ConversationSession session) {
-    long maxWaitMs = Math.max(plugin.getConfig().getLong("message-batching.max-wait-time", 10000), 0);
-    if (maxWaitMs <= 0) {
-      return;
-    }
-
-    cancelTask(session.maxBatchTask);
-    long delayTicks = Math.max(1, (maxWaitMs + 49) / 50);
-    session.maxBatchTask = plugin.getServer().getScheduler().runTaskLater(
-        plugin,
-        () -> processSessionBatch(session),
-        delayTicks);
-  }
-
-  private void processSessionBatch(ConversationSession session) {
-    if (shutdown || session.processing || session.pending.isEmpty()) {
-      return;
-    }
-
-    if (!session.global) {
-      long minConversationGap = Math.max(
-          plugin.getConfig().getLong("rate-limits.min-conversation-request-gap-ms", 4000L),
-          0L);
-      long remainingGap = minConversationGap - (System.currentTimeMillis() - session.lastProviderRequestAt);
-      if (session.lastProviderRequestAt > 0 && remainingGap > 0) {
-        cancelTask(session.batchTask);
-        long ticks = Math.max(1L, (remainingGap + 49L) / 50L);
-        session.batchTask = plugin.getServer().getScheduler().runTaskLater(
-            plugin,
-            () -> processSessionBatch(session),
-            ticks);
-        return;
-      }
-    }
-
-    if (session.global) {
-      if (plugin.getConfig().getBoolean(
-          "request-triggers.global-events.defer-while-player-conversations-active",
-          true)
-          && countBusyPlayerConversations() > 0) {
-        cancelTask(session.batchTask);
-        session.batchTask = plugin.getServer().getScheduler().runTaskLater(
-            plugin,
-            () -> processSessionBatch(session),
-            40L);
-        return;
-      }
-
-      long minInterval = Math.max(
-          plugin.getConfig().getLong(
-              "request-triggers.global-events.minimum-request-interval-ms",
-              30000),
-          0);
-      long remaining = minInterval - (System.currentTimeMillis() - lastGlobalRequestAt);
-      if (lastGlobalRequestAt > 0 && remaining > 0) {
-        cancelTask(session.batchTask);
-        long ticks = Math.max(1, (remaining + 49) / 50);
-        session.batchTask = plugin.getServer().getScheduler().runTaskLater(
-            plugin,
-            () -> processSessionBatch(session),
-            ticks);
-        return;
-      }
-    }
-
-    cancelTask(session.batchTask);
-    cancelTask(session.maxBatchTask);
-    session.batchTask = null;
-    session.maxBatchTask = null;
-    session.batchStartTime = 0;
-
-    session.currentBatch.clear();
-    session.currentBatch.addAll(session.pending);
-    session.pending.clear();
-
-    session.processing = true;
-    if (!session.queued) {
-      session.queued = true;
-      requestQueue.addLast(new RequestJob(session, 0, 0, AssistantManager.PRIMARY));
-    }
+    sceneQueue.addLast(scene);
     processNextRequest();
   }
 
   // ---------------------------------------------------------------------------
-  // SERIALIZED AI REQUEST PIPELINE
+  // RELEVANCE FILTERING
+  // ---------------------------------------------------------------------------
+
+  private SceneRequest buildScene(ActiveCapture capture, Set<UUID> addressers) {
+    long lookbackMs = Math.max(
+        plugin.getConfig().getLong("global-conversation.scene.pre-lookback-ms", 10_000L),
+        0L);
+    long from = capture.triggerAt() - lookbackMs;
+    long to = capture.endsAt();
+
+    List<PublicChatRecord> chatCandidates = publicChatLog.stream()
+        .filter(m -> m.timestampMs() >= from && m.timestampMs() <= to)
+        .sorted(Comparator.comparingLong(PublicChatRecord::timestampMs))
+        .toList();
+    List<ServerEventRecord> eventCandidates = serverEventLog.stream()
+        .filter(e -> e.timestampMs() >= from && e.timestampMs() <= to)
+        .sorted(Comparator.comparingLong(ServerEventRecord::timestampMs))
+        .toList();
+
+    Map<String, UUID> knownNames = new LinkedHashMap<>();
+    for (PublicChatRecord chat : chatCandidates) {
+      knownNames.put(chat.playerName().toLowerCase(Locale.ROOT), chat.playerId());
+    }
+    for (Player online : Bukkit.getOnlinePlayers()) {
+      knownNames.putIfAbsent(online.getName().toLowerCase(Locale.ROOT), online.getUniqueId());
+    }
+
+    Set<UUID> involvedIds = new LinkedHashSet<>();
+    Set<String> involvedNames = new LinkedHashSet<>();
+    involvedIds.add(capture.triggerPlayerId());
+    involvedNames.add(capture.triggerPlayerName());
+
+    // Names explicitly referenced by the triggering message are involved too.
+    PublicChatRecord triggerRecord = chatCandidates.stream()
+        .filter(m -> m.timestampMs() == capture.triggerAt()
+            && m.playerId().equals(capture.triggerPlayerId()))
+        .findFirst().orElse(null);
+    if (triggerRecord != null) {
+      addReferencedNames(triggerRecord.content(), knownNames, involvedIds, involvedNames);
+    }
+
+    Set<PublicChatRecord> includedChats = new LinkedHashSet<>();
+    Set<ServerEventRecord> includedEvents = new LinkedHashSet<>();
+
+    // Expand the relation graph. Example: A calls Iso; B mentions A; C threatens B;
+    // then an event says C killed B. All become involved without sending unrelated chat.
+    for (int pass = 0; pass < 6; pass++) {
+      boolean changed = false;
+
+      for (PublicChatRecord chat : chatCandidates) {
+        boolean isTrigger = chat.timestampMs() == capture.triggerAt()
+            && chat.playerId().equals(capture.triggerPlayerId());
+        boolean related = isTrigger
+            || containsAssistantMention(chat.content())
+            || involvedIds.contains(chat.playerId())
+            || referencesAnyName(chat.content(), involvedNames);
+        if (!related) {
+          continue;
+        }
+        if (includedChats.add(chat)) {
+          changed = true;
+        }
+        if (involvedIds.add(chat.playerId())) {
+          changed = true;
+        }
+        if (involvedNames.add(chat.playerName())) {
+          changed = true;
+        }
+        if (addReferencedNames(chat.content(), knownNames, involvedIds, involvedNames)) {
+          changed = true;
+        }
+      }
+
+      for (ServerEventRecord event : eventCandidates) {
+        boolean recentPreEvent = capture.directMention()
+            && event.timestampMs() < capture.triggerAt()
+            && capture.triggerAt() - event.timestampMs() <= Math.max(
+                plugin.getConfig().getLong(
+                    "global-conversation.scene.recent-pre-event-window-ms", 4000L),
+                0L);
+        if (!recentPreEvent && !intersectsNames(event.involvedPlayers(), involvedNames)) {
+          continue;
+        }
+        if (includedEvents.add(event)) {
+          changed = true;
+        }
+        for (String name : event.involvedPlayers()) {
+          if (name != null && !name.isBlank() && involvedNames.add(name)) {
+            changed = true;
+          }
+          UUID id = knownNames.get(name == null ? "" : name.toLowerCase(Locale.ROOT));
+          if (id != null && involvedIds.add(id)) {
+            changed = true;
+          }
+        }
+      }
+
+      if (!changed) {
+        break;
+      }
+    }
+
+    List<PublicChatRecord> selectedChats = limitChatRecords(
+        new ArrayList<>(includedChats), capture.triggerAt());
+    List<ServerEventRecord> selectedEvents = limitEventRecords(
+        new ArrayList<>(includedEvents), capture.triggerAt());
+
+    // Only a player whose direct/smart line actually survived the relevance/cap
+    // filter receives follow-up eligibility. Context-only players never do.
+    Set<UUID> eligibleAddressers = new LinkedHashSet<>();
+    if (addressers != null && !addressers.isEmpty()) {
+      for (PublicChatRecord chat : selectedChats) {
+        if (addressers.contains(chat.playerId())) {
+          eligibleAddressers.add(chat.playerId());
+        }
+      }
+    }
+
+    List<SceneAtom> atoms = new ArrayList<>();
+    for (PublicChatRecord chat : selectedChats) {
+      atoms.add(SceneAtom.chat(chat));
+    }
+    for (ServerEventRecord event : selectedEvents) {
+      atoms.add(SceneAtom.event(event));
+    }
+    atoms.sort(Comparator.comparingLong(SceneAtom::timestampMs)
+        .thenComparingInt(atom -> atom.event() == null ? 0 : 1));
+
+    List<ChatMessage> currentMessages = new ArrayList<>();
+    for (SceneAtom atom : atoms) {
+      if (atom.chat() != null) {
+        PublicChatRecord chat = atom.chat();
+        currentMessages.add(new PlayerChatMessage(
+            plugin,
+            chat.playerId(),
+            chat.playerName(),
+            chat.displayName(),
+            chat.admin(),
+            chat.content()));
+      } else {
+        ServerEventRecord event = atom.event();
+        String players = event.involvedPlayers().isEmpty()
+            ? "none"
+            : String.join(",", event.involvedPlayers());
+        currentMessages.add(new SystemContextMessage(
+            plugin,
+            "[EVENT type=" + event.type() + " players=" + players + "] ",
+            event.text()));
+      }
+    }
+
+    List<ChatMessage> modelMessages = new ArrayList<>();
+    int historyScenes = Math.max(
+        plugin.getConfig().getInt("global-conversation.history.max-scenes", 2),
+        0);
+    if (historyScenes > 0 && !sceneHistory.isEmpty()) {
+      List<SceneMemory> memories = new ArrayList<>(sceneHistory);
+      int start = Math.max(0, memories.size() - historyScenes);
+      for (int i = start; i < memories.size(); i++) {
+        SceneMemory memory = memories.get(i);
+        modelMessages.addAll(memory.messages());
+        if (!memory.assistantReply().isBlank()) {
+          modelMessages.add(new AssistantChatMessage(plugin, memory.assistantReply()));
+        }
+      }
+    }
+    modelMessages.addAll(currentMessages);
+
+    String wiki = retrieveLocalWiki(currentMessages);
+    String involved = involvedNames.isEmpty() ? "none" : String.join(",", involvedNames);
+    String meta = "window_ms=" + Math.max(0L, capture.endsAt() - capture.triggerAt())
+        + ", chat_lines=" + selectedChats.size()
+        + ", events=" + selectedEvents.size()
+        + ", trigger=" + (capture.directMention() ? "direct_mention" : "smart_followup");
+
+    return new SceneRequest(
+        capture.sceneId(),
+        List.copyOf(modelMessages),
+        List.copyOf(currentMessages),
+        Set.copyOf(involvedIds),
+        Set.copyOf(involvedNames),
+        Set.copyOf(eligibleAddressers),
+        AssistantRequestContext.scene(capture.sceneId(), involved, meta, wiki),
+        AssistantManager.PRIMARY,
+        0);
+  }
+
+  private List<PublicChatRecord> limitChatRecords(List<PublicChatRecord> records, long triggerAt) {
+    records.sort(Comparator.comparingLong(PublicChatRecord::timestampMs));
+    int maxTotal = Math.max(plugin.getConfig().getInt(
+        "global-conversation.scene.max-chat-messages", 10), 1);
+    int maxPre = Math.max(plugin.getConfig().getInt(
+        "global-conversation.scene.max-pre-chat-messages", 5), 0);
+    maxPre = Math.min(maxPre, maxTotal - 1);
+
+    List<PublicChatRecord> pre = records.stream().filter(r -> r.timestampMs() < triggerAt).toList();
+    List<PublicChatRecord> post = records.stream().filter(r -> r.timestampMs() >= triggerAt).toList();
+
+    List<PublicChatRecord> out = new ArrayList<>();
+    int preStart = Math.max(0, pre.size() - maxPre);
+    out.addAll(pre.subList(preStart, pre.size()));
+    int remaining = Math.max(0, maxTotal - out.size());
+    out.addAll(post.subList(0, Math.min(remaining, post.size())));
+    out.sort(Comparator.comparingLong(PublicChatRecord::timestampMs));
+    return List.copyOf(out);
+  }
+
+  private List<ServerEventRecord> limitEventRecords(List<ServerEventRecord> records, long triggerAt) {
+    records.sort(Comparator.comparingLong(ServerEventRecord::timestampMs));
+    int maxTotal = Math.max(plugin.getConfig().getInt(
+        "global-conversation.scene.max-events", 2), 0);
+    if (maxTotal == 0) {
+      return List.of();
+    }
+    int maxPre = Math.max(plugin.getConfig().getInt(
+        "global-conversation.scene.max-pre-events", 1), 0);
+    maxPre = Math.min(maxPre, maxTotal);
+
+    List<ServerEventRecord> pre = records.stream().filter(r -> r.timestampMs() < triggerAt).toList();
+    List<ServerEventRecord> post = records.stream().filter(r -> r.timestampMs() >= triggerAt).toList();
+    List<ServerEventRecord> out = new ArrayList<>();
+    int preStart = Math.max(0, pre.size() - maxPre);
+    out.addAll(pre.subList(preStart, pre.size()));
+    int remaining = Math.max(0, maxTotal - out.size());
+    out.addAll(post.subList(0, Math.min(remaining, post.size())));
+    out.sort(Comparator.comparingLong(ServerEventRecord::timestampMs));
+    return List.copyOf(out);
+  }
+
+  private boolean addReferencedNames(
+      String message,
+      Map<String, UUID> knownNames,
+      Set<UUID> involvedIds,
+      Set<String> involvedNames) {
+    boolean changed = false;
+    for (Map.Entry<String, UUID> entry : knownNames.entrySet()) {
+      String lowercaseName = entry.getKey();
+      if (!containsWholeWordIgnoreCase(message, lowercaseName)
+          && !message.toLowerCase(Locale.ROOT).contains("@" + lowercaseName)) {
+        continue;
+      }
+      UUID id = entry.getValue();
+      if (involvedIds.add(id)) {
+        changed = true;
+      }
+      String canonical = Bukkit.getPlayer(id) != null ? Bukkit.getPlayer(id).getName() : lowercaseName;
+      if (involvedNames.add(canonical)) {
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private static boolean referencesAnyName(String text, Set<String> names) {
+    if (text == null || text.isBlank() || names.isEmpty()) {
+      return false;
+    }
+    for (String name : names) {
+      if (name == null || name.isBlank()) {
+        continue;
+      }
+      if (containsWholeWordIgnoreCase(text, name)
+          || text.toLowerCase(Locale.ROOT).contains("@" + name.toLowerCase(Locale.ROOT))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean intersectsNames(List<String> eventNames, Set<String> involvedNames) {
+    for (String eventName : eventNames) {
+      for (String involved : involvedNames) {
+        if (eventName != null && involved != null && eventName.equalsIgnoreCase(involved)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // TRUSTED EVENT LOGGING - NEVER TRIGGERS AI BY ITSELF
+  // ---------------------------------------------------------------------------
+
+  public void queueGlobalEvent(String message) {
+    recordServerEvent("server", message, List.of());
+  }
+
+  public void recordServerEvent(String type, String message, List<String> involvedPlayers) {
+    if (shutdown || message == null || message.isBlank()) {
+      return;
+    }
+    List<String> names = involvedPlayers == null
+        ? List.of()
+        : involvedPlayers.stream().filter(n -> n != null && !n.isBlank()).distinct().toList();
+    serverEventLog.addLast(new ServerEventRecord(
+        System.currentTimeMillis(),
+        type == null || type.isBlank() ? "server" : type,
+        message,
+        names));
+    int max = Math.max(plugin.getConfig().getInt("global-conversation.logs.max-event-records", 30), 10);
+    while (serverEventLog.size() > max) {
+      serverEventLog.removeFirst();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOCAL WIKI RETRIEVAL - NO SECOND MODEL CALL
+  // ---------------------------------------------------------------------------
+
+  private String retrieveLocalWiki(List<ChatMessage> currentMessages) {
+    if (!plugin.getConfig().getBoolean("advanced-context.lazy-mode", true)) {
+      return fullWikiContext();
+    }
+    if (!plugin.getConfig().getBoolean("advanced-context.local-retrieval.enabled", true)) {
+      return "";
+    }
+
+    ConfigurationSection wiki = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
+    if (wiki == null) {
+      return "";
+    }
+
+    StringBuilder queryBuilder = new StringBuilder();
+    for (ChatMessage message : currentMessages) {
+      queryBuilder.append(message.content).append(' ');
+    }
+    String query = normalizeForSearch(queryBuilder.toString());
+    Set<String> queryTerms = meaningfulTerms(query);
+    if (queryTerms.isEmpty()) {
+      return "";
+    }
+
+    List<WikiCandidate> candidates = new ArrayList<>();
+    for (String key : wiki.getKeys(false)) {
+      ConfigurationSection section = wiki.getConfigurationSection(key);
+      if (section == null) {
+        continue;
+      }
+      String description = section.getString("description", "");
+      String content = section.getString("content", "");
+      description = description == null ? "" : description;
+      content = content == null ? "" : content;
+
+      String normalizedKey = normalizeForSearch(key.replace('-', ' ').replace('_', ' '));
+      String normalizedDescription = normalizeForSearch(description);
+      String normalizedContent = normalizeForSearch(content);
+      int score = 0;
+      if (!normalizedKey.isBlank() && query.contains(normalizedKey)) {
+        score += 8;
+      }
+      for (String term : queryTerms) {
+        if (containsWholeWordIgnoreCase(normalizedKey, term)) score += 4;
+        if (containsWholeWordIgnoreCase(normalizedDescription, term)) score += 2;
+        if (containsWholeWordIgnoreCase(normalizedContent, term)) score += 1;
+      }
+      if (score > 0) {
+        candidates.add(new WikiCandidate(key, description, content, score));
+      }
+    }
+
+    int minScore = Math.max(plugin.getConfig().getInt(
+        "advanced-context.local-retrieval.min-score", 2), 1);
+    int maxSections = Math.max(plugin.getConfig().getInt(
+        "advanced-context.local-retrieval.max-sections", 2), 0);
+    int maxChars = Math.max(plugin.getConfig().getInt(
+        "advanced-context.local-retrieval.max-section-chars", 4500), 200);
+    if (maxSections == 0) {
+      return "";
+    }
+
+    candidates.sort(Comparator.comparingInt(WikiCandidate::score).reversed());
+    StringBuilder out = new StringBuilder();
+    int used = 0;
+    for (WikiCandidate candidate : candidates) {
+      if (candidate.score() < minScore || used >= maxSections) {
+        break;
+      }
+      String content = candidate.content().trim();
+      if (content.length() > maxChars) {
+        content = content.substring(0, maxChars).trim();
+      }
+      if (content.isBlank()) {
+        continue;
+      }
+      if (!out.isEmpty()) {
+        out.append('\n');
+      }
+      out.append('[').append(candidate.key()).append("] ").append(content);
+      used++;
+    }
+    return out.toString();
+  }
+
+  private String fullWikiContext() {
+    ConfigurationSection wiki = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
+    if (wiki == null) {
+      return "";
+    }
+    StringBuilder out = new StringBuilder();
+    for (String key : wiki.getKeys(false)) {
+      ConfigurationSection section = wiki.getConfigurationSection(key);
+      if (section == null) continue;
+      String content = section.getString("content", "");
+      if (content == null || content.isBlank()) continue;
+      if (!out.isEmpty()) out.append('\n');
+      out.append('[').append(key).append("] ").append(content.trim());
+    }
+    return out.toString();
+  }
+
+  private static String normalizeForSearch(String input) {
+    String normalized = Normalizer.normalize(input == null ? "" : input, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}+", "")
+        .toLowerCase(Locale.ROOT)
+        .replaceAll("[^\\p{L}\\p{N}_-]+", " ")
+        .replaceAll("\\s+", " ")
+        .trim();
+    return normalized;
+  }
+
+  private static Set<String> meaningfulTerms(String text) {
+    Set<String> stop = Set.of(
+        "que", "como", "donde", "cuando", "quien", "para", "por", "con", "una", "uno", "unos",
+        "unas", "del", "las", "los", "eso", "esta", "este", "esto", "soy", "eres", "hay", "iso",
+        "isolda", "the", "and", "what", "where", "how", "when", "you", "your");
+    Set<String> result = new LinkedHashSet<>();
+    for (String token : text.split("\\s+")) {
+      if (token.length() >= 3 && !stop.contains(token)) {
+        result.add(token);
+      }
+    }
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SINGLE SERIALIZED MODEL REQUEST PER SCENE
   // ---------------------------------------------------------------------------
 
   private void processNextRequest() {
-    if (shutdown || requestInFlight || requestRateRetryTask != null) {
+    if (shutdown || requestInFlight || requestRateRetryTask != null || sceneQueue.isEmpty()) {
       return;
     }
 
-    RequestJob job = pollNextJobPrioritizingPlayers();
-    if (job == null) {
-      return;
-    }
-
-    if (job.depth == 0) {
-      job.session.queued = false;
-    }
-
-    // If the primary is not configured but the fallback is, keep the server alive.
-    // This is especially useful during API-key rotation, but it is logged loudly.
-    if (!assistantManager.isProviderAvailable(job.providerIndex)) {
-      if (job.providerIndex == AssistantManager.PRIMARY && assistantManager.hasFallback()) {
-        plugin.getLogger().warning("Primary AI provider is unavailable locally; using fallback for this request.");
-        job = job.withProvider(AssistantManager.FALLBACK);
+    SceneRequest scene = sceneQueue.peekFirst();
+    int providerIndex = scene.providerIndex();
+    if (!assistantManager.isProviderAvailable(providerIndex)) {
+      if (providerIndex == AssistantManager.PRIMARY && assistantManager.hasFallback()) {
+        sceneQueue.removeFirst();
+        sceneQueue.addFirst(scene.withProvider(AssistantManager.FALLBACK));
+        processNextRequest();
       } else {
-        plugin.getLogger().warning("Selected AI provider is not configured; dropping request.");
-        notifyProviderBusy(job.session);
-        discardCurrentBatch(job.session);
-        finishSessionRequest(job.session, false, false);
+        plugin.getLogger().warning("AI provider is not configured; dropping global scene " + scene.sceneId() + ".");
+        sceneQueue.removeFirst();
         processNextRequest();
-        return;
       }
+      return;
     }
 
-    long rateDelay = getProviderRequestRateDelay(job.providerIndex);
-
-    // 1.4.1: a throttled primary never makes a player wait behind a known cooldown
-    // when the fallback is immediately available. Preserve the exact same batch.
-    if (rateDelay > 0
-        && job.providerIndex == AssistantManager.PRIMARY
-        && assistantManager.hasFallback()) {
-      long fallbackDelay = getProviderRequestRateDelay(AssistantManager.FALLBACK);
-      long maxFallbackWait = Math.max(
-          plugin.getConfig().getLong("ai.fallback.max-wait-ms", 2500L),
-          0L);
+    long delay = providerDelay(providerIndex);
+    if (delay > 0 && providerIndex == AssistantManager.PRIMARY && assistantManager.hasFallback()) {
+      long fallbackDelay = providerDelay(AssistantManager.FALLBACK);
+      long maxFallbackWait = Math.max(plugin.getConfig().getLong("ai.fallback.max-wait-ms", 2500L), 0L);
       if (fallbackDelay <= maxFallbackWait) {
-        job = job.withProvider(AssistantManager.FALLBACK);
-        rateDelay = fallbackDelay;
-      }
-    }
-
-    if (rateDelay > 0) {
-      long maxQueueDelay = Math.max(
-          plugin.getConfig().getLong("rate-limits.max-local-queue-delay-ms", 5000L),
-          0L);
-
-      // Fresh player turns should never disappear into a 30-60 second queue. Tool
-      // follow-ups and retries may still wait because dropping them would strand an
-      // answer half-way through a tool chain.
-      if (!job.session.global && job.depth == 0 && maxQueueDelay > 0 && rateDelay > maxQueueDelay) {
-        notifyProviderBusy(job.session);
-        discardCurrentBatch(job.session);
-        finishSessionRequest(job.session, false, false);
+        sceneQueue.removeFirst();
+        sceneQueue.addFirst(scene.withProvider(AssistantManager.FALLBACK));
         processNextRequest();
         return;
       }
+    }
 
-      requestQueue.addFirst(job);
-      long ticks = Math.max(1, (rateDelay + 49) / 50);
+    if (delay > 0) {
+      long maxQueueDelay = Math.max(plugin.getConfig().getLong("rate-limits.max-local-queue-delay-ms", 5000L), 0L);
+      if (maxQueueDelay > 0 && delay > maxQueueDelay) {
+        plugin.getLogger().warning("Dropping stale global scene " + scene.sceneId()
+            + " because provider delay is about " + delay + "ms.");
+        sceneQueue.removeFirst();
+        processNextRequest();
+        return;
+      }
+      long ticks = Math.max(1L, (delay + 49L) / 50L);
       requestRateRetryTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
         requestRateRetryTask = null;
         processNextRequest();
@@ -1057,128 +794,54 @@ public class ConversationManager {
       return;
     }
 
-    startRequest(job);
+    sceneQueue.removeFirst();
+    startRequest(scene);
   }
 
-  private RequestJob pollNextJobPrioritizingPlayers() {
-    if (requestQueue.isEmpty()) {
-      return null;
-    }
-
-    Iterator<RequestJob> iterator = requestQueue.iterator();
-    while (iterator.hasNext()) {
-      RequestJob job = iterator.next();
-      if (!job.session.global) {
-        iterator.remove();
-        return job;
-      }
-    }
-    return requestQueue.pollFirst();
-  }
-
-  private void startRequest(RequestJob job) {
-    ConversationSession session = job.session;
-
-    if (!session.global) {
-      cleanupExpiredParticipants(session);
-      if (session.participants.isEmpty()) {
-        discardCurrentBatch(session);
-        finishSessionRequest(session, false, false);
-        processNextRequest();
-        return;
-      }
-    }
-
-    if (session.global && Bukkit.getOnlinePlayers().isEmpty()) {
-      discardCurrentBatch(session);
-      finishSessionRequest(session, false, false);
+  private void startRequest(SceneRequest scene) {
+    var provider = assistantManager.getProviderSettings(scene.providerIndex());
+    if (provider == null) {
       processNextRequest();
       return;
     }
 
     requestInFlight = true;
-    long now = System.currentTimeMillis();
-    var selectedProvider = assistantManager.getProviderSettings(job.providerIndex);
-    if (selectedProvider == null) {
-      requestInFlight = false;
-      notifyProviderBusy(session);
-      discardCurrentBatch(session);
-      finishSessionRequest(session, false, false);
-      processNextRequest();
-      return;
-    }
-    providerThrottle.recordAttempt(selectedProvider.throttleKey());
-    session.lastProviderRequestAt = now;
-    if (session.global && job.depth == 0) {
-      lastGlobalRequestAt = now;
-    }
-
-    AssistantRequestContext requestContext = session.global
-        ? AssistantRequestContext.global(countActivePlayerConversations(), recentEventsText())
-        : AssistantRequestContext.conversation(
-            session.id,
-            participantSummary(session),
-            session.participants.size(),
-            countActivePlayerConversations(),
-            recentEventsText());
-
-    List<ChatMessage> snapshot = getConversationSnapshot(session);
-
-    assistantManager.sendAIRequest(job.providerIndex, snapshot, requestContext, (response, error) -> {
-      if (shutdown) {
-        return;
-      }
-      handleAICompletion(job, response, error);
-    });
+    providerThrottle.recordAttempt(provider.throttleKey());
+    assistantManager.sendAIRequest(
+        scene.providerIndex(),
+        scene.messages(),
+        scene.context(),
+        (response, error) -> handleCompletion(scene, response, error));
   }
 
-  private void handleAICompletion(RequestJob job, AssistantResponse response, Throwable error) {
-    ConversationSession session = job.session;
-    var selectedProvider = assistantManager.getProviderSettings(job.providerIndex);
+  private void handleCompletion(SceneRequest scene, AssistantResponse response, Throwable error) {
+    requestInFlight = false;
+    var provider = assistantManager.getProviderSettings(scene.providerIndex());
 
     if (error != null) {
-      requestInFlight = false;
-
       if (isRateLimitError(error)) {
-        long retryAfter = parseProviderRetryDelay(error, 60000L);
-        if (selectedProvider != null) {
-          providerThrottle.applyCooldown(selectedProvider.throttleKey(), retryAfter);
+        long retryAfter = parseProviderRetryDelay(error, 60_000L);
+        if (provider != null) {
+          providerThrottle.applyCooldown(provider.throttleKey(), retryAfter);
         }
-
-        String providerName = selectedProvider == null ? "AI provider" : selectedProvider.displayName();
-        plugin.getLogger().warning(
-            providerName + " rate limit reached (429). Cooling down for about "
-                + Math.max(1, retryAfter / 1000L)
-                + "s. /sva reload will NOT bypass this cooldown.");
-
-        if (queueFallbackForSameBatch(job, "429 rate limit")) {
+        plugin.getLogger().warning((provider == null ? "AI provider" : provider.displayName())
+            + " rate limit reached. Global chat remains active; scene " + scene.sceneId() + " was not answered.");
+        if (queueFallback(scene, "429 rate limit")) {
           processNextRequest();
           return;
         }
-
-        notifyProviderBusy(session);
-        discardCurrentBatch(session);
-        finishSessionRequest(session, false, false);
-        processNextRequest();
-        return;
-      }
-
-      if (isTransientProviderError(error)) {
-        if (queueFallbackForSameBatch(job, "temporary provider error")) {
+      } else if (isTransientProviderError(error)) {
+        if (queueFallback(scene, "temporary provider error")) {
           processNextRequest();
           return;
         }
-        if (scheduleTransientRetry(job)) {
+        if (queueTransientRetry(scene)) {
           return;
         }
+      } else {
+        plugin.getLogger().warning("AI request failed for global scene " + scene.sceneId()
+            + ": " + error.getClass().getSimpleName() + ": " + error.getMessage());
       }
-
-      plugin.getLogger().warning(
-          "AI request failed via "
-              + (selectedProvider == null ? "unknown provider" : selectedProvider.displayName())
-              + ": " + error.getClass().getSimpleName() + ": " + error.getMessage());
-      discardCurrentBatch(session);
-      finishSessionRequest(session, false, false);
       processNextRequest();
       return;
     }
@@ -1187,244 +850,93 @@ public class ConversationManager {
       response = new AssistantResponse(plugin, List.of(), List.of(), false);
     }
 
-    commitCurrentBatch(session);
-    if (!response.historyText().isBlank()) {
-      session.history.add(new AssistantChatMessage(plugin, response));
-      trimStoredHistory(session);
-    }
-
-    boolean hasTools = !response.getToolCalls().isEmpty();
-    boolean broadcastToolProgress = plugin.getConfig().getBoolean(
-        "conversation-control.broadcast-tool-progress-messages",
-        false);
-
-    if (!session.suppressResponse && (!hasTools || broadcastToolProgress)) {
+    String reply = response.historyText().trim();
+    if (!reply.isBlank()) {
       response.broadcastMessages();
     }
 
-    int maxToolIterations = Math.max(
-        plugin.getConfig().getInt("conversation-control.max-tool-iterations", 3),
-        0);
-
-    if (hasTools && job.depth < maxToolIterations) {
-      String toolResults = executeTools(response.getToolCalls());
-      if (!toolResults.isBlank()) {
-        session.history.add(new SystemContextMessage(
-            plugin,
-            "[TOOL RESULTS] ",
-            toolResults));
-        trimStoredHistory(session);
-
-        requestInFlight = false;
-        requestQueue.addFirst(new RequestJob(session, job.depth + 1, 0, job.providerIndex));
-        processNextRequest();
-        return;
+    rememberScene(scene, reply);
+    long followUpMs = Math.max(plugin.getConfig().getLong(
+        "global-conversation.smart-follow-up-ms", 12_000L), 0L);
+    long now = System.currentTimeMillis();
+    pruneSmartFollowUps(now);
+    if (followUpMs > 0L && !reply.isBlank()) {
+      long until = now + followUpMs;
+      for (UUID playerId : scene.followUpEligiblePlayerIds()) {
+        smartFollowUpUntilByPlayer.put(playerId, until);
       }
-    } else if (hasTools) {
-      plugin.getLogger().warning(
-          "Tool iteration limit reached for " + session.debugName() + ". Tool chain stopped.");
     }
 
-    requestInFlight = false;
-
-    // Newer messages always win. An older response must never close/release people
-    // while fresh player input is already waiting in the same group.
-    boolean hasNewerPending = !session.pending.isEmpty();
-    boolean aiRequestedClose = response.shouldCloseConversation() && !hasNewerPending;
-
-    finishSessionRequest(session, aiRequestedClose, true);
     processNextRequest();
   }
 
-  private String executeTools(List<String> toolCalls) {
-    int maxToolCalls = Math.max(
-        plugin.getConfig().getInt("conversation-control.max-tool-calls-per-response", 2),
-        0);
-    return toolManager.executeCalls(toolCalls, maxToolCalls);
-  }
-
-  /**
-   * Finishes one AI turn. Closing phrases release only the participant who used
-   * them. An AI close request closes a single-person session, but in a group it
-   * conservatively releases only the latest speaker; one player's "gracias" can
-   * therefore never destroy everybody else's shared conversation.
-   */
-  private void finishSessionRequest(
-      ConversationSession session,
-      boolean aiRequestedClose,
-      boolean applyParticipantClosers) {
-    session.processing = false;
-
-    if (!session.global) {
-      if (applyParticipantClosers) {
-        List<UUID> explicitClosers = new ArrayList<>();
-        for (ParticipantState participant : session.participants.values()) {
-          if (participant.closeAfterCurrent) {
-            explicitClosers.add(participant.playerId);
-          }
-        }
-        for (UUID playerId : explicitClosers) {
-          removeParticipant(session, playerId, false);
-        }
-      }
-
-      if (aiRequestedClose && !session.participants.isEmpty()) {
-        if (session.participants.size() == 1) {
-          UUID only = session.participants.keySet().iterator().next();
-          removeParticipant(session, only, false);
-        } else if (session.lastSpeakerId != null
-            && session.participants.containsKey(session.lastSpeakerId)) {
-          removeParticipant(session, session.lastSpeakerId, false);
-        }
-      }
-
-      // Do not refresh every participant here. Group members expire from their
-      // own last accepted message, so another member talking to SVA cannot keep a
-      // silent participant attached indefinitely.
-      scheduleNextExpiryCheck(session);
-      maybeRemoveEmptySession(session);
-    }
-
-    if (!session.pending.isEmpty()) {
-      scheduleBatch(session);
-    }
-  }
-
-  private long getProviderRequestRateDelay(int providerIndex) {
-    var settings = assistantManager.getProviderSettings(providerIndex);
-    if (settings == null) {
-      return 0L;
-    }
-    return providerThrottle.getDelay(
-        settings.throttleKey(),
-        settings.maxRequestsPerMinute());
-  }
-
-  /**
-   * Reuses the exact in-flight batch with Gemini when the primary OpenAI request
-   * cannot be served. No player message is committed, discarded or duplicated.
-   */
-  private boolean queueFallbackForSameBatch(RequestJob job, String reason) {
-    if (job.providerIndex != AssistantManager.PRIMARY || !assistantManager.hasFallback()) {
+  private boolean hasActiveSmartFollowUp(UUID playerId, long now) {
+    if (playerId == null) return false;
+    Long until = smartFollowUpUntilByPlayer.get(playerId);
+    if (until == null) return false;
+    if (until < now) {
+      smartFollowUpUntilByPlayer.remove(playerId);
       return false;
     }
-
-    var fallbackSettings = assistantManager.getFallbackProviderSettings();
-    if (fallbackSettings == null) {
-      return false;
-    }
-
-    long fallbackDelay = getProviderRequestRateDelay(AssistantManager.FALLBACK);
-    long maxFallbackWait = Math.max(
-        plugin.getConfig().getLong("ai.fallback.max-wait-ms", 2500L),
-        0L);
-
-    if (fallbackDelay > maxFallbackWait) {
-      plugin.getLogger().warning(
-          "Fallback " + fallbackSettings.displayName() + " is also throttled for about "
-              + Math.max(1L, fallbackDelay / 1000L) + "s; not queueing stale player chat.");
-      return false;
-    }
-
-    plugin.getLogger().warning(
-        "Switching current request to fallback " + fallbackSettings.displayName()
-            + "/" + fallbackSettings.model() + " after " + reason + ".");
-
-    requestQueue.addFirst(job.withProvider(AssistantManager.FALLBACK));
     return true;
   }
 
-  private boolean isRateLimitError(Throwable error) {
-    String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
-    String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
-    return type.contains("ratelimit")
-        || message.contains("429")
-        || message.contains("resource_exhausted")
-        || message.contains("rate limit");
+  private void pruneSmartFollowUps(long now) {
+    smartFollowUpUntilByPlayer.entrySet().removeIf(entry -> entry.getValue() < now);
   }
 
-  private boolean isTransientProviderError(Throwable error) {
-    String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
-    String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
-    return type.contains("internalserver")
-        || type.contains("serviceunavailable")
-        || type.contains("timeout")
-        || message.contains("500")
-        || message.contains("502")
-        || message.contains("503")
-        || message.contains("504")
-        || message.contains("high demand")
-        || message.contains("temporarily unavailable")
-        || message.contains("connection reset")
-        || message.contains("timed out");
+  private int activeSmartFollowUps() {
+    pruneSmartFollowUps(System.currentTimeMillis());
+    return smartFollowUpUntilByPlayer.size();
   }
 
-  private long parseProviderRetryDelay(Throwable error, long fallbackMs) {
-    String message = String.valueOf(error.getMessage());
-
-    java.util.regex.Matcher jsonDelay = Pattern.compile(
-        "\\\"retryDelay\\\"\\s*:\\s*\\\"([0-9]+(?:\\.[0-9]+)?)s\\\"",
-        Pattern.CASE_INSENSITIVE).matcher(message);
-    if (jsonDelay.find()) {
-      try {
-        double seconds = Double.parseDouble(jsonDelay.group(1));
-        return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
-      } catch (NumberFormatException ignored) {
-      }
+  private void rememberScene(SceneRequest scene, String assistantReply) {
+    int keep = Math.max(plugin.getConfig().getInt("global-conversation.history.max-scenes", 2), 0);
+    if (keep == 0) {
+      sceneHistory.clear();
+      return;
     }
-
-    // Gemini commonly says "retry in 37.2s"; OpenAI commonly says
-    // "Please try again in 1.2s" or exposes Retry-After text through the SDK.
-    java.util.regex.Matcher textDelay = Pattern.compile(
-        "(?:retry|try again)(?:\\s+after|\\s+in)?\\s+([0-9]+(?:\\.[0-9]+)?)\\s*(?:s|sec|seconds?)",
-        Pattern.CASE_INSENSITIVE).matcher(message);
-    if (textDelay.find()) {
-      try {
-        double seconds = Double.parseDouble(textDelay.group(1));
-        return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
-      } catch (NumberFormatException ignored) {
-      }
+    int maxMessages = Math.max(
+        plugin.getConfig().getInt("global-conversation.history.max-messages-per-scene", 4),
+        1);
+    List<ChatMessage> source = scene.currentSceneMessages();
+    int start = Math.max(0, source.size() - maxMessages);
+    List<ChatMessage> compactMemory = List.copyOf(source.subList(start, source.size()));
+    sceneHistory.addLast(new SceneMemory(compactMemory, assistantReply == null ? "" : assistantReply));
+    while (sceneHistory.size() > keep) {
+      sceneHistory.removeFirst();
     }
-
-    java.util.regex.Matcher headerDelay = Pattern.compile(
-        "retry-after[^0-9]*([0-9]+(?:\\.[0-9]+)?)",
-        Pattern.CASE_INSENSITIVE).matcher(message);
-    if (headerDelay.find()) {
-      try {
-        double seconds = Double.parseDouble(headerDelay.group(1));
-        return Math.max(1000L, (long) Math.ceil(seconds * 1000.0) + 250L);
-      } catch (NumberFormatException ignored) {
-      }
-    }
-
-    return Math.max(1000L, fallbackMs);
   }
 
-  private boolean scheduleTransientRetry(RequestJob job) {
-    int maxRetries = Math.max(
-        plugin.getConfig().getInt("provider-retry.max-503-retries", 1),
-        0);
-    if (job.retryCount >= maxRetries) {
+  private long providerDelay(int providerIndex) {
+    var settings = assistantManager.getProviderSettings(providerIndex);
+    if (settings == null) return 0L;
+    return providerThrottle.getDelay(settings.throttleKey(), settings.maxRequestsPerMinute());
+  }
+
+  private boolean queueFallback(SceneRequest scene, String reason) {
+    if (scene.providerIndex() != AssistantManager.PRIMARY || !assistantManager.hasFallback()) {
       return false;
     }
+    var fallback = assistantManager.getFallbackProviderSettings();
+    if (fallback == null) return false;
+    long delay = providerDelay(AssistantManager.FALLBACK);
+    long maxWait = Math.max(plugin.getConfig().getLong("ai.fallback.max-wait-ms", 2500L), 0L);
+    if (delay > maxWait) return false;
+    plugin.getLogger().warning("Using fallback " + fallback.displayName() + "/" + fallback.model()
+        + " for the same global scene after " + reason + ".");
+    sceneQueue.addFirst(scene.withProvider(AssistantManager.FALLBACK));
+    return true;
+  }
 
-    long baseDelay = Math.max(
-        plugin.getConfig().getLong("provider-retry.initial-503-delay-ms", 1500L),
-        250L);
-    long maxDelay = Math.max(
-        plugin.getConfig().getLong("provider-retry.max-503-delay-ms", 5000L),
-        baseDelay);
-    long delay = Math.min(maxDelay, baseDelay * (1L << Math.min(job.retryCount, 10)));
-
-    var settings = assistantManager.getProviderSettings(job.providerIndex);
-    plugin.getLogger().warning(
-        (settings == null ? "AI provider" : settings.displayName())
-            + " is temporarily unavailable. Retrying in " + delay
-            + "ms (attempt " + (job.retryCount + 1) + "/" + maxRetries + ").");
-
-    requestQueue.addFirst(new RequestJob(job.session, job.depth, job.retryCount + 1, job.providerIndex));
+  private boolean queueTransientRetry(SceneRequest scene) {
+    int maxRetries = Math.max(plugin.getConfig().getInt("provider-retry.max-503-retries", 0), 0);
+    if (scene.retryCount() >= maxRetries) return false;
+    long delay = Math.max(plugin.getConfig().getLong("provider-retry.initial-503-delay-ms", 1500L), 250L);
+    long maxDelay = Math.max(plugin.getConfig().getLong("provider-retry.max-503-delay-ms", 5000L), delay);
+    delay = Math.min(maxDelay, delay * (1L << Math.min(scene.retryCount(), 10)));
+    sceneQueue.addFirst(scene.withRetry(scene.retryCount() + 1));
     long ticks = Math.max(1L, (delay + 49L) / 50L);
-    cancelTask(requestRateRetryTask);
     requestRateRetryTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
       requestRateRetryTask = null;
       processNextRequest();
@@ -1432,411 +944,154 @@ public class ConversationManager {
     return true;
   }
 
-  private void notifyProviderBusy(ConversationSession session) {
-    if (session == null || session.global) {
-      return;
-    }
+  private static boolean isRateLimitError(Throwable error) {
+    String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+    String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
+    return type.contains("ratelimit") || message.contains("429")
+        || message.contains("resource_exhausted") || message.contains("rate limit");
+  }
 
-    String fallback = "&8[&5Cronista&8] &dIsolda&7» &fHay demasiadas voces a la vez... dame unos segundos.";
-    String text = plugin.getConfig().getString("rate-limits.provider-limit-message", fallback);
-    if (text == null || text.isBlank()) {
-      return;
-    }
+  private static boolean isTransientProviderError(Throwable error) {
+    String type = error.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+    String message = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
+    return type.contains("internalserver") || type.contains("serviceunavailable") || type.contains("timeout")
+        || message.contains("500") || message.contains("502") || message.contains("503") || message.contains("504")
+        || message.contains("temporarily unavailable") || message.contains("timed out") || message.contains("connection reset");
+  }
 
-    long noticeCooldown = Math.max(
-        plugin.getConfig().getLong("rate-limits.provider-notice-cooldown-ms", 10000L),
-        0L);
-    long now = System.currentTimeMillis();
-
-    java.util.LinkedHashSet<UUID> recipients = new java.util.LinkedHashSet<>();
-    for (ChatMessage message : session.currentBatch) {
-      if (message instanceof PlayerChatMessage playerMessage) {
-        recipients.add(playerMessage.playerId);
+  private static long parseProviderRetryDelay(Throwable error, long fallbackMs) {
+    String message = String.valueOf(error.getMessage());
+    java.util.regex.Matcher matcher = Pattern.compile(
+        "(?:retry|try again)(?:\\s+after|\\s+in)?\\s+([0-9]+(?:\\.[0-9]+)?)\\s*(?:s|sec|seconds?)",
+        Pattern.CASE_INSENSITIVE).matcher(message);
+    if (matcher.find()) {
+      try {
+        return Math.max(1000L, (long) Math.ceil(Double.parseDouble(matcher.group(1)) * 1000D) + 250L);
+      } catch (NumberFormatException ignored) {
       }
     }
-    if (recipients.isEmpty() && session.lastSpeakerId != null) {
-      recipients.add(session.lastSpeakerId);
-    }
-
-    Component component = legacyComponent(text);
-    for (UUID playerId : recipients) {
-      long last = lastProviderNotice.getOrDefault(playerId, 0L);
-      if (noticeCooldown > 0 && now - last < noticeCooldown) {
-        continue;
-      }
-      Player player = Bukkit.getPlayer(playerId);
-      if (player != null) {
-        lastProviderNotice.put(playerId, now);
-        player.sendMessage(component);
-      }
-    }
+    return Math.max(1000L, fallbackMs);
   }
 
   // ---------------------------------------------------------------------------
-  // SESSION / PARTICIPANT LIFECYCLE
+  // MENTION / TEXT HELPERS
   // ---------------------------------------------------------------------------
 
-  private ConversationSession createPlayerConversation() {
-    ConversationSession session = new ConversationSession(false, nextConversationId++);
-    session.lastInteractionAt = System.currentTimeMillis();
-    return session;
-  }
-
-  private ConversationSession createGlobalSession() {
-    return new ConversationSession(true, 0);
-  }
-
-  private void refreshParticipantSnapshot(ParticipantState participant, Player player) {
-    participant.playerName = player.getName();
-    participant.playerAdmin = player.isOp();
-  }
-
-  private void refreshParticipantExpiry(
-      ConversationSession session,
-      ParticipantState participant) {
-    if (session.global || !participant.active) {
-      return;
-    }
-
-    long activeTime = Math.max(
-        plugin.getConfig().getLong(
-            "request-triggers.player-messages.smart-active-time",
-            20000),
-        0);
-
-    participant.activeUntil = System.currentTimeMillis() + activeTime;
-    scheduleNextExpiryCheck(session);
-  }
-
-  private void scheduleNextExpiryCheck(ConversationSession session) {
-    if (session.global) {
-      return;
-    }
-
-    long now = System.currentTimeMillis();
-    long earliest = Long.MAX_VALUE;
-    for (ParticipantState participant : session.participants.values()) {
-      if (participant.active && participant.activeUntil > 0) {
-        earliest = Math.min(earliest, participant.activeUntil);
+  private boolean containsAssistantMention(String message) {
+    if (message == null || message.isBlank()) return false;
+    for (String mention : configuredAssistantMentions()) {
+      if (mention == null || mention.isBlank()) continue;
+      String clean = mention.startsWith("@") ? mention.substring(1) : mention;
+      if (containsWholeWordIgnoreCase(message, mention) || containsWholeWordIgnoreCase(message, clean)) {
+        return true;
+      }
+      // Friendly typo/stretch support: Isoo, Isooo, Isoldaa. This still requires
+      // the name at a word boundary and does not match arbitrary substrings.
+      Pattern stretched = Pattern.compile(
+          "(?iu)(?<![\\p{L}\\p{N}_])@?" + Pattern.quote(clean)
+              + Pattern.quote(clean.substring(clean.length() - 1)) + "{0,3}(?![\\p{L}\\p{N}_])");
+      if (!clean.isBlank() && stretched.matcher(message).find()) {
+        return true;
       }
     }
-
-    cancelTask(session.expiryTask);
-    session.expiryTask = null;
-    if (earliest == Long.MAX_VALUE) {
-      return;
-    }
-
-    long delayMs = Math.max(50, earliest - now);
-    long ticks = Math.max(1, (delayMs + 49) / 50);
-    session.expiryTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-      session.expiryTask = null;
-      cleanupExpiredParticipants(session);
-      maybeRemoveEmptySession(session);
-      if (!session.participants.isEmpty()) {
-        scheduleNextExpiryCheck(session);
-      }
-    }, ticks);
+    return false;
   }
 
-  private boolean isExpired(ParticipantState participant) {
-    return participant.active
-        && participant.activeUntil > 0
-        && System.currentTimeMillis() >= participant.activeUntil;
+  private List<String> configuredAssistantMentions() {
+    List<String> mentions = new ArrayList<>(plugin.getConfig().getStringList("global-conversation.mentions"));
+    if (mentions.isEmpty()) {
+      mentions.addAll(plugin.getConfig().getStringList("request-triggers.player-messages.mentions"));
+    }
+    String assistantName = plugin.getConfig().getString("assistant-name", "Isolda");
+    if (assistantName != null && !assistantName.isBlank()) {
+      mentions.add(assistantName);
+      mentions.add("@" + assistantName);
+    }
+    if (mentions.isEmpty()) {
+      mentions.add("Isolda");
+      mentions.add("Iso");
+    }
+    return mentions.stream().filter(s -> s != null && !s.isBlank()).distinct().toList();
   }
 
-  private void cleanupExpiredParticipantsAndSessions() {
-    for (ConversationSession session : new ArrayList<>(conversations.values())) {
-      cleanupExpiredParticipants(session);
-      maybeRemoveEmptySession(session);
-    }
+  private static boolean containsWholeWordIgnoreCase(String text, String word) {
+    if (text == null || word == null || word.isBlank()) return false;
+    Pattern pattern = Pattern.compile(
+        "(?iu)(?<![\\p{L}\\p{N}_])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}_])");
+    return pattern.matcher(text).find();
   }
-
-  private void cleanupExpiredParticipants(ConversationSession session) {
-    if (session == null || session.global) {
-      return;
-    }
-
-    List<UUID> expired = new ArrayList<>();
-    for (ParticipantState participant : session.participants.values()) {
-      if (isExpired(participant)) {
-        expired.add(participant.playerId);
-      }
-    }
-    for (UUID playerId : expired) {
-      removeParticipant(session, playerId, false);
-    }
-  }
-
-  private void removeParticipant(
-      ConversationSession session,
-      UUID playerId,
-      boolean removePendingMessages) {
-    if (session == null || playerId == null || session.global) {
-      return;
-    }
-
-    ParticipantState participant = session.participants.remove(playerId);
-    if (participant == null) {
-      return;
-    }
-
-    participant.active = false;
-    participant.activeUntil = 0;
-    participant.followUpsWithoutMention = 0;
-    participant.closeAfterCurrent = false;
-    participant.humanConversationSignal = false;
-
-    ConversationSession indexed = playerConversationIndex.get(playerId);
-    if (indexed == session) {
-      playerConversationIndex.remove(playerId);
-    }
-
-    if (removePendingMessages) {
-      removePendingMessagesFrom(session, playerId);
-    }
-
-    session.lastInteractionAt = System.currentTimeMillis();
-    scheduleNextExpiryCheck(session);
-    maybeRemoveEmptySession(session);
-  }
-
-  private void maybeRemoveEmptySession(ConversationSession session) {
-    if (session == null || session.global || !session.participants.isEmpty()) {
-      return;
-    }
-
-    if (session.processing || session.queued || !session.pending.isEmpty()) {
-      if (session.participants.isEmpty()) {
-        session.suppressResponse = true;
-      }
-      return;
-    }
-
-    cancelSessionTasks(session);
-    conversations.remove(session.id);
-  }
-
-  /** Counts conversations that currently occupy one anti-flood turn slot. */
-  private int countBusyPlayerConversations() {
-    cleanupExpiredParticipantsAndSessions();
-    int count = 0;
-    for (ConversationSession session : conversations.values()) {
-      if (occupiesConversationSlot(session)) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  /** Counts all remembered smart-mode conversations, including idle/warm ones. */
-  private int countActivePlayerConversations() {
-    cleanupExpiredParticipantsAndSessions();
-    int count = 0;
-    for (ConversationSession session : conversations.values()) {
-      if (!session.participants.isEmpty()
-          || session.processing
-          || session.queued
-          || !session.pending.isEmpty()
-          || !session.currentBatch.isEmpty()) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  private String participantSummary(ConversationSession session) {
-    if (session.participants.isEmpty()) {
-      return "None.";
-    }
-    StringBuilder builder = new StringBuilder();
-    for (ParticipantState participant : session.participants.values()) {
-      builder.append("- ").append(participant.playerName);
-      if (participant.playerAdmin) {
-        builder.append(" (ADMIN)");
-      }
-      builder.append('\n');
-    }
-    return builder.toString().trim();
-  }
-
-  private List<ChatMessage> getConversationSnapshot(ConversationSession session) {
-    int configuredHistory = Math.max(plugin.getConfig().getInt("message-history-limit", 8), 0);
-    int batchSize = Math.max(plugin.getConfig().getInt("message-batching.max-size", 6), 1);
-    int limit = configuredHistory == 0
-        ? batchSize + 2
-        : Math.max(configuredHistory, batchSize + 2);
-
-    List<ChatMessage> combined = new ArrayList<>(session.history.size() + session.currentBatch.size());
-    combined.addAll(session.history);
-    combined.addAll(session.currentBatch);
-
-    int size = combined.size();
-    if (size <= limit) {
-      return List.copyOf(combined);
-    }
-    return List.copyOf(combined.subList(size - limit, size));
-  }
-
-  private void commitCurrentBatch(ConversationSession session) {
-    if (session.currentBatch.isEmpty()) {
-      return;
-    }
-    session.history.addAll(session.currentBatch);
-    session.currentBatch.clear();
-    trimStoredHistory(session);
-  }
-
-  private void discardCurrentBatch(ConversationSession session) {
-    session.currentBatch.clear();
-  }
-
-  private void trimStoredHistory(ConversationSession session) {
-    int configuredHistory = Math.max(plugin.getConfig().getInt("message-history-limit", 8), 0);
-    int keep = Math.max(configuredHistory * 3, 30);
-    while (session.history.size() > keep) {
-      session.history.remove(0);
-    }
-  }
-
-  private String recentEventsText() {
-    if (recentServerEvents.isEmpty()) {
-      return "";
-    }
-    return String.join("\n", recentServerEvents.stream().map(event -> "- " + event).toList());
-  }
-
-  // ---------------------------------------------------------------------------
-  // PRIVATE NOTICES
-  // ---------------------------------------------------------------------------
-
-  private void sendBusyNotice(Player player) {
-    if (!plugin.getConfig().getBoolean("conversation-control.busy-notice.enabled", true)) {
-      return;
-    }
-    long cooldown = Math.max(
-        plugin.getConfig().getLong("conversation-control.busy-notice.cooldown-ms", 10000),
-        0);
-    long now = System.currentTimeMillis();
-    long last = lastBusyNotice.getOrDefault(player.getUniqueId(), 0L);
-    if (now - last < cooldown) {
-      return;
-    }
-    lastBusyNotice.put(player.getUniqueId(), now);
-    sendPrivateConfiguredMessage(
-        player,
-        "conversation-control.busy-notice.message",
-        "&bSVA &7está atendiendo otras conversaciones. Inténtalo de nuevo en unos segundos.");
-  }
-
-  private void sendRateNotice(Player player) {
-    long cooldown = 10000;
-    long now = System.currentTimeMillis();
-    long last = lastRateNotice.getOrDefault(player.getUniqueId(), 0L);
-    if (now - last < cooldown) {
-      return;
-    }
-    lastRateNotice.put(player.getUniqueId(), now);
-    sendPrivateConfiguredMessage(
-        player,
-        "rate-limits.player-limit-message",
-        "&bSVA &7necesita un momento antes de seguir con tantos mensajes.");
-  }
-
-  private void sendPrivateConfiguredMessage(Player player, String path, String fallback) {
-    String text = plugin.getConfig().getString(path, fallback);
-    if (text == null || text.isBlank()) {
-      return;
-    }
-    player.sendMessage(legacyComponent(text));
-  }
-
-  private static Component legacyComponent(String text) {
-    return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
-        .legacyAmpersand()
-        .deserialize(text);
-  }
-
-  // ---------------------------------------------------------------------------
-  // HELPERS
-  // ---------------------------------------------------------------------------
 
   private static void pruneOlderThan(Deque<Long> deque, long threshold) {
-    while (!deque.isEmpty() && deque.peekFirst() < threshold) {
-      deque.removeFirst();
-    }
+    while (!deque.isEmpty() && deque.peekFirst() < threshold) deque.removeFirst();
   }
 
   private static void cancelTask(BukkitTask task) {
     if (task != null) {
-      try {
-        task.cancel();
-      } catch (Exception ignored) {
-      }
+      try { task.cancel(); } catch (Exception ignored) { }
     }
   }
 
-  private static void cancelSessionTasks(ConversationSession session) {
-    cancelTask(session.batchTask);
-    cancelTask(session.maxBatchTask);
-    cancelTask(session.expiryTask);
-    session.batchTask = null;
-    session.maxBatchTask = null;
-    session.expiryTask = null;
-  }
+  // ---------------------------------------------------------------------------
+  // IMMUTABLE STATE
+  // ---------------------------------------------------------------------------
 
-  private record RequestJob(ConversationSession session, int depth, int retryCount, int providerIndex) {
-    RequestJob withProvider(int newProviderIndex) {
-      return new RequestJob(session, depth, 0, newProviderIndex);
+  private record PublicChatRecord(
+      long timestampMs,
+      UUID playerId,
+      String playerName,
+      String displayName,
+      boolean admin,
+      String content) { }
+
+  private record ServerEventRecord(
+      long timestampMs,
+      String type,
+      String text,
+      List<String> involvedPlayers) { }
+
+  private record ActiveCapture(
+      long sceneId,
+      long triggerAt,
+      long endsAt,
+      UUID triggerPlayerId,
+      String triggerPlayerName,
+      boolean directMention,
+      boolean smartFollowUp) { }
+
+  private record SceneAtom(long timestampMs, PublicChatRecord chat, ServerEventRecord event) {
+    static SceneAtom chat(PublicChatRecord chat) {
+      return new SceneAtom(chat.timestampMs(), chat, null);
+    }
+    static SceneAtom event(ServerEventRecord event) {
+      return new SceneAtom(event.timestampMs(), null, event);
     }
   }
 
-  private record RecentPublicMessage(long timestampMs, String content) {
-  }
+  private record SceneMemory(List<ChatMessage> messages, String assistantReply) { }
 
-  private static final class ParticipantState {
-    final UUID playerId;
-    String playerName = "";
-    boolean playerAdmin = false;
-    boolean active = true;
-    boolean closeAfterCurrent = false;
-    boolean humanConversationSignal = false;
-    int followUpsWithoutMention = 0;
-    long activeUntil = 0;
+  private record WikiCandidate(String key, String description, String content, int score) { }
 
-    ParticipantState(UUID playerId) {
-      this.playerId = playerId;
-    }
-  }
+  private record SceneRequest(
+      long sceneId,
+      List<ChatMessage> messages,
+      List<ChatMessage> currentSceneMessages,
+      Set<UUID> involvedPlayerIds,
+      Set<String> involvedPlayerNames,
+      Set<UUID> followUpEligiblePlayerIds,
+      AssistantRequestContext context,
+      int providerIndex,
+      int retryCount) {
 
-  private static final class ConversationSession {
-    final boolean global;
-    final long id;
-    final Map<UUID, ParticipantState> participants = new LinkedHashMap<>();
-
-    boolean processing = false;
-    boolean queued = false;
-    boolean suppressResponse = false;
-    UUID lastSpeakerId;
-    long lastInteractionAt = 0;
-    long lastProviderRequestAt = 0;
-    long batchStartTime = 0;
-
-    final List<ChatMessage> history = new ArrayList<>();
-    final List<ChatMessage> pending = new ArrayList<>();
-    final List<ChatMessage> currentBatch = new ArrayList<>();
-
-    BukkitTask batchTask;
-    BukkitTask maxBatchTask;
-    BukkitTask expiryTask;
-
-    ConversationSession(boolean global, long id) {
-      this.global = global;
-      this.id = id;
+    SceneRequest withProvider(int newProvider) {
+      return new SceneRequest(
+          sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
+          followUpEligiblePlayerIds, context, newProvider, 0);
     }
 
-    String debugName() {
-      return global ? GLOBAL_SESSION_KEY : "conversation-" + id;
+    SceneRequest withRetry(int newRetryCount) {
+      return new SceneRequest(
+          sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
+          followUpEligiblePlayerIds, context, providerIndex, newRetryCount);
     }
   }
 }

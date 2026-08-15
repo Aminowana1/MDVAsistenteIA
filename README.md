@@ -1,77 +1,41 @@
-# ServerAssistant
+# ServerAssistant 1.5.1
 
-Open-source Paper plugin for a context-aware AI character inside Minecraft.
+ServerAssistant 1.5 replaces the old logical conversation/slot router with one global public conversation designed for an NPC living in a Minecraft server chat.
 
-## 1.4.3 highlights
+## Scene model
 
-1.4.3 keeps the optimized 1.4 routing/reliability layer but makes the normal AI path behave like the stable V1 setup again: **OpenAI `gpt-4o-mini` is primary** and Gemini is optional fallback.
+1. A direct `Iso` / `Isolda` mention opens a scene (or a short smart follow-up from the same player who directly addressed Isolda).
+2. Java reads a configurable amount of recent public chat/events from local logs.
+3. Java listens for another configurable window (default 1500 ms).
+4. Java builds an involvement graph and removes unrelated chat locally.
+5. The scene is capped (default 10 chat lines + 2 events).
+6. Relevant wiki sections are selected locally in Java.
+7. One normal model request is sent and Isolda reacts to the scene as a whole.
 
-- Primary and fallback use the same OpenAI-compatible Java client architecture.
-- On a primary 429 or transient 5xx/timeout, the same pending batch can be retried through Gemini without committing or losing the player's question.
-- Provider cooldowns and local rolling RPM buckets are independent and survive `/sva reload`.
-- Logical group conversations, isolated participant timeouts, anti-human-chat false positives, recent-public-chat hand-off, serialized requests, bounded queues and wiki/tool limits from 1.4 remain intact.
-- GPT-4o mini receives normal USER/ASSISTANT turns. The synthetic continuation workaround is now Gemini-only.
-- `/sva status` reports primary and fallback state independently.
+Events and ordinary chat do not cost API tokens by themselves. There are no per-player slots, group sessions or busy notices.
 
-## Requirements
-
-- Java 21
-- Paper-compatible 1.21 server
-- Maven 3.9+ for local builds
-- API key for the configured provider
-
-## Provider configuration
-
-Recommended MDVCRAFT setup:
+## Important config
 
 ```yaml
-ai:
-  provider: "openai"
-  api-key-env: "OPENAI_API_KEY"
-  api-key: "YOUR_OPENAI_API_KEY_HERE"
-  base-url: "https://api.openai.com/v1/"
-  model: "gpt-4o-mini"
-  max-output-tokens: 160
-  temperature: 0.75
-  max-requests-per-minute: 20
-
-  fallback:
-    enabled: true
-    provider: "gemini"
-    api-key-env: "GEMINI_API_KEY"
-    api-key: "YOUR_GEMINI_API_KEY_HERE"
-    base-url: "https://generativelanguage.googleapis.com/v1beta/openai/"
-    model: "gemini-3.7-flash"
-    max-output-tokens: 128
-    temperature: 0.75
-    max-requests-per-minute: 4
-    max-wait-ms: 2500
+global-conversation:
+  trigger-mode: smart
+  smart-follow-up-ms: 12000
+  scene:
+    capture-window-ms: 1500
+    pre-lookback-ms: 10000
+    max-chat-messages: 10
+    max-pre-chat-messages: 5
+    max-events: 2
+    max-pre-events: 1
+  history:
+    max-scenes: 2
+    max-messages-per-scene: 4
 ```
 
-Existing V1 flat `api-key` + `ai-model` settings are migrated to the primary `ai.*` section. Existing 1.4 configs remain explicit and are not silently rewritten from Gemini to OpenAI; use the supplied 1.4.1 config when intentionally changing provider.
+For the strictest API economy, use `trigger-mode: mention`, keep fallback disabled, `provider-retry.max-503-retries: 0`, and keep local wiki retrieval enabled.
 
-## Building
+## Per-player smart follow-up
 
-```bash
-mvn clean package
-```
+`global-conversation.smart-follow-up-ms` is not a global chat latch. After Isolda replies, only players whose direct address to Isolda was actually included in that scene receive their own continuation timer. Players who merely appeared as contextual chat/events cannot trigger a new API call without saying `Iso`/`Isolda`. If two players both address Isolda inside the same 1.5s capture, both get independent timers.
 
-Output:
-
-```text
-target/ServerAssistant-1.4.3.jar
-```
-
-GitHub Actions is included at `.github/workflows/build.yml`.
-
-## Rate-limit strategy
-
-The plugin does not try to bypass provider quotas. OpenAI and Gemini have separate local caps/cooldowns. If OpenAI is temporarily rate-limited, the current uncommitted request can switch to Gemini; if both are unavailable, ServerAssistant sends the configured private busy notice rather than holding stale chat for a long time.
-
-## Security / future 2.0 tools
-
-1.4.3 still has no generic console execution. Plain model text is chat only. Tools must be explicitly registered in `ToolManager`, and unknown tool names are rejected. Future write/action tools should validate player permissions, arguments and current server state in Java before any action occurs.
-
-## License
-
-MIT. See `LICENSE`.
+This keeps natural follow-ups while preventing unrelated public chat from waking the AI and spending tokens.

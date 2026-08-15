@@ -171,16 +171,37 @@ public class AssistantResponse {
     if (text == null || text.isBlank()) {
       return false;
     }
+
     String lower = text.trim().toLowerCase();
+    String compact = lower.replaceAll("\\s+", "");
+
+    // Full or partial protocol envelopes must never become public chat.
+    // In 1.4.3 a model response such as `m: [], t: [], c: false` was valid YAML,
+    // but SnakeYAML interpreted the value of `m` as the scalar
+    // `[], t: [], c: false`; that scalar was then broadcast as Isolda's speech.
     if (lower.startsWith("[core]") || lower.startsWith("messages:")
         || lower.startsWith("\"messages\"") || lower.startsWith("{m:")
-        || lower.startsWith("{\"m\"")) {
+        || lower.startsWith("{\"m\"") || lower.startsWith("m:")
+        || lower.startsWith("\"m\":") || lower.startsWith("t:")
+        || lower.startsWith("\"t\":") || lower.startsWith("c:")
+        || lower.startsWith("\"c\":")) {
       return true;
     }
+
+    // Detect the malformed value produced when the outer `m:` key consumed the
+    // rest of a brace-less compact envelope: `[], t: [], c: false`.
+    if ((compact.startsWith("[]") || compact.startsWith("[ ]"))
+        && (compact.contains(",t:") || compact.contains(",\"t\":"))
+        && (compact.contains(",c:") || compact.contains(",\"c\":"))) {
+      return true;
+    }
+
     int signals = 0;
-    if (lower.contains("messages:" ) || lower.contains("\"messages\":")) signals++;
+    if (lower.contains("messages:") || lower.contains("\"messages\":")) signals++;
     if (lower.contains("tool-calls") || lower.contains("tool_calls")) signals++;
     if (lower.contains("close-conversation") || lower.contains("close_conversation")) signals++;
+    if (compact.contains(",t:") || compact.contains(",\"t\":")) signals++;
+    if (compact.contains(",c:") || compact.contains(",\"c\":")) signals++;
     return signals >= 2;
   }
 
@@ -276,7 +297,7 @@ public class AssistantResponse {
 
   private List<String> normalizeMessages(List<String> input) {
     int maxMessages = Math.max(
-        plugin.getConfig().getInt("conversation-control.max-messages-per-response", 1),
+        plugin.getConfig().getInt("chat.max-messages-per-response", 1),
         0);
 
     int maxLength = Math.max(
@@ -298,6 +319,7 @@ public class AssistantResponse {
         source = recovered;
       }
 
+      source = stripAssistantSelfPrefix(source);
       String message = sanitizeMessage(source).trim();
       if (message.isEmpty()) {
         continue;
@@ -314,22 +336,41 @@ public class AssistantResponse {
     return List.copyOf(result);
   }
 
-  private List<String> normalizeToolCalls(List<String> input) {
-    int maxToolCalls = Math.max(
-        plugin.getConfig().getInt("conversation-control.max-tool-calls-per-response", 2),
-        0);
 
-    List<String> result = new ArrayList<>();
-    for (String toolCall : input) {
-      if (maxToolCalls > 0 && result.size() >= maxToolCalls) {
+  /**
+   * The server already renders the assistant name. Models occasionally prepend
+   * `Isolda >`, `Isolda:`, etc.; strip only a leading self-label, never normal
+   * mentions of Isolda inside a sentence. This costs zero model tokens.
+   */
+  private String stripAssistantSelfPrefix(String text) {
+    if (text == null || text.isBlank()) {
+      return text == null ? "" : text;
+    }
+
+    String assistantName = plugin.getConfig().getString("assistant-name", "ServerAssistant");
+    if (assistantName == null || assistantName.isBlank()) {
+      return text;
+    }
+
+    String cleaned = text.trim();
+    Pattern prefix = Pattern.compile(
+        "(?i)^\\s*\\[?" + Pattern.quote(assistantName.trim())
+            + "\\]?\\s*(?::|>|»|-)\\s*");
+
+    // A double label is malformed too; remove at most two copies defensively.
+    for (int i = 0; i < 2; i++) {
+      Matcher matcher = prefix.matcher(cleaned);
+      if (!matcher.find()) {
         break;
       }
-      if (toolCall == null || toolCall.isBlank()) {
-        continue;
-      }
-      result.add(toolCall.trim());
+      cleaned = cleaned.substring(matcher.end()).trim();
     }
-    return List.copyOf(result);
+    return cleaned;
+  }
+
+  /** 1.5 uses local Java wiki retrieval, so model tool calls are ignored. */
+  private List<String> normalizeToolCalls(List<String> input) {
+    return List.of();
   }
 
   private String toYaml(

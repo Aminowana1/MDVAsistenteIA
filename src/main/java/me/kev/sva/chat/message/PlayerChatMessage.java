@@ -28,4 +28,19 @@ public class PlayerChatMessage extends ChatMessage {
     this.admin = player.isOp();
     this.header = "[PLAYER name=" + playerName + " admin=" + admin + "] " + displayName + " > ";
   }
+
+  public PlayerChatMessage(
+      ServerAssistantPlugin plugin,
+      UUID playerId,
+      String playerName,
+      String displayName,
+      boolean admin,
+      String content) {
+    super(plugin, content);
+    this.playerId = playerId;
+    this.playerName = playerName == null ? "unknown" : playerName;
+    this.displayName = displayName == null || displayName.isBlank() ? this.playerName : displayName;
+    this.admin = admin;
+    this.header = "[PLAYER name=" + this.playerName + " admin=" + admin + "] " + this.displayName + " > ";
+  }
 }

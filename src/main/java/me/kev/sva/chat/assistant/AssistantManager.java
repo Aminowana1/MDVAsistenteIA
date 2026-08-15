@@ -22,7 +22,7 @@ import me.kev.sva.utils.MessageSender;
 /**
  * Provider-neutral request executor.
  *
- * <p>1.4.3 keeps the simple V1 OpenAI path as the normal path while allowing a
+ * <p>1.4.4 keeps the simple V1 OpenAI path as the normal path while allowing a
  * separately configured OpenAI-compatible fallback (Gemini by default). The
  * ConversationManager decides when to switch provider; this class only builds
  * and executes one request against the selected provider.</p>
@@ -220,21 +220,17 @@ public class AssistantManager {
         AssistantContextualizer.PERSONALITY_PROMPT_HEADER + personalityPrompt);
 
     int maxAssistantMessageLength = Math.max(
-        plugin.getConfig().getInt("chat.max-assistant-message-length", 220),
-        0);
-    int maxMessages = Math.max(
-        plugin.getConfig().getInt("conversation-control.max-messages-per-response", 1),
+        plugin.getConfig().getInt("chat.max-assistant-message-length", 190),
         0);
 
-    // Keep the large, repeated prefix stable so provider prompt caching can reuse
-    // CORE + personality + output limits + wiki index across conversations.
+    // Stable prefix first so prompt caching can reuse CORE + personality + output rule.
     paramsBuilder.addSystemMessage(
         "[OUTPUT] max_chars=" + maxAssistantMessageLength
-            + ", max_chat_messages=" + maxMessages
-            + ". Java enforces both limits.");
-    paramsBuilder.addSystemMessage(AssistantContextualizer.getKnowledgeAndTools(plugin));
+            + ", max_chat_messages=1. Java enforces both limits.");
 
-    // Dynamic context belongs after the cache-friendly static prefix.
+    // Dynamic/local context follows the cache-friendly prefix. Local wiki retrieval
+    // happens in Java before this one model call; there is no model tool loop.
+    paramsBuilder.addSystemMessage(AssistantContextualizer.getLocalKnowledge(requestContext));
     paramsBuilder.addSystemMessage(AssistantContextualizer.getServerContext());
     paramsBuilder.addSystemMessage(AssistantContextualizer.getRequestContext(requestContext));
   }

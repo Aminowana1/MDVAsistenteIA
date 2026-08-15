@@ -93,13 +93,13 @@ public class CommandManager implements TabExecutor {
       }
 
       plugin.getConfig().set(
-          "request-triggers.player-messages.mode",
+          "global-conversation.trigger-mode",
           mode);
 
       plugin.saveConfig();
 
       MessageSender.Success(
-          "Player message mode set to: " + mode);
+          "Global conversation trigger mode set to: " + mode);
 
       return true;
     }
