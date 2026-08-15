@@ -121,6 +121,9 @@ provider-retry:
 # PROVIDER RESPONSE
 # ============================================================
 provider-response:
+  # OpenAI JSON mode keeps the m/t envelope valid so ACTION calls are not lost
+  # when the model would otherwise answer as plain chat text.
+  force-json-object-openai: true
   accept-plain-text-fallback: true
   log-fallbacks: false
   debug-malformed-responses: false
@@ -163,6 +166,10 @@ tools:
     activation: smart
     max-players: 2
     max-items: 18
+    # Main-hand details are useful for questions such as "que tengo en la mano?"
+    # and include a few lore lines without dumping the full item/NBT.
+    include-held-item-details: true
+    max-held-lore-lines: 4
 
   # Fixed allow-listed moderation action. "ask" is enforced by Java, not merely
   # suggested to the model. Admin targets are protected by default.

@@ -1,6 +1,11 @@
-# ServerAssistant 1.6.0
+# ServerAssistant 1.6.1
 
-ServerAssistant 1.6 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+ServerAssistant 1.6.1 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+
+
+## 1.6.1 action-tool reliability
+
+OpenAI primary requests use JSON-object response mode by default so a normal answer and ACTION calls remain in the same parseable `m`/`t` envelope. If Isolda says she performs a real server action, the matching action must be present in `t`; stage-direction roleplay is not a substitute for the tool. Lightning also accepts unique player-name prefixes, and inventory context now exposes the main-hand item plus a bounded amount of lore when relevant.
 
 ## Global scene model
 

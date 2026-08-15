@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.1 - Action-tool reliability + held-item context
+
+- OpenAI primary requests can force JSON-object response mode (`provider-response.force-json-object-openai: true`) so the `m`/`t` envelope stays machine-readable and ACTION calls are not lost to plain-text fallback.
+- CORE now forbids fake stage-direction actions such as `*invoca un rayo*` unless the matching ACTION call is present in `t`.
+- ACTION tool prompt explicitly distinguishes spoken chat (`m`) from real server actions (`t`).
+- Lightning accepts a unique online-player prefix (for example `tablos` -> `tablos16`) while still rejecting ambiguous prefixes.
+- Sound tool descriptions now include semantic hints so requests like `asustanos` or `celebra` can map more naturally to configured sounds.
+- Inventory intent matching recognizes common typos such as `invetnario` and hand-related phrases.
+- Inventory context now includes `mainhand` explicitly and can expose a small bounded amount of held-item lore for questions such as `que tengo en la mano?` / `que dice?`.
+
 ## 1.6.0 - Global conversation + alternate-branch feature merge
 
 ### Preserved from MDVCRAFT 1.5.x

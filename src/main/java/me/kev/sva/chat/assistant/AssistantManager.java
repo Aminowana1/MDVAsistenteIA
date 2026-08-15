@@ -9,6 +9,7 @@ import java.util.function.BiConsumer;
 
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
+import com.openai.models.ResponseFormatJsonObject;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 
 import me.kev.sva.ServerAssistantPlugin;
@@ -168,6 +169,14 @@ public class AssistantManager {
         .model(provider.model())
         .maxCompletionTokens(provider.maxOutputTokens())
         .temperature(provider.temperature());
+
+    // OpenAI JSON mode guarantees a syntactically valid JSON object. This matters
+    // for one-call ACTION tools because a plain-text fallback cannot carry `t`.
+    // Keep OpenAI-compatible fallback providers untouched unless explicitly supported.
+    if ("openai".equalsIgnoreCase(provider.type())
+        && plugin.getConfig().getBoolean("provider-response.force-json-object-openai", true)) {
+      paramsBuilder.responseFormat(ResponseFormatJsonObject.builder().build());
+    }
 
     appendSystemPromptsToBuilder(paramsBuilder, requestContext);
     appendConversationMessagesToBuilder(paramsBuilder, chatMessages, provider);

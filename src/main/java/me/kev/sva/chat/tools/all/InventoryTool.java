@@ -19,8 +19,10 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 /** Local one-call inventory context. */
 public final class InventoryTool extends Tool {
   private static final List<String> INTENT_TERMS = List.of(
-      "inventario", "inventory", "items", "item", "objeto", "objetos", "lleva",
-      "tiene encima", "que lleva", "que trae", "armadura", "armor", "equipado", "equipo", "offhand", "mano secundaria");
+      "inventario", "invetnario", "invetario", "inventaro", "inventorio", "inventory",
+      "items", "item", "objeto", "objetos", "lleva", "tiene encima", "que lleva", "que trae",
+      "armadura", "armor", "equipado", "equipo", "offhand", "mano secundaria", "mano principal",
+      "en la mano", "tengo en mano", "tengo en la mano", "sostengo", "sosteniendo", "agarro", "agarrado");
 
   public InventoryTool(ServerAssistantPlugin plugin) {
     super(plugin, "inventory");
@@ -94,13 +96,42 @@ public final class InventoryTool extends Tool {
         out.append(entry.getKey()).append('x').append(entry.getValue());
       }
     }
-    out.append(" | armor=")
+    out.append(" | mainhand=").append(formatItem(inventory.getItemInMainHand()))
+        .append(" | armor=")
         .append(formatItem(inventory.getHelmet())).append(',')
         .append(formatItem(inventory.getChestplate())).append(',')
         .append(formatItem(inventory.getLeggings())).append(',')
         .append(formatItem(inventory.getBoots()))
         .append(" | offhand=").append(formatItem(inventory.getItemInOffHand()));
+
+    if (plugin.getConfig().getBoolean("tools.inventory.include-held-item-details", true)) {
+      appendHeldItemDetails(out, inventory.getItemInMainHand());
+    }
     return out.toString();
+  }
+
+  private void appendHeldItemDetails(StringBuilder out, ItemStack item) {
+    if (isEmpty(item) || !item.hasItemMeta()) return;
+    var meta = item.getItemMeta();
+    List<Component> lore = meta.lore();
+    if (lore == null || lore.isEmpty()) return;
+
+    int maxLoreLines = Math.max(plugin.getConfig().getInt("tools.inventory.max-held-lore-lines", 4), 0);
+    if (maxLoreLines == 0) return;
+
+    List<String> lines = new ArrayList<>();
+    for (Component line : lore) {
+      if (lines.size() >= maxLoreLines) break;
+      String plain = PlainTextComponentSerializer.plainText().serialize(line).trim();
+      if (!plain.isBlank()) {
+        plain = plain.replace(';', ',').replace('|', '/');
+        if (plain.length() > 180) plain = plain.substring(0, 180).trim();
+        lines.add(plain);
+      }
+    }
+    if (!lines.isEmpty()) {
+      out.append(" | mainhand_lore=").append(String.join(" / ", lines));
+    }
   }
 
   private String formatItem(ItemStack item) {

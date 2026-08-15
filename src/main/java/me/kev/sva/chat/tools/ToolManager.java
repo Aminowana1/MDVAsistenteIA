@@ -116,7 +116,9 @@ public final class ToolManager {
     if (rows.isEmpty()) return "[TOOLS] no action tools available; t must be []";
     int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
     return "[TOOLS] t may contain at most " + maxCalls
-        + " exact action calls. Never invent tool names.\n" + String.join("\n", rows);
+        + " exact action calls. Never invent tool names. If you SAY an action happened, the matching call MUST be in t. "
+        + "Never substitute roleplay such as *invoca...* or *hace sonar...* for a real tool call.\n"
+        + String.join("\n", rows);
   }
 
   /**
