@@ -6,7 +6,7 @@
 
     <groupId>me.kev</groupId>
     <artifactId>ServerAssistant</artifactId>
-    <version>1.6.5</version>
+    <version>1.6.9</version>
     <packaging>jar</packaging>
 
     <name>ServerAssistant</name>
@@ -26,6 +26,19 @@
                 <configuration>
                     <source>${java.version}</source>
                     <target>${java.version}</target>
+
+                    <!--
+                      Compile only ServerAssistant sources. This keeps optional plugin
+                      integrations truly optional and also prevents stale Java files
+                      left in a reused GitHub repository (for example MDVSocial source)
+                      from being compiled as part of ServerAssistant.
+                    -->
+                    <includes>
+                        <include>me/kev/sva/**/*.java</include>
+                    </includes>
+                    <testIncludes>
+                        <testInclude>me/kev/sva/**/*.java</testInclude>
+                    </testIncludes>
                 </configuration>
             </plugin>
             <plugin>
@@ -63,9 +76,12 @@
             <resource>
                 <directory>src/main/resources</directory>
                 <filtering>false</filtering>
-                <excludes>
-                    <exclude>plugin.yml</exclude>
-                </excludes>
+                <includes>
+                    <include>config.yml</include>
+                    <include>personality.yml</include>
+                    <include>wiki.yml</include>
+                    <include>integrations.yml</include>
+                </includes>
             </resource>
 
             <!-- plugin.yml inherits the version from pom.xml automatically. -->

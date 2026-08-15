@@ -1,5 +1,10 @@
 package me.kev.sva.chat.assistant;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,6 +41,10 @@ public class AssistantManager {
   private final ProviderRuntime primary;
   private final ProviderRuntime fallback;
   private final ExecutorService requestExecutor;
+  /** Exact stable system prefix reused by every request until /sva reload. */
+  private final List<String> stableSystemMessages;
+  /** Hash of the exact stable prefix; used only to rotate OpenAI's routing key safely. */
+  private final String stableSystemHash;
   private volatile boolean shutdown = false;
 
   public AssistantManager(ServerAssistantPlugin plugin) {
@@ -50,6 +59,17 @@ public class AssistantManager {
       logRuntime(fallback, "Fallback");
     } else {
       plugin.getLogger().info("AI fallback: disabled");
+    }
+
+    // Build this once per plugin load/reload. Besides avoiding repeated YAML/string work,
+    // preserving these messages byte-for-byte at the front of each OpenAI request gives
+    // automatic prompt caching the longest possible identical prefix.
+    this.stableSystemMessages = buildStableSystemMessages();
+    this.stableSystemHash = shortSha256(String.join("\n\n---\n\n", stableSystemMessages));
+
+    if (isOpenAIPromptCacheEnabled(primary.settings())) {
+      plugin.getLogger().info("OpenAI prompt cache routing enabled (stable prefix key="
+          + promptCacheKey(primary.settings()) + ").");
     }
 
     AtomicInteger counter = new AtomicInteger();
@@ -170,6 +190,13 @@ public class AssistantManager {
         .maxCompletionTokens(provider.maxOutputTokens())
         .temperature(provider.temperature());
 
+    // OpenAI prompt caching itself is automatic. prompt_cache_key only helps route
+    // requests that share the same long prefix toward the same cache. Do not send
+    // this OpenAI-specific field to Gemini/other OpenAI-compatible providers.
+    if (isOpenAIPromptCacheEnabled(provider)) {
+      paramsBuilder.promptCacheKey(promptCacheKey(provider));
+    }
+
     // OpenAI JSON mode guarantees a syntactically valid JSON object. This matters
     // for one-call ACTION tools because a plain-text fallback cannot carry `t`.
     // Keep OpenAI-compatible fallback providers untouched unless explicitly supported.
@@ -190,6 +217,7 @@ public class AssistantManager {
       try {
         if (!shutdown) {
           var response = runtime.client().chat().completions().create(params);
+          logPromptCacheUsage(provider, response);
           if (!response.choices().isEmpty()) {
             responseText = response.choices()
                 .get(0)
@@ -220,32 +248,19 @@ public class AssistantManager {
       ChatCompletionCreateParams.Builder paramsBuilder,
       AssistantRequestContext requestContext) {
 
-    paramsBuilder.addSystemMessage(AssistantContextualizer.PRIMARY_SYSTEM_INSTRUCTIONS);
-
-    String personalityPrompt = plugin.getPersonalityConfig().getString(
-        "prompt",
-        AssistantContextualizer.DEFAULT_PERSONALITY_PROMPT);
-    String capabilitiesNote = plugin.getPersonalityConfig().getString("capabilities-note", "");
-    StringBuilder personalitySystem = new StringBuilder(
-        AssistantContextualizer.PERSONALITY_PROMPT_HEADER).append(personalityPrompt);
-    if (capabilitiesNote != null && !capabilitiesNote.isBlank()) {
-      personalitySystem.append("\n\n[WORLD CAPABILITIES]\n").append(capabilitiesNote.trim());
+    // IMPORTANT: nothing request-specific may be inserted before these messages.
+    // OpenAI cache hits require an exact prompt prefix match.
+    for (String message : stableSystemMessages) {
+      paramsBuilder.addSystemMessage(message);
     }
-    paramsBuilder.addSystemMessage(personalitySystem.toString());
 
-    int maxAssistantMessageLength = Math.max(
-        plugin.getConfig().getInt("chat.max-assistant-message-length", 190),
-        0);
-
-    // Stable prefix first so prompt caching can reuse CORE + personality + output/tool rules.
-    paramsBuilder.addSystemMessage(
-        "[OUTPUT] max_chars=" + maxAssistantMessageLength
-            + ", max_chat_messages=1. Java enforces both limits.");
+    // ACTION availability changes from scene to scene, so it deliberately starts the
+    // dynamic suffix. Keeping it out of the stable prefix avoids invalidating the large
+    // CORE/personality prefix whenever a scene requests a different action.
     if (plugin.getToolManager() != null) {
-      paramsBuilder.addSystemMessage(plugin.getToolManager().getCapabilitiesPrompt());
-      paramsBuilder.addSystemMessage(plugin.getToolManager().getAvailableActionToolsPrompt());
+      paramsBuilder.addSystemMessage(
+          plugin.getToolManager().getAvailableActionToolsPrompt(requestContext.currentActionText()));
     } else {
-      paramsBuilder.addSystemMessage("[CAPABILITIES] no local tool capabilities available");
       paramsBuilder.addSystemMessage("[TOOLS] disabled; t must be []");
     }
 
@@ -255,6 +270,106 @@ public class AssistantManager {
     paramsBuilder.addSystemMessage(AssistantContextualizer.getLocalKnowledge(requestContext));
     paramsBuilder.addSystemMessage(AssistantContextualizer.getServerContext());
     paramsBuilder.addSystemMessage(AssistantContextualizer.getRequestContext(requestContext));
+  }
+
+  /**
+   * Builds the exact reusable front of the prompt once per load/reload.
+   *
+   * <p>Do not put timestamps, scene IDs, selected wiki chunks, player identities or
+   * current ACTION permissions here. Those belong after this prefix.</p>
+   */
+  private List<String> buildStableSystemMessages() {
+    List<String> messages = new ArrayList<>();
+    messages.add(AssistantContextualizer.PRIMARY_SYSTEM_INSTRUCTIONS);
+
+    String personalityPrompt = plugin.getPersonalityConfig().getString(
+        "prompt",
+        AssistantContextualizer.DEFAULT_PERSONALITY_PROMPT);
+    String capabilitiesNote = plugin.getPersonalityConfig().getString("capabilities-note", "");
+    StringBuilder personalitySystem = new StringBuilder(
+        AssistantContextualizer.PERSONALITY_PROMPT_HEADER)
+        .append(personalityPrompt == null ? "" : personalityPrompt);
+    if (capabilitiesNote != null && !capabilitiesNote.isBlank()) {
+      personalitySystem.append("\n\n[WORLD CAPABILITIES]\n").append(capabilitiesNote.trim());
+    }
+    messages.add(personalitySystem.toString());
+
+    int maxAssistantMessageLength = Math.max(
+        plugin.getConfig().getInt("chat.max-assistant-message-length", 190),
+        0);
+    messages.add(
+        "[OUTPUT] max_chars=" + maxAssistantMessageLength
+            + ", max_chat_messages=1. Java enforces both limits.");
+
+    if (plugin.getToolManager() != null) {
+      // This capability catalogue is stable across scenes. Only the per-scene ACTION
+      // allow-list is dynamic and is appended later.
+      messages.add(plugin.getToolManager().getCapabilitiesPrompt());
+    } else {
+      messages.add("[CAPABILITIES] no local tool capabilities available");
+    }
+    return List.copyOf(messages);
+  }
+
+  private boolean isOpenAIPromptCacheEnabled(ProviderSettings provider) {
+    return provider != null
+        && "openai".equalsIgnoreCase(provider.type())
+        && plugin.getConfig().getBoolean("ai.prompt-cache.enabled", true);
+  }
+
+  /**
+   * Stable routing key for requests with this exact loaded prefix/model.
+   * Changing personality or /sva reload rotates the suffix automatically.
+   */
+  private String promptCacheKey(ProviderSettings provider) {
+    String configured = plugin.getConfig().getString(
+        "ai.prompt-cache.key-prefix",
+        "mdvcraft-isolda");
+    String prefix = sanitizeCacheKeyPrefix(configured);
+    String model = provider == null || provider.model() == null ? "unknown" : provider.model();
+    String modelHash = shortSha256(model);
+    return prefix + "-" + modelHash.substring(0, 8) + "-" + stableSystemHash.substring(0, 16);
+  }
+
+  private static String sanitizeCacheKeyPrefix(String configured) {
+    String value = configured == null ? "" : configured.trim();
+    value = value.replaceAll("[^A-Za-z0-9:_-]+", "-")
+        .replaceAll("-+", "-")
+        .replaceAll("^-|-$", "");
+    if (value.isBlank()) value = "mdvcraft-isolda";
+    // Keep plenty of room for the two short hashes and separators.
+    if (value.length() > 36) value = value.substring(0, 36);
+    return value;
+  }
+
+  private static String shortSha256(String value) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] hash = digest.digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+      return HexFormat.of().formatHex(hash);
+    } catch (NoSuchAlgorithmException ex) {
+      // SHA-256 is required by the Java platform; this is only a defensive fallback.
+      return String.format("%064x", (long) (value == null ? 0 : value.hashCode()));
+    }
+  }
+
+  private void logPromptCacheUsage(
+      ProviderSettings provider,
+      com.openai.models.chat.completions.ChatCompletion response) {
+    if (!isOpenAIPromptCacheEnabled(provider)
+        || !plugin.getConfig().getBoolean("ai.prompt-cache.log-usage", false)
+        || response == null) {
+      return;
+    }
+    response.usage().ifPresent(usage -> {
+      long cached = usage.promptTokensDetails()
+          .flatMap(details -> details.cachedTokens())
+          .orElse(0L);
+      plugin.getLogger().info("OpenAI prompt cache usage: prompt=" + usage.promptTokens()
+          + ", cached=" + cached
+          + ", completion=" + usage.completionTokens()
+          + ", key=" + promptCacheKey(provider));
+    });
   }
 
   private void appendConversationMessagesToBuilder(

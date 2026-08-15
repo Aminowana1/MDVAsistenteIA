@@ -1,11 +1,11 @@
-# ServerAssistant 1.6.5
+# ServerAssistant 1.6.9
 
-ServerAssistant 1.6.5 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+ServerAssistant 1.6.9 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
 
-1.6.5 hardens direct observation and moderation: held-item/armor/location context is target-aware and query-specific, personality gains a capability framing note without overwriting the main prompt, and moderation can deterministically queue/execute mute policy actions once configurable directed-abuse strikes reach the threshold.
+1.6.9 keeps the 1.6.8 identity context and 1.6.7/1.6.6 reliability fixes, then adds OpenAI prompt-cache-friendly request construction plus a pre-normalized local wiki index. The 4-second group-scene behavior, one normal model request per scene, action isolation, target-aware local context and moderation flow remain unchanged.
 
 
-## 1.6.5 reliability + modular integrations
+## Runtime reliability + modular integrations
 
 ServerAssistant now keeps configuration in four focused files:
 
@@ -34,9 +34,9 @@ OpenAI primary requests use JSON-object response mode by default so a normal ans
 
 1. `Iso` / `Isolda` (or an eligible per-player smart follow-up) opens one global scene.
 2. Java reads a short configurable lookback from local chat/event logs.
-3. Java listens for the configured capture window (default 2 seconds).
+3. Java listens for the configured capture window (default 4 seconds).
 4. A local involvement graph removes unrelated players/messages.
-5. The scene is capped after filtering (default 10 chat lines + 2 events).
+5. The scene is capped after filtering (default 6 chat lines + 1 event).
 6. Wiki/player/inventory/profile context is selected locally before the model call.
 7. One normal model request is made and Isolda reacts to the scene as a whole.
 8. Optional action tool calls may be returned in that same model response and are allow-listed/executed by Java.
@@ -135,14 +135,42 @@ After real player chat, a random timer is started/reset. If chat stays quiet, at
 
 This is separate from the `schedule` tool: `schedule` delays an already-generated Isolda line and therefore needs no future AI request.
 
+
+## OpenAI prompt caching + local wiki cache (1.6.9)
+
+For the GPT/OpenAI provider, ServerAssistant keeps the largest stable prompt prefix identical across requests: CORE instructions, `personality.yml`, output rules and the stable capability catalogue come first. Request-specific ACTION permissions, selected wiki chunks, player identities, inventory/profile data, timestamps/events and the current scene come afterwards.
+
+OpenAI prompt caching is automatic on eligible prompts; ServerAssistant additionally sets a stable `prompt_cache_key` only on the OpenAI provider to improve cache routing. The key includes a short hash of the loaded stable prefix/model, so changing personality/instructions and running `/sva reload` automatically creates a new routing key.
+
+```yaml
+ai:
+  prompt-cache:
+    enabled: true
+    key-prefix: mdvcraft-isolda
+    log-usage: false
+```
+
+Set `log-usage: true` temporarily to see the `cached_tokens` reported by OpenAI in the console. This diagnostic does not make another model call.
+
+The complete `wiki.yml` is **not** sent to GPT or stored as one giant remote prompt. It remains local. On startup/reload, ServerAssistant pre-normalizes every wiki section into a small RAM index; each scene scores that index and sends only the configured best 1-2 sections. This reduces repeated CPU/string work without increasing API context.
+
+## Ambient player identity (1.6.8)
+
+When a player becomes involved in a model scene, ServerAssistant automatically attaches a small trusted identity snapshot containing the equipped MDVSocial title, MMOCore race/class and MMOCore main RPG level. This happens locally before the same model request, does not consume a CONTEXT-tool slot, and lets personality rules react to player identity without requiring an explicit profile question. `integrations.yml -> identity-context` controls the feature and its safety bound.
+
 ## Build/versioning
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-To release 1.6.5, for example, change only:
+To release 1.6.9, for example, change only:
 
 ```xml
-<version>1.6.5</version>
+<version>1.6.9</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.6.5.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.6.9.jar`.
+
+
+### Reused GitHub repositories
+
+ServerAssistant 1.6.5 buildfix scopes Maven compilation to the `me.kev.sva` package. If this source is uploaded over a repository that still contains source files from another plugin (for example MDVSocial), those unrelated Java files are ignored by the ServerAssistant build. A separate clean repository is still recommended for maintainability.

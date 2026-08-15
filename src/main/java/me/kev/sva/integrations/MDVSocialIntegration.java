@@ -50,8 +50,7 @@ public final class MDVSocialIntegration implements PlayerContextIntegration {
 
     List<String> fields = new ArrayList<>();
     if (plugin.getIntegrationsConfig().getBoolean("mdvsocial.title.include-display", true)) {
-      String display = getApiValue("getEquippedTitlePlain", player.getUniqueId());
-      if (display.isBlank()) display = resolvePlaceholder(player, "%mdvsocial_title%");
+      String display = readEquippedTitle(player);
       fields.add("title=" + (display.isBlank() ? "none" : compact(display)));
     }
     if (plugin.getIntegrationsConfig().getBoolean("mdvsocial.title.include-id", false)) {
@@ -64,6 +63,14 @@ public final class MDVSocialIntegration implements PlayerContextIntegration {
       if (!count.isBlank()) fields.add("unlocked_titles=" + compact(count));
     }
     return fields.isEmpty() ? "" : "MDVSOCIAL " + String.join(" ", fields);
+  }
+
+  /** Lightweight equipped-title lookup for ambient scene identity. */
+  String readEquippedTitle(Player player) {
+    if (player == null || !enabled() || !available()) return "";
+    String display = getApiValue("getEquippedTitlePlain", player.getUniqueId());
+    if (display.isBlank()) display = resolvePlaceholder(player, "%mdvsocial_title%");
+    return clean(display);
   }
 
   private String getApiValue(String methodName, UUID uuid) {

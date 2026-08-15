@@ -180,6 +180,8 @@ public final class CommandManager implements TabExecutor {
       default -> List.of();
     };
     for (String path : paths) {
+      // Persist the requested state. Do not hard-code true here: otherwise
+      // `/sva listener events <event> disabled` would silently re-enable it.
       plugin.getConfig().set("global-conversation.events." + path, enabled);
     }
     plugin.saveConfig();

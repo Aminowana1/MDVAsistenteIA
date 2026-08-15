@@ -1,5 +1,6 @@
 package me.kev.sva.chat.tools.all;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.bukkit.Bukkit;
@@ -7,8 +8,10 @@ import org.bukkit.entity.Player;
 
 import me.kev.sva.ServerAssistantPlugin;
 import me.kev.sva.chat.message.ChatMessage;
+import me.kev.sva.chat.message.PlayerChatMessage;
 import me.kev.sva.chat.tools.ContextTargetResolver;
 import me.kev.sva.chat.tools.ToolKind;
+import me.kev.sva.chat.tools.ToolManager;
 import me.kev.sva.integrations.ProfileQuery;
 
 /** Local profile context assembled from optional integrations such as MMOCore/MDVSocial. */
@@ -43,9 +46,17 @@ public final class ProfileTool extends Tool {
     if (plugin.getIntegrationManager() == null) return "";
     int maxPlayers = Math.max(
         plugin.getIntegrationsConfig().getInt("profile-context.max-players", 2), 1);
+
+    // Resolve profile context from profile-related lines only. This preserves the
+    // single group scene while preventing an unrelated last speaker from stealing
+    // the race/title/profession target.
+    List<ChatMessage> queryMessages = selectRelevantMessages(currentSceneMessages);
+    String queryText = normalizedText(queryMessages);
+    if (queryText.isBlank()) queryText = normalizedSceneText == null ? "" : normalizedSceneText;
+
     List<String> targets = ContextTargetResolver.resolve(
-        involvedPlayerNames, normalizedSceneText, currentSceneMessages, maxPlayers);
-    return plugin.getIntegrationManager().buildProfileContext(targets, normalizedSceneText, false);
+        involvedPlayerNames, queryText, queryMessages, maxPlayers);
+    return plugin.getIntegrationManager().buildProfileContext(targets, queryText, false);
   }
 
   @Override
@@ -62,5 +73,25 @@ public final class ProfileTool extends Tool {
     if (player == null) return "Player '" + playerName + "' is not online.";
     if (plugin.getIntegrationManager() == null) return "Integration manager is not initialized.";
     return plugin.getIntegrationManager().buildFullProfile(player);
+  }
+
+  private List<ChatMessage> selectRelevantMessages(List<ChatMessage> currentSceneMessages) {
+    if (currentSceneMessages == null || currentSceneMessages.isEmpty()) return List.of();
+    List<ChatMessage> relevant = new ArrayList<>();
+    for (ChatMessage message : currentSceneMessages) {
+      if (!(message instanceof PlayerChatMessage) || message.content == null) continue;
+      if (ProfileQuery.from(message.content).any()) relevant.add(message);
+    }
+    return relevant.isEmpty() ? currentSceneMessages : List.copyOf(relevant);
+  }
+
+  private String normalizedText(List<ChatMessage> messages) {
+    StringBuilder out = new StringBuilder();
+    if (messages != null) {
+      for (ChatMessage message : messages) {
+        if (message != null && message.content != null) out.append(message.content).append(' ');
+      }
+    }
+    return ToolManager.normalize(out.toString());
   }
 }

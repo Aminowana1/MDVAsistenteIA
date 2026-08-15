@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.6.9 - OpenAI prompt-cache friendly prefix + cached wiki index
+
+- Keeps the GPT/OpenAI path as the primary target; Gemini/fallback providers do not receive OpenAI-specific `prompt_cache_key`.
+- Builds CORE + `personality.yml` + stable output/capability instructions once per plugin load/reload and preserves them byte-for-byte at the beginning of every OpenAI request.
+- Moves the per-scene ACTION allow-list after the stable prefix so lightning/sound/mute/schedule intent changes no longer invalidate the large reusable personality prefix.
+- Adds `ai.prompt-cache.enabled`, `key-prefix` and optional `log-usage` settings. The routing key includes a short hash of the loaded stable prefix and model, so `/sva reload` naturally rotates it after personality/instruction changes.
+- Optional cache diagnostics report OpenAI `prompt_tokens`, `prompt_tokens_details.cached_tokens` and completion tokens without creating an extra API request.
+- Wiki remains local retrieval only; the full wiki is never sent to GPT. Its key/description/content normalization is now precomputed once into a RAM index instead of being repeated for every wiki section on every scene.
+- `/sva reload` reconstructs both the stable prompt prefix and wiki index, so edits do not leave stale cached local data.
+- No changes to the 4-second group-scene behavior, one-call architecture, action isolation, player identity context, moderation rules or wiki scoring weights.
+
+## 1.6.8 - Ambient player identity context
+
+- Every player involved in a model scene now carries a trusted compact identity snapshot with equipped MDVSocial title, MMOCore race/class and MMOCore main RPG level.
+- Identity is injected automatically even when nobody asks for `/profile`; it creates no extra model request and does not consume a local CONTEXT-tool slot.
+- Current PLAYER headers include `race=`, `level=` and `title=` so scene history keeps the identity attached to the speaker.
+- EVENT actors and recent-event memory preserve identity snapshots as well, including quit/death actors who may be offline by the time the scene is sent.
+- Referenced online players that do not speak still receive an entry in trusted `[PLAYER IDENTITIES]` / `[SCENE] involved` context.
+- `level` is explicitly grounded as the main MMOCore level, never vanilla XP level; `title` is grounded as the equipped MDVSocial visual title, not automatically a rank.
+- Added `identity-context` controls to `integrations.yml` with a safety bound of 12 players per scene. Existing integration settings are preserved by the non-destructive updater.
+- Keeps all 1.6.7 safety fixes and the 1.6.6 four-second single group-scene architecture intact.
+
+## 1.6.7 - Safety hotfix + intent precision
+
+- Keeps 1.6.6 group-scene/action isolation behavior intact.
+- `tools.action-safety.suppress-reply-on-rejected-call` is restored to `true`, so Isolda does not claim an action happened when every model action call was rejected. A narrow schema-6 migration repairs the mistaken 1.6.6 default while leaving other user settings untouched.
+- Inventory enchantment intent no longer treats the generic words `encantado`/`encantada` as an enchantment query, avoiding false activation on names such as `Amatista Encantada`.
+- Hidden Bukkit enchants (`HIDE_ENCHANTS`) are not exposed to the model; MMOItems/resource-pack glint enchants are reported only as `none_visible`.
+- Player-data prefetch now requires a personal/deictic player-location or status intent instead of firing for generic wiki questions such as `donde aparecen los goblins?` or `cuanta vida tiene un goblin?`.
+- Audited the event-listener command bug reported against the older `EventsCommandNode` branch. This source uses `CommandManager#setEvent` and already persists the requested `enabled` boolean instead of hard-coding `true`; an explicit regression comment was added.
+
+## 1.6.6 - Group-scene grounding + action isolation
+
+- Preserves the single 4-second global scene behavior: multiple players can still be interpreted as one social situation and Isolda may combine related reactions naturally.
+- Marks previous scene/history as context-only and the new scene as the only ACTION authority. Old lightning/sound requests no longer look like fresh tool permissions.
+- ACTION tool catalog is now dynamic per current scene. When the current scene does not request an action, the model receives `t must be []`; when it requests one, only the relevant action tool is exposed. This also lowers prompt tokens.
+- A valid current action is no longer treated as failed merely because the model also leaked one stale action call. Java still blocks every stale/policy-invalid call.
+- Local CONTEXT tools now resolve their targets from tool-relevant lines inside a group scene, so a later unrelated speaker does not steal another player's location/inventory/profile query.
+- Inventory inspection now recognizes enchantment questions and common held-item references such as `mi espada` and `que es esto`. It supplies real Bukkit enchantments for the main hand and armor, including explicit `none` when an enchantment query finds none.
+- Player-data recognizes `zona`, `region` and `bioma` and includes the current biome with world/coordinates.
+- Recent-death retrieval recognizes natural phrases such as `me mataron`, `asesinaron` and `abatieron`.
+- Local wiki scoring now lets one exact meaningful content hit satisfy the default `min-score: 2`, fixing short questions such as `hay misiones?` when the keyword exists in content but not in the section description.
+- CORE grounding is stricter: broad wiki facts may not be expanded into invented merchant stock, item properties, mechanics or locations. Server clock data may not be presented as a player's real-world local timezone.
+- Direct mentions are instructed to always produce one natural chat line; an optional diagnostic can log empty direct replies without making another AI request.
+- Bundled config schema is now version 6. Existing user values remain preserved by the non-destructive updater.
+
+## 1.6.5 buildfix
+
+- Maven now compiles only `me/kev/sva/**/*.java` for the main plugin and its tests.
+- Stale Java sources from a reused repository (for example `com/mdvcraft/mdvsocial/**`) no longer get compiled into ServerAssistant.
+- Packaged resources are restricted to ServerAssistant's own YAML files plus the filtered `plugin.yml`, preventing stale resources from another plugin from leaking into the JAR.
+- GitHub Actions prints a warning when unrelated Java sources are detected so repository contamination is visible without breaking the build.
+- No runtime behavior, config format, or AI token usage changed. Plugin version remains 1.6.5.
+
 ## 1.6.5 - Grounded observation + deterministic moderation
 
 - Fixed held-item intent matching for natural possessive phrases such as `que tengo en mi mano?`; `mano` is now matched as a token instead of relying on a few exact phrases.

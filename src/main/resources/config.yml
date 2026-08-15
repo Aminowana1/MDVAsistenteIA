@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.6.5 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.6.9 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 5
+config-version: 8
 
 assistant-name: Isolda
 
@@ -18,8 +18,20 @@ ai:
   base-url: https://api.openai.com/v1/
   model: gpt-4o-mini
   max-output-tokens: 75
-  temperature: 0.85
+  temperature: 0.75
   max-requests-per-minute: 12
+
+  # OpenAI prompt caching (GPT path only). OpenAI still decides cache eligibility/hits.
+  # ServerAssistant keeps CORE/personality/static capabilities at the beginning of
+  # every request and places changing wiki/player/event/scene data afterwards.
+  prompt-cache:
+    enabled: true
+    # A stable base key improves routing. ServerAssistant appends a short hash of
+    # the loaded stable prefix/model, so /sva reload automatically rotates the key
+    # when personality or other stable instructions change.
+    key-prefix: mdvcraft-isolda
+    # Diagnostic only. Logs prompt/cached/output token counts returned by OpenAI.
+    log-usage: false
 
   # Used only when the primary request fails/is throttled.
   fallback:
@@ -54,7 +66,7 @@ global-conversation:
   - '@Iso'
 
   # Per-player, never global. Context-only participants do not receive this timer.
-  smart-follow-up-ms: 16000
+  smart-follow-up-ms: 15000
 
   # Optional spontaneous idle request from the friend branch, actually implemented
   # here. Disabled by default because each firing intentionally spends ONE AI call.
@@ -68,20 +80,20 @@ global-conversation:
   scene:
     # Read relevant context immediately before the trigger, then listen this many
     # milliseconds after it. All collected chat/events are handled as ONE scene.
-    capture-window-ms: 2000
-    pre-lookback-ms: 8000
+    capture-window-ms: 4000
+    pre-lookback-ms: 12000
 
     # Applied AFTER Java filters unrelated players/messages.
-    max-chat-messages: 10
-    max-pre-chat-messages: 5
-    max-events: 2
+    max-chat-messages: 6
+    max-pre-chat-messages: 3
+    max-events: 1
     max-pre-events: 1
 
     # Lets "Iso viste eso?" see a very recent event even without typing names.
-    recent-pre-event-window-ms: 4000
+    recent-pre-event-window-ms: 8000
 
     # No slots and no busy reply. Oldest unsent scene is silently dropped on abuse.
-    max-pending-scenes: 3
+    max-pending-scenes: 2
 
   # Local RAM logs. They cost zero AI tokens until Java selects relevant context.
   logs:
@@ -90,8 +102,8 @@ global-conversation:
 
   # Small compact conversational memory sent to the model.
   history:
-    max-scenes: 2
-    max-messages-per-scene: 4
+    max-scenes: 1
+    max-messages-per-scene: 3
 
   # Events are trusted context only; they NEVER trigger a request by themselves.
   events:
@@ -105,8 +117,8 @@ global-conversation:
     # Small event memory selected only when the current question refers to a
     # recent join/quit/death/etc. This fixes questions such as "quien llego?"
     # even when the event happened outside scene.pre-lookback-ms.
-    recent-context-limit: 2
-    recent-context-max-age-ms: 300000
+    recent-context-limit: 1
+    recent-context-max-age-ms: 180000
 
 # ============================================================
 # RATE LIMITS
@@ -131,6 +143,8 @@ provider-response:
   accept-plain-text-fallback: true
   log-fallbacks: false
   debug-malformed-responses: false
+  # Temporary diagnostic: logs when a direct mention returns m=[] without spending another request.
+  debug-empty-direct-replies: false
 
 # ============================================================
 # ASSISTANT TOOLS
@@ -162,7 +176,7 @@ tools:
 
   local-context:
     max-tools: 2
-    max-chars-per-tool: 1800
+    max-chars-per-tool: 1000
     # Useful while testing held-item/player-data detection; keep false in production.
     debug-log: false
 
@@ -183,11 +197,11 @@ tools:
   inventory:
     activation: smart
     max-players: 2
-    max-items: 18
+    max-items: 8
     # Main-hand details are useful for questions such as "que tengo en la mano?"
     # and include a few lore lines without dumping the full item/NBT.
     include-held-item-details: true
-    max-held-lore-lines: 4
+    max-held-lore-lines: 5
 
   # Fixed allow-listed moderation action. "ask" is enforced by Java, not merely
   # suggested to the model. Admin targets are protected by default.

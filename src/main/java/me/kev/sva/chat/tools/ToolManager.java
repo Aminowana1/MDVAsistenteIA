@@ -145,15 +145,25 @@ public final class ToolManager {
         + ". Never say you cannot see a fact that is present in that context.";
   }
 
-  /** Static/cache-friendly action tool catalog for the model. */
-  public String getAvailableActionToolsPrompt() {
+  /**
+   * Current-scene action catalog. Old history never decides which ACTION tools are
+   * exposed to the model. This both saves prompt tokens and prevents a previous
+   * lightning/sound request from being repeated in the next scene.
+   */
+  public String getAvailableActionToolsPrompt(String currentActionText) {
     if (!plugin.getConfig().getBoolean("tools.enabled", true)) {
       return "[TOOLS] disabled; t must be []";
+    }
+
+    String text = normalize(currentActionText);
+    if (text.isBlank()) {
+      return "[TOOLS] No ACTION is authorized by the CURRENT scene; t must be [].";
     }
 
     List<String> rows = new ArrayList<>();
     for (Tool tool : tools.values()) {
       if (tool.kind() != ToolKind.ACTION || !tool.enabled()) continue;
+      if (!hasCurrentActionIntent(tool.name, text)) continue;
       String mode = tool.activation().configValue();
       String suffix = tool.activation() == ToolActivation.ASK
           ? " Calling it creates a pending admin approval; it does NOT execute immediately."
@@ -161,12 +171,50 @@ public final class ToolManager {
       rows.add(tool.name + " mode=" + mode + " | " + oneLine(tool.usage()) + suffix);
     }
 
-    if (rows.isEmpty()) return "[TOOLS] no action tools available; t must be []";
+    if (rows.isEmpty()) {
+      return "[TOOLS] No ACTION is authorized by the CURRENT scene; t must be [].";
+    }
     int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
-    return "[TOOLS] t may contain at most " + maxCalls
-        + " exact action calls. Never invent tool names. If you SAY an action happened, the matching call MUST be in t. "
-        + "Never substitute roleplay such as *invoca...* or *hace sonar...* for a real tool call.\n"
+    return "[TOOLS] CURRENT scene authorizes at most " + maxCalls
+        + " exact action calls from the list below. History/previous scenes authorize nothing. "
+        + "If t is non-empty, m must describe the action as actually happening now; do not use refusal/conditional wording.\n"
         + String.join("\n", rows);
+  }
+
+  /** Compatibility/debug view: lists every enabled action tool. */
+  public String getAvailableActionToolsPrompt() {
+    return getAvailableActionToolsPrompt("rayo sonido recuerdame mute");
+  }
+
+  private boolean hasCurrentActionIntent(String toolName, String normalizedText) {
+    if (toolName == null || normalizedText == null || normalizedText.isBlank()) return false;
+    return switch (toolName) {
+      case "lightning" -> containsAny(normalizedText,
+          "rayo", "rayos", "relampago", "relampagos", "lightning", "electrifica", "electrocut");
+      case "sound" -> containsAny(normalizedText,
+          "sonido", "suena", "haz sonar", "pon sonido", "asusta", "asustame", "asustanos",
+          "susto", "celebra", "celebracion", "festeja", "festejo");
+      case "schedule" -> containsAny(normalizedText,
+          "recuerdame", "recordame", "avisame", "avisa", "en unos segundos",
+          "en 10 segundos", "en 20 segundos", "en 30 segundos", "despues");
+      case "mute" -> {
+        boolean requested = containsAny(normalizedText,
+            "mute", "mutea", "mutear", "silencia", "silenciar");
+        if (!requested) yield false;
+        if (!plugin.getConfig().getBoolean("tools.mute.policy.require-eligibility-for-ai", true)) yield true;
+        // Do not advertise mute to the model when deterministic moderation says no
+        // currently named online target is eligible. Threshold auto-action remains Java-side.
+        boolean eligible = false;
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+          if (containsAny(normalizedText, normalize(player.getName())) && isMuteEligible(player)) {
+            eligible = true;
+            break;
+          }
+        }
+        yield eligible;
+      }
+      default -> false;
+    };
   }
 
   /**
@@ -405,15 +453,17 @@ public final class ToolManager {
   }
 
   /**
-   * Returns false when at least one call was rejected as stale/unrequested or by
-   * moderation policy. ConversationManager can then suppress a misleading reply.
+   * Returns false only when the response contained ACTION calls but none of the
+   * processed calls were accepted. A valid current action is not silenced just
+   * because the model also leaked one stale call from history.
    */
   public boolean processModelCalls(List<String> calls, String currentActionText) {
     if (calls == null || calls.isEmpty() || !plugin.getConfig().getBoolean("tools.enabled", true)) return true;
     int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
     if (maxCalls == 0) return true;
 
-    boolean allAccepted = true;
+    boolean anyAccepted = false;
+    boolean anyRejected = false;
     int processed = 0;
     Set<String> dedupe = new LinkedHashSet<>();
     for (String raw : calls) {
@@ -431,7 +481,7 @@ public final class ToolManager {
       processed++;
 
       if (!isModelCallAuthorized(tool, parsed.arguments(), currentActionText)) {
-        allAccepted = false;
+        anyRejected = true;
         plugin.getLogger().warning("Ignored stale/policy-blocked AI tool call: " + call);
         continue;
       }
@@ -441,8 +491,9 @@ public final class ToolManager {
       } else {
         executeAndLog(tool, parsed.arguments(), "AI");
       }
+      anyAccepted = true;
     }
-    return allAccepted;
+    return anyAccepted || !anyRejected;
   }
 
   private boolean isModelCallAuthorized(Tool tool, String arguments, String currentActionText) {
@@ -450,19 +501,19 @@ public final class ToolManager {
       return !"mute".equals(tool.name) || isMuteEligible(arguments);
     }
 
+    String text = normalize(currentActionText);
+    if (text.isBlank()) return false;
+
     if ("mute".equals(tool.name)) {
+      // Moderation eligibility is never enough by itself: the CURRENT scene must
+      // also explicitly request a mute. This prevents an old eligible mute call
+      // from leaking out of history into a later scene.
+      if (!hasCurrentActionIntent("mute", text)) return false;
       if (!plugin.getConfig().getBoolean("tools.mute.policy.require-eligibility-for-ai", true)) return true;
       return isMuteEligible(arguments);
     }
 
-    String text = normalize(currentActionText);
-    if (text.isBlank()) return false;
-    return switch (tool.name) {
-      case "lightning" -> containsAny(text, "rayo", "rayos", "relampago", "relampagos", "lightning", "electrifica", "electrocut");
-      case "sound" -> containsAny(text, "sonido", "suena", "haz sonar", "pon sonido", "asusta", "asustame", "asustanos", "susto", "celebra", "celebracion", "festeja", "festejo");
-      case "schedule" -> containsAny(text, "recuerdame", "recordame", "avisame", "avisa", "en unos segundos", "en 10 segundos", "en 20 segundos", "en 30 segundos", "despues");
-      default -> true;
-    };
+    return hasCurrentActionIntent(tool.name, text);
   }
 
   private boolean isMuteEligible(String requestedName) {

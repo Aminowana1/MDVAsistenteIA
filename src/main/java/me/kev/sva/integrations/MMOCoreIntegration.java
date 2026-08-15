@@ -75,29 +75,45 @@ public final class MMOCoreIntegration implements PlayerContextIntegration {
     return fields.isEmpty() ? "" : "MMOCORE " + String.join(" ", fields);
   }
 
+  /** Lightweight MMOCore identity used automatically in every relevant scene. */
+  BasicIdentity readBasicIdentity(Player player) {
+    if (player == null || !enabled() || !available()) return new BasicIdentity("", "");
+    return readBasicIdentity(player, getPlayerData(player));
+  }
+
+  private BasicIdentity readBasicIdentity(Player player, Object data) {
+    String race = "";
+    if (data != null) {
+      Object profess = invokeNoArgs(data, "getProfess");
+      race = clean(asString(invokeNoArgs(profess, "getName")));
+    }
+    if (race.isBlank()) race = resolvePlaceholder(player, "%mmocore_class%");
+
+    String level = data == null ? "" : asString(invokeNoArgs(data, "getLevel"));
+    if (level.isBlank()) level = resolvePlaceholder(player, "%mmocore_level%");
+    return new BasicIdentity(clean(race), clean(level));
+  }
+
   private void appendIdentity(List<String> fields, Player player, Object data) {
     boolean classAsRace = plugin.getIntegrationsConfig().getBoolean("mmocore.class-as-race", true);
+    BasicIdentity identity = readBasicIdentity(player, data);
 
     if (plugin.getIntegrationsConfig().getBoolean("mmocore.basic.race", true)) {
-      String className = "";
-      String classId = "";
-      if (data != null) {
-        Object profess = invokeNoArgs(data, "getProfess");
-        className = clean(asString(invokeNoArgs(profess, "getName")));
-        classId = clean(asString(invokeNoArgs(profess, "getId")));
-      }
-      if (className.isBlank()) className = resolvePlaceholder(player, "%mmocore_class%");
-      if (!className.isBlank()) fields.add((classAsRace ? "race=" : "class=") + compact(className));
+      if (!identity.race().isBlank()) fields.add((classAsRace ? "race=" : "class=") + compact(identity.race()));
       if (plugin.getIntegrationsConfig().getBoolean("mmocore.basic.race-id", false)) {
+        String classId = "";
+        if (data != null) {
+          Object profess = invokeNoArgs(data, "getProfess");
+          classId = clean(asString(invokeNoArgs(profess, "getId")));
+        }
         if (classId.isBlank()) classId = resolvePlaceholder(player, "%mmocore_class_id%");
         if (!classId.isBlank()) fields.add((classAsRace ? "race_id=" : "class_id=") + compact(classId));
       }
     }
 
-    if (plugin.getIntegrationsConfig().getBoolean("mmocore.basic.level", true)) {
-      String level = data == null ? "" : asString(invokeNoArgs(data, "getLevel"));
-      if (level.isBlank()) level = resolvePlaceholder(player, "%mmocore_level%");
-      if (!level.isBlank()) fields.add("level=" + compact(level));
+    if (plugin.getIntegrationsConfig().getBoolean("mmocore.basic.level", true)
+        && !identity.level().isBlank()) {
+      fields.add("level=" + compact(identity.level()));
     }
 
     if (plugin.getIntegrationsConfig().getBoolean("mmocore.basic.experience", false)) {
@@ -106,6 +122,8 @@ public final class MMOCoreIntegration implements PlayerContextIntegration {
       if (!exp.isBlank()) fields.add("experience=" + compact(exp));
     }
   }
+
+  record BasicIdentity(String race, String level) { }
 
   private void appendProfessions(List<String> fields, Player player, Object data) {
     if (!plugin.getIntegrationsConfig().getBoolean("mmocore.professions.enabled", true)) return;

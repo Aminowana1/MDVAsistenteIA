@@ -57,7 +57,8 @@ public final class ConfigurationManager {
     YamlConfiguration integrations = loadUserFile(integrationsFile);
 
     boolean migrated = migrateSingleFileLayout(main, personality, wiki, mainFile);
-    boolean mainChanged = migrated | mergeBundledDefaults(main, "config.yml");
+    boolean actionSafetyMigrated = migrate166ActionSafetyDefault(main);
+    boolean mainChanged = migrated | actionSafetyMigrated | mergeBundledDefaults(main, "config.yml");
     boolean personalityChanged = migrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
@@ -85,6 +86,9 @@ public final class ConfigurationManager {
 
     if (migrated) {
       plugin.getLogger().info("Migrated character prompt to personality.yml and local wiki to wiki.yml.");
+    }
+    if (actionSafetyMigrated) {
+      plugin.getLogger().info("Migrated 1.6.6 action-safety default: suppress-reply-on-rejected-call=true.");
     }
   }
 
@@ -128,6 +132,19 @@ public final class ConfigurationManager {
     if (!file.exists()) {
       plugin.saveResource(resourceName, false);
     }
+  }
+
+  /**
+   * 1.6.6 shipped one unsafe default as false even though 1.6.5 used true.
+   * Restore it only for schema 6, where false was the bundled default, without
+   * touching older/newer custom configurations.
+   */
+  private boolean migrate166ActionSafetyDefault(YamlConfiguration main) {
+    if (main.getInt("config-version", 0) != 6) return false;
+    String path = "tools.action-safety.suppress-reply-on-rejected-call";
+    if (!main.isSet(path) || main.getBoolean(path, false)) return false;
+    main.set(path, true);
+    return true;
   }
 
   /**

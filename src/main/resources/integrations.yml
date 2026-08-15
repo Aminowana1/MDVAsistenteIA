@@ -4,7 +4,7 @@
 # Missing keys are auto-added on updates while your values are preserved.
 # ============================================================
 
-config-version: 1
+config-version: 2
 
 # Master switch for every external integration.
 enabled: true
@@ -14,6 +14,23 @@ enabled: true
 profile-context:
   enabled: true
   max-players: 2
+
+
+# ============================================================
+# AMBIENT PLAYER IDENTITY
+# Injected automatically for players involved in a model scene. This is trusted
+# local context, costs no extra AI request and does not consume a CONTEXT-tool slot.
+# It lets the personality react naturally to a player's race/title/level even when
+# nobody explicitly asks for a profile.
+# ============================================================
+identity-context:
+  enabled: true
+  include-race: true
+  include-level: true
+  include-title: true
+  # Safety bound only for pathological scenes that mention many online players.
+  # Normal MDVCRAFT scenes are far below this value.
+  max-players: 12
 
 # ============================================================
 # MMOCORE

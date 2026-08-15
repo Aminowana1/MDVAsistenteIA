@@ -18,11 +18,15 @@ import me.kev.sva.ServerAssistantPlugin;
 public final class IntegrationManager {
   private final ServerAssistantPlugin plugin;
   private final List<PlayerContextIntegration> integrations = new ArrayList<>();
+  private final MMOCoreIntegration mmocore;
+  private final MDVSocialIntegration mdvsocial;
 
   public IntegrationManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
-    integrations.add(new MMOCoreIntegration(plugin));
-    integrations.add(new MDVSocialIntegration(plugin));
+    this.mmocore = new MMOCoreIntegration(plugin);
+    this.mdvsocial = new MDVSocialIntegration(plugin);
+    integrations.add(mmocore);
+    integrations.add(mdvsocial);
   }
 
   public String buildProfileContext(List<String> involvedNames, String normalizedSceneText, boolean allFields) {
@@ -46,6 +50,54 @@ public final class IntegrationManager {
       if (!row.isBlank()) rows.add(row);
     }
     return String.join("\n", rows);
+  }
+
+
+  /**
+   * Compact trusted identity injected automatically for players involved in a scene.
+   * This is deliberately independent from ProfileTool intent: it creates no extra AI
+   * request and does not consume a local-context tool slot.
+   */
+  public String buildAmbientIdentity(Player player) {
+    if (player == null) return "";
+    if (!plugin.getIntegrationsConfig().getBoolean("enabled", true)) return "";
+    if (!plugin.getIntegrationsConfig().getBoolean("identity-context.enabled", true)) return "";
+
+    boolean includeRace = plugin.getIntegrationsConfig().getBoolean("identity-context.include-race", true);
+    boolean includeLevel = plugin.getIntegrationsConfig().getBoolean("identity-context.include-level", true);
+    boolean includeTitle = plugin.getIntegrationsConfig().getBoolean("identity-context.include-title", true);
+
+    MMOCoreIntegration.BasicIdentity core = mmocore.readBasicIdentity(player);
+    boolean mmocoreReadable = mmocore.enabled() && mmocore.available();
+    boolean socialReadable = mdvsocial.enabled() && mdvsocial.available();
+    String title = socialReadable ? mdvsocial.readEquippedTitle(player) : "";
+
+    List<String> fields = new ArrayList<>();
+    if (includeRace) {
+      fields.add("race=" + compactIdentityValue(
+          core.race().isBlank() ? (mmocoreReadable ? "unknown" : "unavailable") : core.race()));
+    }
+    if (includeLevel) {
+      fields.add("level=" + compactIdentityValue(
+          core.level().isBlank() ? (mmocoreReadable ? "unknown" : "unavailable") : core.level()));
+    }
+    if (includeTitle) {
+      fields.add("title=" + compactIdentityValue(
+          title.isBlank() ? (socialReadable ? "none" : "unavailable") : title));
+    }
+    return String.join(" ", fields);
+  }
+
+  private static String compactIdentityValue(String value) {
+    String cleaned = value == null ? "" : value
+        .replaceAll("(?i)§[0-9A-FK-ORX]", "")
+        .replaceAll("(?i)&[0-9A-FK-ORX]", "")
+        .replaceAll("[\r\n\t]+", " ")
+        .replaceAll("\\s+", " ")
+        .trim();
+    if (cleaned.isBlank()) return "unknown";
+    if (cleaned.matches("[\\p{L}\\p{N}_@%.-]+")) return cleaned;
+    return '"' + cleaned.replace("\"", "'") + '"';
   }
 
   public String buildFullProfile(Player player) {
@@ -75,6 +127,8 @@ public final class IntegrationManager {
     rows.add("integrations=" + (plugin.getIntegrationsConfig().getBoolean("enabled", true) ? "enabled" : "disabled"));
     rows.add("profile-context="
         + (plugin.getIntegrationsConfig().getBoolean("profile-context.enabled", true) ? "enabled" : "disabled"));
+    rows.add("identity-context="
+        + (plugin.getIntegrationsConfig().getBoolean("identity-context.enabled", true) ? "enabled" : "disabled"));
     for (PlayerContextIntegration integration : integrations) rows.add(integration.status());
     return rows;
   }
