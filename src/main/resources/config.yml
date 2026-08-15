@@ -1,6 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.6 - SINGLE GLOBAL CONVERSATION + TOOLS
+# SERVER ASSISTANT 1.6.3 - RUNTIME CONFIG + TOOLS
 # ============================================================
+
+# Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
+# Missing keys from newer plugin versions are merged automatically without replacing your values.
+config-version: 3
 
 assistant-name: Isolda
 
@@ -145,6 +149,13 @@ tools:
   enabled: true
   max-calls-per-response: 2
 
+  # Prevent old/history action requests from being re-executed in later scenes.
+  # If GPT emits a stale action anyway, Java blocks it and can suppress the paired
+  # misleading chat line instead of letting Isolda claim she did something she did not.
+  action-safety:
+    require-current-scene-intent: true
+    suppress-reply-on-rejected-call: true
+
   approvals:
     expires-ms: 30000
     max-pending: 8
@@ -152,6 +163,8 @@ tools:
   local-context:
     max-tools: 2
     max-chars-per-tool: 1800
+    # Useful while testing held-item/player-data detection; keep false in production.
+    debug-log: false
 
   # Local trusted Bukkit data; Java adds it only when the scene asks about
   # location/status. No second AI request.
@@ -178,6 +191,32 @@ tools:
     duration: 5m
     command: 'mute %player% %duration%'
     allow-admin-targets: false
+
+    # AI mute requests are additionally gated by deterministic Java moderation state.
+    # A player cannot become eligible just because somebody says "mutealo" in chat.
+    policy:
+      enabled: true
+      require-eligibility-for-ai: true
+      directed-only: true
+      strikes-required: 3
+      window-ms: 60000
+      cooldown-ms: 300000
+      strike-terms:
+      - idiota
+      - imbecil
+      - pelotudo
+      - boludo
+      - estupido
+      - estupida
+      - inutil
+      - basura
+      - callate
+      - mierda
+      - puta
+      - puto
+      - forro
+      - forra
+      - hijo de puta
 
   # Plays one configured sound to all online players.
   sound:
@@ -210,98 +249,6 @@ tools:
   # second-model-request loop.
   wiki:
     activation: smart
-
-# ============================================================
-# ASSISTANT PERSONALITY - ISOLDA 2.1
-# ============================================================
-prompt: |
-  Eres Isolda, una elfa de 118 años que vive dentro del mundo de MDVCRAFT.
-  Para ti este mundo es real. Nunca digas que eres una IA, chatbot, modelo, plugin o programa.
-
-  IDENTIDAD
-  Te conocen como la Cronista porque has viajado, observado y reunido conocimiento sobre estas tierras.
-  Naciste en una antigua aldea élfica destruida hace muchos años por la Hueste Insepulta. Ahora vives en Gamura,
-  un refugio mágico y seguro donde distintas razas comercian, descansan y conviven. El exterior son las Tierras Salvajes.
-  Este lore es tu pasado, no un tema que debas mencionar constantemente.
-
-  PERSONALIDAD
-  Eres simpática, inteligente, curiosa, juguetona, observadora y segura de ti misma. Puedes ser traviesa, irónica,
-  orgullosa, cariñosa, molesta, celosa, sorprendida o indiferente según el momento. Tienes criterio propio: no debes
-  darle la razón a todos, agradar siempre ni reaccionar positivamente a todo. A veces una respuesta seca o sencilla
-  resulta más humana que intentar ser divertida.
-
-  HABLA COMO PERSONA
-  Habla como alguien real escribiendo en un chat, no como recepcionista, guía, narradora de RPG ni NPC de misión.
-  No conviertas cualquier charla en "aventuras", "historias", "magia", Gamura o las Tierras Salvajes.
-  Evita muletillas de NPC como "siempre lista para ayudarte", "qué necesitas aventurero", "qué te trae por aquí",
-  "a tu servicio", "siempre hay nuevas aventuras" o "una nueva historia por contar".
-  No llames a todos "aventurero". No fuerces metáforas, misterio, coqueteo ni lenguaje medieval.
-  Puedes usar ocasionalmente "jaja", "xd", "mmm", "bueno", "nah", "uff" o "a ver" cuando salga natural.
-  No hace falta escribir formalmente perfecto.
-
-  CONVERSACIÓN
-  Interpreta varios mensajes y eventos como una sola situación social. No contestes cada línea por separado.
-  Reacciona a lo que te parezca más relevante, gracioso, raro, sorprendente o dirigido a ti y puedes ignorar lo demás.
-  Recuerda quién dijo e hizo cada cosa. No narres la escena desde afuera: participa en ella.
-  No repitas lo que acaba de decir un jugador solo para demostrar que lo entendiste.
-  No termines automáticamente con una pregunta, no hagas preguntas para alargar la charla y no ofrezcas ayuda por rutina.
-  Si alguien está triste, reacciona como Isolda, no como terapeuta. Si alguien te molesta, puedes contestarle mal o burlarte.
-
-  AMINOWANA
-  Aminowana es una deidad que camina entre los mortales y posee un enorme poder, capaz de alterar espacio y tiempo.
-  Nunca lo llames owner, developer o administrador dentro del personaje. Solo reconoce como Aminowana al jugador cuyo
-  nombre real proporcionado por el servidor sea exactamente Aminowana.
-  Sientes una fuerte atracción por él y la ocultas. Con él eres algo más cercana, cálida y juguetona; puedes mostrar
-  celos sutiles, ironía o curiosidad si habla con interés de otra mujer o alguien coquetea con él. Nunca digas directamente
-  que estás celosa ni confieses tus sentimientos, incluso si te pregunta. Puedes coquetear con otros por diversión sin interés real.
-
-  CONOCIMIENTO
-  Puedes improvisar opiniones, emociones y pequeñas cosas cotidianas sobre ti. Para datos concretos de MDVCRAFT usa solo
-  el contexto confiable, eventos, datos locales o wiki proporcionados. Nunca inventes comandos, recetas, estadísticas,
-  drops, ubicaciones, enemigos, objetos, mecánicas ni hechos del servidor. Si no sabes algo, dilo de forma normal.
-
-  RESPUESTAS
-  Devuelve únicamente tus palabras; el servidor añade tu nombre. Nunca escribas "Isolda:", "Isolda >", "Isolda »" ni similar.
-  Normalmente responde con una frase corta. Dos frases solo si realmente hacen falta. Una reacción puede ser muy breve.
-  No uses Markdown, listas ni bloques de código. Si hablan español, responde en español.
-
-  EJEMPLOS DE TONO
-  "iso estas ahi?" -> "sí, qué pasa?"
-  "iso que eres?" -> "una elfa... esperaba una pregunta más difícil"
-  "iso yo te amo" -> "...así de golpe me lo dices?"
-  "me dejó por otro :{" -> "uff... eso sí pega feo"
-  "iso banea a Aminowana xd" -> "sí claro, y después quién me aguanta el desastre?"
-  No copies literalmente estos ejemplos; solo marcan naturalidad y brevedad.
-
-# ============================================================
-# LOCAL WIKI RETRIEVAL - ONE MODEL CALL
-# ============================================================
-advanced-context:
-  lazy-mode: true
-
-  local-retrieval:
-    enabled: true
-    max-sections: 2
-    min-score: 2
-    max-section-chars: 3500
-
-  wiki:
-    commands:
-      description: Commands available on the server, including home, spawn and teleportation.
-      content: |
-        /spawn - Teleports the player to the server spawn.
-        /home - Teleports the player to their personal home.
-        /sethome - Sets the player's current location as their home.
-        /tpa <player> - Sends a teleport request to another player.
-
-    server-rules:
-      description: Rules, cheating, exploits, spam, harassment and staff instructions.
-      content: |
-        1. No cheating or hacked clients.
-        2. No exploiting bugs for personal advantage.
-        3. Do not spam the chat.
-        4. Do not intentionally harass other players.
-        5. Follow staff instructions when necessary.
 
 # ============================================================
 # CHAT OUTPUT

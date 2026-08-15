@@ -82,7 +82,20 @@ public final class InventoryTool extends Tool {
       items.merge(getItemName(item), item.getAmount(), Integer::sum);
     }
 
-    StringBuilder out = new StringBuilder("INVENTORY ").append(player.getName()).append(" items=");
+    StringBuilder out = new StringBuilder("INVENTORY ").append(player.getName())
+        .append(" mainhand=").append(formatItem(inventory.getItemInMainHand()))
+        .append(" | armor=")
+        .append(formatItem(inventory.getHelmet())).append(',')
+        .append(formatItem(inventory.getChestplate())).append(',')
+        .append(formatItem(inventory.getLeggings())).append(',')
+        .append(formatItem(inventory.getBoots()))
+        .append(" | offhand=").append(formatItem(inventory.getItemInOffHand()));
+
+    if (plugin.getConfig().getBoolean("tools.inventory.include-held-item-details", true)) {
+      appendHeldItemDetails(out, inventory.getItemInMainHand());
+    }
+
+    out.append(" | items=");
     if (items.isEmpty()) {
       out.append("empty");
     } else {
@@ -95,17 +108,6 @@ public final class InventoryTool extends Tool {
         if (used > 1) out.append("; ");
         out.append(entry.getKey()).append('x').append(entry.getValue());
       }
-    }
-    out.append(" | mainhand=").append(formatItem(inventory.getItemInMainHand()))
-        .append(" | armor=")
-        .append(formatItem(inventory.getHelmet())).append(',')
-        .append(formatItem(inventory.getChestplate())).append(',')
-        .append(formatItem(inventory.getLeggings())).append(',')
-        .append(formatItem(inventory.getBoots()))
-        .append(" | offhand=").append(formatItem(inventory.getItemInOffHand()));
-
-    if (plugin.getConfig().getBoolean("tools.inventory.include-held-item-details", true)) {
-      appendHeldItemDetails(out, inventory.getItemInMainHand());
     }
     return out.toString();
   }

@@ -174,6 +174,13 @@ public final class ConversationManager {
     }
 
     boolean directMention = containsAssistantMention(content);
+    boolean existingSmartFollowUp = "smart".equals(mode)
+        && hasActiveSmartFollowUp(player.getUniqueId(), now);
+    boolean directedAtAssistant = directMention || existingSmartFollowUp
+        || (activeCapture != null && activeAddressers.contains(player.getUniqueId()));
+    if (plugin.getToolManager() != null) {
+      plugin.getToolManager().observePlayerMessage(player, content, directedAtAssistant);
+    }
 
     // Once a scene is open, all lines are merely local candidates and never create
     // an extra request. A player who directly calls Isolda during the same window is
@@ -185,8 +192,7 @@ public final class ConversationManager {
       return;
     }
 
-    boolean smartFollowUp = "smart".equals(mode)
-        && hasActiveSmartFollowUp(player.getUniqueId(), now);
+    boolean smartFollowUp = existingSmartFollowUp;
 
     boolean shouldTrigger = switch (mode) {
       case "always" -> true;
@@ -326,6 +332,7 @@ public final class ConversationManager {
             "",
             "",
             ""),
+        "",
         AssistantManager.PRIMARY,
         0);
 
@@ -611,6 +618,11 @@ public final class ConversationManager {
         : plugin.getToolManager().buildLocalContext(currentMessages, involvedNames);
     String recentEvents = retrieveRecentEventContext(currentMessages);
     String involved = involvedNames.isEmpty() ? "none" : String.join(",", involvedNames);
+    String currentActionText = selectedChats.stream()
+        .filter(chat -> chat.timestampMs() >= capture.triggerAt())
+        .filter(chat -> chat.playerId().equals(capture.triggerPlayerId()) || containsAssistantMention(chat.content()))
+        .map(PublicChatRecord::content)
+        .collect(java.util.stream.Collectors.joining(" "));
     String meta = "window_ms=" + Math.max(0L, capture.endsAt() - capture.triggerAt())
         + ", chat_lines=" + selectedChats.size()
         + ", events=" + selectedEvents.size()
@@ -624,6 +636,7 @@ public final class ConversationManager {
         Set.copyOf(involvedNames),
         Set.copyOf(eligibleAddressers),
         AssistantRequestContext.scene(capture.sceneId(), involved, meta, wiki, localTools, recentEvents),
+        currentActionText,
         AssistantManager.PRIMARY,
         0);
   }
@@ -824,10 +837,10 @@ public final class ConversationManager {
     if (plugin.getToolManager() != null && !plugin.getToolManager().isToolEnabled("wiki")) {
       return "";
     }
-    if (!plugin.getConfig().getBoolean("advanced-context.lazy-mode", true)) {
+    if (!plugin.getWikiConfig().getBoolean("lazy-mode", true)) {
       return fullWikiContext();
     }
-    if (!plugin.getConfig().getBoolean("advanced-context.local-retrieval.enabled", true)) {
+    if (!plugin.getWikiConfig().getBoolean("local-retrieval.enabled", true)) {
       return "";
     }
 
@@ -874,12 +887,12 @@ public final class ConversationManager {
       }
     }
 
-    int minScore = Math.max(plugin.getConfig().getInt(
-        "advanced-context.local-retrieval.min-score", 2), 1);
-    int maxSections = Math.max(plugin.getConfig().getInt(
-        "advanced-context.local-retrieval.max-sections", 2), 0);
-    int maxChars = Math.max(plugin.getConfig().getInt(
-        "advanced-context.local-retrieval.max-section-chars", 4500), 200);
+    int minScore = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.min-score", 2), 1);
+    int maxSections = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.max-sections", 2), 0);
+    int maxChars = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.max-section-chars", 4500), 200);
     if (maxSections == 0) {
       return "";
     }
@@ -925,10 +938,7 @@ public final class ConversationManager {
   }
 
   private ConfigurationSection wikiRoot() {
-    ConfigurationSection modern = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
-    if (modern != null) return modern;
-    // Compatibility with the friend's 1.2 config layout.
-    return plugin.getConfig().getConfigurationSection("tools.wiki.pages");
+    return plugin.getWikiConfig().getConfigurationSection("wiki");
   }
 
   private static String normalizeForSearch(String input) {
@@ -1065,11 +1075,20 @@ public final class ConversationManager {
     }
 
     String reply = response.historyText().trim();
-    if (!reply.isBlank()) {
-      response.broadcastMessages();
-    }
+    boolean toolCallsAccepted = true;
     if (plugin.getToolManager() != null && !response.getToolCalls().isEmpty()) {
-      plugin.getToolManager().processModelCalls(response.getToolCalls());
+      toolCallsAccepted = plugin.getToolManager().processModelCalls(
+          response.getToolCalls(), scene.currentActionText());
+    }
+    if (!reply.isBlank() && toolCallsAccepted) {
+      response.broadcastMessages();
+    } else if (!reply.isBlank() && !toolCallsAccepted
+        && plugin.getConfig().getBoolean("tools.action-safety.suppress-reply-on-rejected-call", true)) {
+      plugin.getLogger().warning("Suppressed AI chat for scene " + scene.sceneId()
+          + " because it was paired with a stale/policy-blocked action call.");
+      reply = "";
+    } else if (!reply.isBlank()) {
+      response.broadcastMessages();
     }
 
     rememberScene(scene, reply);
@@ -1304,19 +1323,20 @@ public final class ConversationManager {
       Set<String> involvedPlayerNames,
       Set<UUID> followUpEligiblePlayerIds,
       AssistantRequestContext context,
+      String currentActionText,
       int providerIndex,
       int retryCount) {
 
     SceneRequest withProvider(int newProvider) {
       return new SceneRequest(
           sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
-          followUpEligiblePlayerIds, context, newProvider, 0);
+          followUpEligiblePlayerIds, context, currentActionText, newProvider, 0);
     }
 
     SceneRequest withRetry(int newRetryCount) {
       return new SceneRequest(
           sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
-          followUpEligiblePlayerIds, context, providerIndex, newRetryCount);
+          followUpEligiblePlayerIds, context, currentActionText, providerIndex, newRetryCount);
     }
   }
 }

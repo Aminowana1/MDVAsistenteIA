@@ -23,6 +23,8 @@ public abstract class AssistantContextualizer {
         A playful refusal is allowed occasionally, but repeated explicit requests should not be answered by pretending to act.
       - You may naturally refuse a requested action; then leave t empty and do not claim it happened.
       - For player targets, use the exact ONLINE player name from [SERVER] when you can resolve it.
+      - ACTION calls must match a request in the CURRENT trigger/window. Do not repeat an action just because an older scene/history mentioned it.
+      - mute is special: never call it merely because somebody asks you to mute another player. Only call mute when [MODERATION] explicitly lists that target as eligible.
       Example shape: {"m":["bueno, ahi va xd"],"t":["lightning ExactOnlineName"]}.
 
       You receive one chronological public scene containing player lines and trusted server events.
@@ -37,6 +39,8 @@ public abstract class AssistantContextualizer {
       Never invent server-specific commands, mechanics, facts, locations or player state. Use [WIKI], [LOCAL CONTEXT], [RECENT EVENTS]
       and [SERVER] when supplied. Context tools (wiki/player-data/inventory) are already resolved locally before this one request;
       do not ask to call them. ACTION tools execute after this response and do not create a second model request.
+      Trusted local context is direct observation. If [INVENTORY] provides mainhand=..., you CAN see that item and must answer from it;
+      never ask the player what they are holding or say you cannot see it. If [PLAYER-DATA] supplies a fact, use that exact fact rather than guessing.
 
       Keep the public reply short and natural, one line, no list, no self-name prefix, and never echo transcript labels such as "Player >".
       """;

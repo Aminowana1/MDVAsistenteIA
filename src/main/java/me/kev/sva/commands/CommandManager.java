@@ -200,6 +200,11 @@ public final class CommandManager implements TabExecutor {
       MessageSender.Success(sender, pending.isEmpty() ? "No pending tool approvals." : String.join(" | ", pending));
       return;
     }
+    if (action.equals("moderation")) {
+      List<String> rows = plugin.getToolManager().moderationSummaries();
+      MessageSender.Success(sender, rows.isEmpty() ? "No current moderation strikes." : String.join(" | ", rows));
+      return;
+    }
     if (action.equals("set")) {
       if (args.length != 4) {
         MessageSender.Error(sender, "Usage: /sva tools set <tool> <smart|ask|never>");
@@ -223,7 +228,7 @@ public final class CommandManager implements TabExecutor {
       MessageSender.Success(sender, plugin.getToolManager().executeAdminTool(call, sender));
       return;
     }
-    MessageSender.Error(sender, "Usage: /sva tools [list|pending|set|run]");
+    MessageSender.Error(sender, "Usage: /sva tools [list|pending|moderation|set|run]");
   }
 
   private void handleApprove(CommandSender sender, String[] args) {
@@ -285,7 +290,7 @@ public final class CommandManager implements TabExecutor {
       return complete(args[3], ENABLE_OPTIONS);
     }
     if (args.length == 2 && (args[0].equalsIgnoreCase("tools") || args[0].equalsIgnoreCase("tool"))) {
-      return complete(args[1], List.of("list", "pending", "set", "run"));
+      return complete(args[1], List.of("list", "pending", "moderation", "set", "run"));
     }
     if (args.length == 3 && (args[0].equalsIgnoreCase("tools") || args[0].equalsIgnoreCase("tool"))
         && (args[1].equalsIgnoreCase("set") || args[1].equalsIgnoreCase("run"))) {

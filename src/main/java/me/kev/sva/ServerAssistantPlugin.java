@@ -10,6 +10,7 @@ import me.kev.sva.chat.ProviderThrottleRegistry;
 import me.kev.sva.chat.assistant.ProviderSettings;
 import me.kev.sva.chat.tools.ToolManager;
 import me.kev.sva.commands.CommandManager;
+import me.kev.sva.config.ConfigurationManager;
 import me.kev.sva.constants.Constants;
 import me.kev.sva.utils.MessageSender;
 
@@ -18,6 +19,7 @@ public final class ServerAssistantPlugin extends JavaPlugin {
     private ConversationManager conversationManager;
     private ChatListener chatListener;
     private ToolManager toolManager;
+    private ConfigurationManager configurationManager;
 
     /** Survives /sva reload so provider cooldowns cannot be bypassed by reloading. */
     private final ProviderThrottleRegistry providerThrottleRegistry = new ProviderThrottleRegistry();
@@ -25,6 +27,8 @@ public final class ServerAssistantPlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        configurationManager = new ConfigurationManager(this);
+        configurationManager.loadAndUpdate();
         migrateLegacyProviderConfig();
 
         CommandManager commandManager = new CommandManager(this);
@@ -109,9 +113,20 @@ public final class ServerAssistantPlugin extends JavaPlugin {
         return toolManager;
     }
 
+    public org.bukkit.configuration.file.FileConfiguration getPersonalityConfig() {
+        return configurationManager.personality();
+    }
+
+    public org.bukkit.configuration.file.FileConfiguration getWikiConfig() {
+        return configurationManager.wiki();
+    }
+
     /** Reloads config and runtime routing while keeping provider throttle state. */
     public void reloadPlugin() {
-        reloadConfig();
+        if (configurationManager == null) {
+            configurationManager = new ConfigurationManager(this);
+        }
+        configurationManager.loadAndUpdate();
         migrateLegacyProviderConfig();
         initializePlugin();
     }

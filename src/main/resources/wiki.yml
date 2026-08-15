@@ -1,0 +1,33 @@
+# ============================================================
+# SERVER ASSISTANT - LOCAL WIKI
+# Retrieval settings and server knowledge live here.
+# Missing default keys are added automatically; your wiki entries are never overwritten.
+# ============================================================
+
+config-version: 1
+
+lazy-mode: true
+
+local-retrieval:
+  enabled: true
+  max-sections: 2
+  min-score: 2
+  max-section-chars: 3500
+
+wiki:
+  commands:
+    description: Commands available on the server, including home, spawn and teleportation.
+    content: |
+      /spawn - Teleports the player to the server spawn.
+      /home - Teleports the player to their personal home.
+      /sethome - Sets the player's current location as their home.
+      /tpa <player> - Sends a teleport request to another player.
+
+  server-rules:
+    description: Rules, cheating, exploits, spam, harassment and staff instructions.
+    content: |
+      1. No cheating or hacked clients.
+      2. No exploiting bugs for personal advantage.
+      3. Do not spam the chat.
+      4. Do not intentionally harass other players.
+      5. Follow staff instructions when necessary.

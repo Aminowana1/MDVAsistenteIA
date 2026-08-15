@@ -1,9 +1,27 @@
-# ServerAssistant 1.6.1
+# ServerAssistant 1.6.3
 
-ServerAssistant 1.6.1 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+ServerAssistant 1.6.3 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
 
 
-## 1.6.1 action-tool reliability
+## 1.6.3 split YAML + automatic config updates
+
+ServerAssistant now keeps configuration in three focused files:
+
+```text
+plugins/ServerAssistant/
+├── config.yml       # runtime, providers, scenes, tools, moderation, chat output
+├── personality.yml  # Isolda character/tone prompt only
+└── wiki.yml         # local retrieval settings + wiki entries
+```
+
+On startup and `/sva reload`, each file is compared with the bundled defaults. **Only missing schema/settings keys are added**; existing user values and personality text are preserved. `wiki.*` entries are treated as user content, so deleted/custom wiki pages are not silently resurrected or overwritten. This lets newer plugin versions introduce config options without making the admin manually copy them.
+
+The first 1.6.2 -> 1.6.3 start automatically migrates `prompt:` to `personality.yml` and `advanced-context:` to `wiki.yml`, then removes those old sections from `config.yml`. Before that split migration, the plugin creates `plugins/ServerAssistant/backups/config-before-1.6.3.yml`.
+
+Automatic updating intentionally does not overwrite existing values when a future default changes. Any change that truly requires rewriting an old value should be handled by an explicit version migration in Java instead.
+
+
+## 1.6.x action-tool reliability
 
 OpenAI primary requests use JSON-object response mode by default so a normal answer and ACTION calls remain in the same parseable `m`/`t` envelope. If Isolda says she performs a real server action, the matching action must be present in `t`; stage-direction roleplay is not a substitute for the tool. Lightning also accepts unique player-name prefixes, and inventory context now exposes the main-hand item plus a bounded amount of lore when relevant.
 
@@ -33,7 +51,7 @@ There are no conversation slots, group routers or "assistant busy" replies. Ordi
 - Harmless Lightning action tool.
 - Mute action tool.
 - Schedule action tool (the alternate branch documented it as TODO; 1.6 implements it without a second AI call).
-- Wiki compatibility with both `advanced-context.wiki` and the alternate branch's `tools.wiki.pages` layout.
+- Wiki is stored in `wiki.yml`; 1.6.3 automatically migrates the old `advanced-context.wiki` / `tools.wiki.pages` layouts.
 
 ## Tool architecture
 
@@ -100,10 +118,10 @@ This is separate from the `schedule` tool: `schedule` delays an already-generate
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-To release 1.6.1, for example, change only:
+To release 1.6.3, for example, change only:
 
 ```xml
-<version>1.6.1</version>
+<version>1.6.3</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.6.1.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.6.3.jar`.

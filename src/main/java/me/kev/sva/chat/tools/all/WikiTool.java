@@ -34,8 +34,6 @@ public final class WikiTool extends Tool {
   }
 
   public ConfigurationSection wikiRoot() {
-    ConfigurationSection modern = plugin.getConfig().getConfigurationSection("advanced-context.wiki");
-    if (modern != null) return modern;
-    return plugin.getConfig().getConfigurationSection("tools.wiki.pages");
+    return plugin.getWikiConfig().getConfigurationSection("wiki");
   }
 }

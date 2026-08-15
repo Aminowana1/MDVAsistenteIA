@@ -1,13 +1,16 @@
 package me.kev.sva.chat.tools;
 
 import java.text.Normalizer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.bukkit.command.CommandSender;
@@ -38,6 +41,8 @@ public final class ToolManager {
   private final Map<String, Tool> tools = new LinkedHashMap<>();
   private final Map<Long, PendingApproval> pendingApprovals = new LinkedHashMap<>();
   private final AtomicLong nextApprovalId = new AtomicLong(1L);
+  private final Map<UUID, Deque<Long>> moderationStrikes = new LinkedHashMap<>();
+  private final Map<UUID, Long> muteCooldownUntil = new LinkedHashMap<>();
 
   public ToolManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
@@ -62,6 +67,8 @@ public final class ToolManager {
       }
     }
     pendingApprovals.clear();
+    moderationStrikes.clear();
+    muteCooldownUntil.clear();
   }
 
   public Set<String> getToolNames() {
@@ -165,17 +172,94 @@ public final class ToolManager {
       if (context.length() > maxChars) context = context.substring(0, maxChars).trim();
       if (!out.isEmpty()) out.append('\n');
       out.append('[').append(tool.name.toUpperCase(Locale.ROOT)).append("] ").append(context);
+      if (plugin.getConfig().getBoolean("tools.local-context.debug-log", false)) {
+        plugin.getLogger().info("Local context selected: " + tool.name + " -> " + context);
+      }
       used++;
+    }
+    String moderation = buildModerationContext();
+    if (!moderation.isBlank()) {
+      if (!out.isEmpty()) out.append('\n');
+      out.append("[MODERATION] ").append(moderation);
     }
     return out.toString();
   }
 
+  /**
+   * Tracks configurable abusive messages directed at Isolda. This is deterministic
+   * Java-side state; the model cannot invent eligibility.
+   */
+  public void observePlayerMessage(Player player, String message, boolean directedAtAssistant) {
+    if (player == null || message == null || message.isBlank()) return;
+    if (!plugin.getConfig().getBoolean("tools.mute.policy.enabled", true)) return;
+    if (plugin.getConfig().getBoolean("tools.mute.policy.directed-only", true) && !directedAtAssistant) return;
+
+    String normalized = normalize(message);
+    if (normalized.isBlank() || !containsConfiguredStrikeTerm(normalized)) return;
+
+    long now = System.currentTimeMillis();
+    long windowMs = Math.max(plugin.getConfig().getLong("tools.mute.policy.window-ms", 60_000L), 5_000L);
+    Deque<Long> strikes = moderationStrikes.computeIfAbsent(player.getUniqueId(), ignored -> new ArrayDeque<>());
+    pruneOlderThan(strikes, now - windowMs);
+    strikes.addLast(now);
+  }
+
+  private boolean containsConfiguredStrikeTerm(String normalizedMessage) {
+    List<String> terms = plugin.getConfig().getStringList("tools.mute.policy.strike-terms");
+    if (terms == null || terms.isEmpty()) return false;
+    String haystack = " " + normalizedMessage + " ";
+    for (String raw : terms) {
+      String term = normalize(raw);
+      if (term.isBlank()) continue;
+      if (haystack.contains(" " + term + " ")) return true;
+    }
+    return false;
+  }
+
+  private String buildModerationContext() {
+    if (!plugin.getConfig().getBoolean("tools.mute.policy.enabled", true)) return "";
+    pruneModerationState();
+    List<String> eligible = new ArrayList<>();
+    for (Player player : plugin.getServer().getOnlinePlayers()) {
+      int strikes = currentStrikeCount(player.getUniqueId());
+      int required = Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1);
+      if (isMuteEligible(player)) {
+        eligible.add(player.getName() + " eligible=true strikes=" + strikes + "/" + required);
+      }
+    }
+    return eligible.isEmpty()
+        ? "no mute-eligible players; do not call mute"
+        : String.join("; ", eligible) + ". mute may target ONLY players marked eligible=true.";
+  }
+
+  public List<String> moderationSummaries() {
+    pruneModerationState();
+    int required = Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1);
+    List<String> rows = new ArrayList<>();
+    for (Player player : plugin.getServer().getOnlinePlayers()) {
+      int strikes = currentStrikeCount(player.getUniqueId());
+      if (strikes > 0 || isMuteEligible(player)) {
+        rows.add(player.getName() + " strikes=" + strikes + "/" + required + " eligible=" + isMuteEligible(player));
+      }
+    }
+    return rows;
+  }
+
   /** Process model-generated ACTION calls from the same response. */
   public void processModelCalls(List<String> calls) {
-    if (calls == null || calls.isEmpty() || !plugin.getConfig().getBoolean("tools.enabled", true)) return;
-    int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
-    if (maxCalls == 0) return;
+    processModelCalls(calls, "");
+  }
 
+  /**
+   * Returns false when at least one call was rejected as stale/unrequested or by
+   * moderation policy. ConversationManager can then suppress a misleading reply.
+   */
+  public boolean processModelCalls(List<String> calls, String currentActionText) {
+    if (calls == null || calls.isEmpty() || !plugin.getConfig().getBoolean("tools.enabled", true)) return true;
+    int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
+    if (maxCalls == 0) return true;
+
+    boolean allAccepted = true;
     int processed = 0;
     Set<String> dedupe = new LinkedHashSet<>();
     for (String raw : calls) {
@@ -192,12 +276,86 @@ public final class ToolManager {
       }
       processed++;
 
+      if (!isModelCallAuthorized(tool, parsed.arguments(), currentActionText)) {
+        allAccepted = false;
+        plugin.getLogger().warning("Ignored stale/policy-blocked AI tool call: " + call);
+        continue;
+      }
+
       if (tool.activation() == ToolActivation.ASK) {
         queueApproval(tool, parsed.arguments(), call);
       } else {
         executeAndLog(tool, parsed.arguments(), "AI");
       }
     }
+    return allAccepted;
+  }
+
+  private boolean isModelCallAuthorized(Tool tool, String arguments, String currentActionText) {
+    if (!plugin.getConfig().getBoolean("tools.action-safety.require-current-scene-intent", true)) {
+      return !"mute".equals(tool.name) || isMuteEligible(arguments);
+    }
+
+    if ("mute".equals(tool.name)) {
+      if (!plugin.getConfig().getBoolean("tools.mute.policy.require-eligibility-for-ai", true)) return true;
+      return isMuteEligible(arguments);
+    }
+
+    String text = normalize(currentActionText);
+    if (text.isBlank()) return false;
+    return switch (tool.name) {
+      case "lightning" -> containsAny(text, "rayo", "rayos", "relampago", "relampagos", "lightning", "electrifica", "electrocut");
+      case "sound" -> containsAny(text, "sonido", "suena", "haz sonar", "pon sonido", "asusta", "asustame", "asustanos", "susto", "celebra", "celebracion", "festeja", "festejo");
+      case "schedule" -> containsAny(text, "recuerdame", "recordame", "avisame", "avisa", "en unos segundos", "en 10 segundos", "en 20 segundos", "en 30 segundos", "despues");
+      default -> true;
+    };
+  }
+
+  private boolean isMuteEligible(String requestedName) {
+    String name = requestedName == null ? "" : requestedName.trim();
+    if (name.isBlank() || name.contains(" ")) return false;
+    Player player = plugin.getServer().getPlayerExact(name);
+    return player != null && isMuteEligible(player);
+  }
+
+  private boolean isMuteEligible(Player player) {
+    if (player == null || !plugin.getConfig().getBoolean("tools.mute.policy.enabled", true)) return false;
+    if (!plugin.getConfig().getBoolean("tools.mute.allow-admin-targets", false)
+        && (player.isOp() || player.hasPermission("sva.admin"))) return false;
+    long now = System.currentTimeMillis();
+    if (muteCooldownUntil.getOrDefault(player.getUniqueId(), 0L) > now) return false;
+    int required = Math.max(plugin.getConfig().getInt("tools.mute.policy.strikes-required", 3), 1);
+    return currentStrikeCount(player.getUniqueId()) >= required;
+  }
+
+  private int currentStrikeCount(UUID playerId) {
+    Deque<Long> strikes = moderationStrikes.get(playerId);
+    if (strikes == null) return 0;
+    long windowMs = Math.max(plugin.getConfig().getLong("tools.mute.policy.window-ms", 60_000L), 5_000L);
+    pruneOlderThan(strikes, System.currentTimeMillis() - windowMs);
+    if (strikes.isEmpty()) moderationStrikes.remove(playerId);
+    return strikes.size();
+  }
+
+  private void pruneModerationState() {
+    long now = System.currentTimeMillis();
+    long windowMs = Math.max(plugin.getConfig().getLong("tools.mute.policy.window-ms", 60_000L), 5_000L);
+    moderationStrikes.entrySet().removeIf(entry -> {
+      pruneOlderThan(entry.getValue(), now - windowMs);
+      return entry.getValue().isEmpty();
+    });
+    muteCooldownUntil.entrySet().removeIf(entry -> entry.getValue() <= now);
+  }
+
+  private static void pruneOlderThan(Deque<Long> values, long cutoff) {
+    while (!values.isEmpty() && values.peekFirst() < cutoff) values.removeFirst();
+  }
+
+  private static boolean containsAny(String text, String... terms) {
+    for (String term : terms) {
+      if (text.contains(term)) return true;
+    }
+    return false;
   }
 
   private void queueApproval(Tool tool, String arguments, String rawCall) {
@@ -271,6 +429,14 @@ public final class ToolManager {
   private String executeAndLog(Tool tool, String arguments, String source) {
     try {
       String result = tool.execute(arguments == null ? "" : arguments);
+      if ("mute".equals(tool.name) && result != null && result.startsWith("Muted ")) {
+        Player target = plugin.getServer().getPlayerExact(arguments == null ? "" : arguments.trim());
+        if (target != null) {
+          moderationStrikes.remove(target.getUniqueId());
+          long cooldown = Math.max(plugin.getConfig().getLong("tools.mute.policy.cooldown-ms", 300_000L), 0L);
+          if (cooldown > 0L) muteCooldownUntil.put(target.getUniqueId(), System.currentTimeMillis() + cooldown);
+        }
+      }
       plugin.getLogger().info("Tool " + tool.name + " executed by " + source + ": " + result);
       return result;
     } catch (Exception ex) {

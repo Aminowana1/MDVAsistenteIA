@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.6.3 - Split YAML configuration + non-destructive auto-update
+
+- Split the old monolithic `config.yml` into `config.yml` (runtime), `personality.yml` (character prompt), and `wiki.yml` (retrieval + knowledge).
+- Added non-destructive automatic config updates on startup and `/sva reload`: bundled keys missing from a user file are added automatically while existing values are preserved.
+- Added one-time 1.6.2 migration: existing `prompt:` is moved to `personality.yml`, `advanced-context:` is moved to `wiki.yml`, and legacy `tools.wiki.pages` is imported when present.
+- Creates `backups/config-before-1.6.3.yml` before the first split migration.
+- Added per-file `config-version` schema markers for future explicit migrations.
+- `/sva reload` now reloads and auto-updates all three YAML files.
+- Wiki retrieval and `/sva tools run wiki ...` now read `wiki.yml`; AI personality now reads `personality.yml`.
+- Updated YAML validation to check all three bundled files.
+
+## 1.6.2 - Fresh-action gating + grounded inventory + moderation policy
+
+- ACTION calls are now Java-gated against the current trigger/window, so an old lightning request cannot keep firing in later scenes.
+- Stale/policy-blocked ACTION calls can suppress their paired misleading chat reply.
+- Inventory context puts `mainhand` first and CORE treats trusted inventory/player context as direct observation; Isolda should answer held-item questions instead of asking the player what they hold.
+- Added deterministic mute eligibility: configurable directed abuse strikes in a rolling window. Chat requests such as `mutea a X` cannot bypass the policy.
+- `mute.activation: ask` still requires admin approval after eligibility; switching it to `smart` allows automatic execution only after the same Java policy passes.
+- Added `/sva tools moderation` to inspect current strike/eligibility state.
+
 ## 1.6.1 - Action-tool reliability + held-item context
 
 - OpenAI primary requests can force JSON-object response mode (`provider-response.force-json-object-openai: true`) so the `m`/`t` envelope stays machine-readable and ACTION calls are not lost to plain-text fallback.

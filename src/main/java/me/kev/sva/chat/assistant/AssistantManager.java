@@ -222,7 +222,7 @@ public class AssistantManager {
 
     paramsBuilder.addSystemMessage(AssistantContextualizer.PRIMARY_SYSTEM_INSTRUCTIONS);
 
-    String personalityPrompt = plugin.getConfig().getString(
+    String personalityPrompt = plugin.getPersonalityConfig().getString(
         "prompt",
         AssistantContextualizer.DEFAULT_PERSONALITY_PROMPT);
     paramsBuilder.addSystemMessage(
