@@ -1,5 +1,5 @@
 name: ServerAssistant
-version: '1.5.1'
+version: '${project.version}'
 main: me.kev.sva.ServerAssistantPlugin
 api-version: '1.21'
 description: 

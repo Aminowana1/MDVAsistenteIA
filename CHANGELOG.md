@@ -1,5 +1,14 @@
 # Changelog
 
+## Build system - automatic version propagation
+
+- `pom.xml` is now the single source of truth for the project version.
+- `plugin.yml` receives `${project.version}` through Maven resource filtering.
+- GitHub Actions discovers the artifactId/version from `pom.xml` and uploads the generated JAR dynamically.
+- GitHub Actions no longer contains a hard-coded `target/ServerAssistant-X.Y.Z.jar` path.
+- Updated official GitHub actions to Node 24-capable majors (`checkout@v5`, `setup-java@v5`, `upload-artifact@v6`).
+- `build_replace.py` no longer requires `target/` to exist before the first build.
+
 ## 1.5.1 - Per-player smart follow-up
 
 - `smart-follow-up-ms` is now tracked independently per player.

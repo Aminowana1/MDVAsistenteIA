@@ -1,4 +1,4 @@
-# ServerAssistant 1.5.1
+# ServerAssistant
 
 ServerAssistant 1.5 replaces the old logical conversation/slot router with one global public conversation designed for an NPC living in a Minecraft server chat.
 
@@ -39,3 +39,9 @@ For the strictest API economy, use `trigger-mode: mention`, keep fallback disabl
 `global-conversation.smart-follow-up-ms` is not a global chat latch. After Isolda replies, only players whose direct address to Isolda was actually included in that scene receive their own continuation timer. Players who merely appeared as contextual chat/events cannot trigger a new API call without saying `Iso`/`Isolda`. If two players both address Isolda inside the same 1.5s capture, both get independent timers.
 
 This keeps natural follow-ups while preventing unrelated public chat from waking the AI and spending tokens.
+
+## Versioning / build artifacts
+
+`pom.xml` is the only place that owns the project version. Maven filters that value into `plugin.yml`, and GitHub Actions reads the same `artifactId` + `version` to locate and upload the generated JAR. Do not hard-code versioned JAR names in the workflow.
+
+Example: after changing only `<version>1.5.2</version>` in `pom.xml`, the build automatically produces and uploads `ServerAssistant-1.5.2.jar`, and Paper sees version `1.5.2` in `plugin.yml`.

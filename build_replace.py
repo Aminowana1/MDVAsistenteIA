@@ -91,8 +91,6 @@ def remove_config_folder(plugins_dir: Path, config_dir_name: str) -> None:
 def main() -> None:
     root = Path(__file__).resolve().parent
     target_dir = root / "target"
-    if not target_dir.exists():
-        raise FileNotFoundError(f"Target directory not found: {target_dir}")
     if not PLUGINS_DIR.exists():
         raise FileNotFoundError(f"Plugins directory not found: {PLUGINS_DIR}")
 
