@@ -2,9 +2,9 @@
 
 Open-source Paper plugin for a context-aware AI character inside Minecraft.
 
-## 1.4.1 highlights
+## 1.4.3 highlights
 
-1.4.1 keeps the optimized 1.4 routing/reliability layer but makes the normal AI path behave like the stable V1 setup again: **OpenAI `gpt-4o-mini` is primary** and Gemini is optional fallback.
+1.4.3 keeps the optimized 1.4 routing/reliability layer but makes the normal AI path behave like the stable V1 setup again: **OpenAI `gpt-4o-mini` is primary** and Gemini is optional fallback.
 
 - Primary and fallback use the same OpenAI-compatible Java client architecture.
 - On a primary 429 or transient 5xx/timeout, the same pending batch can be retried through Gemini without committing or losing the player's question.
@@ -59,7 +59,7 @@ mvn clean package
 Output:
 
 ```text
-target/ServerAssistant-1.4.1.jar
+target/ServerAssistant-1.4.3.jar
 ```
 
 GitHub Actions is included at `.github/workflows/build.yml`.
@@ -70,7 +70,7 @@ The plugin does not try to bypass provider quotas. OpenAI and Gemini have separa
 
 ## Security / future 2.0 tools
 
-1.4.1 still has no generic console execution. Plain model text is chat only. Tools must be explicitly registered in `ToolManager`, and unknown tool names are rejected. Future write/action tools should validate player permissions, arguments and current server state in Java before any action occurs.
+1.4.3 still has no generic console execution. Plain model text is chat only. Tools must be explicitly registered in `ToolManager`, and unknown tool names are rejected. Future write/action tools should validate player permissions, arguments and current server state in Java before any action occurs.
 
 ## License
 

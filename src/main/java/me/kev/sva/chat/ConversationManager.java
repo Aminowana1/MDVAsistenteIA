@@ -91,7 +91,9 @@ public class ConversationManager {
     return primaryStatus
         + ", " + fallbackStatus
         + ", queue=" + requestQueue.size()
-        + ", active_conversations=" + countActivePlayerConversations();
+        + ", in_flight=" + requestInFlight
+        + ", busy_conversations=" + countBusyPlayerConversations()
+        + ", warm_conversations=" + countActivePlayerConversations();
   }
 
   private String providerStatus(String role, me.kev.sva.chat.assistant.ProviderSettings settings) {
@@ -243,6 +245,15 @@ public class ConversationManager {
       conversations.put(session.id, session);
     }
 
+    // A remembered smart-mode session does not reserve an AI slot while idle.
+    // When it becomes active again, however, it must compete for the same turn
+    // capacity as a brand-new conversation. Existing pending/processing sessions
+    // already own their slot and may continue batching messages normally.
+    if (!occupiesConversationSlot(session) && !hasFreeConversationSlot()) {
+      sendBusyNotice(player);
+      return;
+    }
+
     refreshParticipantSnapshot(participant, player);
     session.suppressResponse = false;
 
@@ -317,12 +328,26 @@ public class ConversationManager {
     }
   }
 
+  /**
+   * A conversation slot represents work currently waiting for/using the AI, not a
+   * warm smart-mode memory window. Otherwise two idle players would reserve both
+   * slots for the full smart timeout and a third direct mention would be rejected.
+   */
   private boolean hasFreeConversationSlot() {
     int maxActive = plugin.getConfig().contains("conversation-control.max-active-conversations")
         ? plugin.getConfig().getInt("conversation-control.max-active-conversations", 2)
         : plugin.getConfig().getInt("conversation-control.max-active-player-conversations", 2);
     maxActive = Math.max(maxActive, 0);
-    return maxActive == 0 || countActivePlayerConversations() < maxActive;
+    return maxActive == 0 || countBusyPlayerConversations() < maxActive;
+  }
+
+  private boolean occupiesConversationSlot(ConversationSession session) {
+    return session != null
+        && !session.global
+        && (session.processing
+            || session.queued
+            || !session.pending.isEmpty()
+            || !session.currentBatch.isEmpty());
   }
 
   private ConversationSession findGroupJoinCandidate(Player player, String message) {
@@ -825,7 +850,7 @@ public class ConversationManager {
 
     idleTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
       idleTask = null;
-      if (shutdown || Bukkit.getOnlinePlayers().isEmpty() || countActivePlayerConversations() > 0) {
+      if (shutdown || Bukkit.getOnlinePlayers().isEmpty() || countBusyPlayerConversations() > 0) {
         return;
       }
 
@@ -912,7 +937,7 @@ public class ConversationManager {
       if (plugin.getConfig().getBoolean(
           "request-triggers.global-events.defer-while-player-conversations-active",
           true)
-          && countActivePlayerConversations() > 0) {
+          && countBusyPlayerConversations() > 0) {
         cancelTask(session.batchTask);
         session.batchTask = plugin.getServer().getScheduler().runTaskLater(
             plugin,
@@ -1163,8 +1188,10 @@ public class ConversationManager {
     }
 
     commitCurrentBatch(session);
-    session.history.add(new AssistantChatMessage(plugin, response));
-    trimStoredHistory(session);
+    if (!response.historyText().isBlank()) {
+      session.history.add(new AssistantChatMessage(plugin, response));
+      trimStoredHistory(session);
+    }
 
     boolean hasTools = !response.getToolCalls().isEmpty();
     boolean broadcastToolProgress = plugin.getConfig().getBoolean(
@@ -1590,6 +1617,19 @@ public class ConversationManager {
     conversations.remove(session.id);
   }
 
+  /** Counts conversations that currently occupy one anti-flood turn slot. */
+  private int countBusyPlayerConversations() {
+    cleanupExpiredParticipantsAndSessions();
+    int count = 0;
+    for (ConversationSession session : conversations.values()) {
+      if (occupiesConversationSlot(session)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** Counts all remembered smart-mode conversations, including idle/warm ones. */
   private int countActivePlayerConversations() {
     cleanupExpiredParticipantsAndSessions();
     int count = 0;
@@ -1597,7 +1637,8 @@ public class ConversationManager {
       if (!session.participants.isEmpty()
           || session.processing
           || session.queued
-          || !session.pending.isEmpty()) {
+          || !session.pending.isEmpty()
+          || !session.currentBatch.isEmpty()) {
         count++;
       }
     }

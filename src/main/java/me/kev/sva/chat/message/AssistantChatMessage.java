@@ -11,7 +11,7 @@ public class AssistantChatMessage extends ChatMessage {
   }
 
   public AssistantChatMessage(ServerAssistantPlugin plugin, AssistantResponse response) {
-    super(plugin, response.raw);
+    super(plugin, response.historyText());
     this.response = response;
   }
 }

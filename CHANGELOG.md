@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.3 - Warm sessions no longer consume AI slots
+
+- Fixes the third-player stall seen with `max-active-conversations: 2`.
+- `smart-active-time` now keeps conversation history warm without reserving an AI turn slot.
+- The 2-slot cap now applies only to conversations with pending, queued, current-batch, or processing work.
+- Existing warm conversations must reacquire a turn slot when they speak again, so the anti-flood cap still works.
+- `/sva status` now exposes `in_flight`, `busy_conversations`, and `warm_conversations` for diagnosis.
+- Ambient/global requests defer only while player conversation turns are actually busy.
+- No extra model calls and no additional prompt text; this fix does not increase token usage.
+
+## 1.4.2 - Compact protocol + leak guard
+
+- Replaced the verbose response envelope with compact `m/t/c` keys to reduce prompt/output tokens.
+- Assistant history now stores only Isolda's visible dialogue, never the internal response envelope; empty/tool-only turns are not added as blank assistant messages.
+- Added tolerant aliases for both compact and legacy response keys.
+- Added recursive recovery for malformed `[CORE] messages: [...]` responses and a hard guard that blocks protocol metadata from reaching public chat.
+- Gemini/OpenAI-compatible plain-text fallback remains available, but protocol-looking text is never broadcast raw.
+- Reordered the repeated static prompt before dynamic server/request context so provider prompt caching can reuse CORE + personality + wiki index more effectively.
+- Compacted the lazy wiki index to `key: description` lines, removing repeated tool labels and blank lines.
+- No changes to conversation routing, batching, wiki lazy loading, rate limits, fallback providers or tool safety.
+
 ## 1.4.1 - OpenAI primary + Gemini fallback
 
 - Restored **OpenAI `gpt-4o-mini` as the default/primary provider**, matching the simple V1 request path.

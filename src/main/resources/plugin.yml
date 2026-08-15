@@ -1,5 +1,5 @@
 name: ServerAssistant
-version: '1.4.1'
+version: '1.4.3'
 main: me.kev.sva.ServerAssistantPlugin
 api-version: '1.21'
 description: 

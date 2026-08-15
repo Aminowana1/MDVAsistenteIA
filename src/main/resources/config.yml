@@ -1,12 +1,12 @@
 # ============================================================
-# SERVER ASSISTANT 1.4.1
+# SERVER ASSISTANT 1.4.3
 # ============================================================
 
 # Name shown in chat and automatically accepted as a mention.
 assistant-name: Isolda
 
 # ============================================================
-# AI PROVIDERS - SERVER ASSISTANT 1.4.1
+# AI PROVIDERS - SERVER ASSISTANT 1.4.3
 # ============================================================
 # Primary path: OpenAI GPT-4o mini (same model family/path that V1 used).
 # Gemini remains available only as an automatic fallback.
@@ -104,10 +104,11 @@ request-triggers:
 # NATURAL CONVERSATION / ANTI-SPAM
 # ============================================================
 conversation-control:
-  # Main anti-chat-flood setting. THIS COUNTS CONVERSATIONS, NOT PLAYERS.
-  # Example: A + B + C + SVA is ONE slot. D + SVA can use the second slot.
-  # A fifth player may still join an existing group when the router can safely
-  # identify that their message belongs there. 0 = unlimited (not recommended).
+  # Main anti-chat-flood setting. Counts conversations that currently have an AI
+  # turn pending/queued/processing, NOT idle smart-mode memories and NOT players.
+  # Example: A and B can keep separate 60s smart histories without permanently
+  # blocking C. C is rejected only while two conversation turns are actually busy.
+  # 0 = unlimited (not recommended).
   max-active-conversations: 2
   
   group-conversations:

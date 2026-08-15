@@ -3,7 +3,6 @@ package me.kev.sva.chat.tools.all;
 import org.bukkit.configuration.ConfigurationSection;
 
 import me.kev.sva.ServerAssistantPlugin;
-import me.kev.sva.utils.MessageSender;
 
 public class WikiTool extends Tool {
 
@@ -19,28 +18,25 @@ public class WikiTool extends Tool {
       return "";
     }
 
-    StringBuilder result = new StringBuilder("WIKI AVAILABLE:\n");
+    StringBuilder result = new StringBuilder();
 
     for (String key : wiki.getKeys(false)) {
       ConfigurationSection section = wiki.getConfigurationSection(key);
-
       if (section == null) {
         continue;
       }
 
-      String description = section.getString(
-          "description",
-          "No description available.");
+      String description = section.getString("description", "");
+      description = description == null ? "" : description.replaceAll("\\s+", " ").trim();
 
-      result.append("\n" + name + " ")
-          .append(key)
-          .append("\n")
-          .append(description)
-          .append("\n");
+      result.append(key);
+      if (!description.isBlank()) {
+        result.append(": ").append(description);
+      }
+      result.append('\n');
     }
 
-    // MessageSender.Success(result.toString());
-    return result.toString();
+    return result.toString().trim();
   }
 
   public String getWiki(String key) {

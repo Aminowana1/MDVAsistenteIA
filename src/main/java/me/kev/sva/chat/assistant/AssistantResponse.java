@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -35,25 +37,27 @@ public class AssistantResponse {
       if (loaded instanceof Map<?, ?> data) {
         boolean hasKnownField = containsAnyKey(
             data,
-            "messages", "message", "response", "text",
-            "tool-calls", "tool_calls", "tools",
-            "close-conversation", "close_conversation");
+            "m", "messages", "message", "response", "text",
+            "t", "tool-calls", "tool_calls", "tools",
+            "c", "close-conversation", "close_conversation");
 
         if (hasKnownField) {
           parsedMessages = firstNonEmpty(
+              getStringListFlexible(data, "m"),
               getStringListFlexible(data, "messages"),
               getStringListFlexible(data, "message"),
               getStringListFlexible(data, "response"),
               getStringListFlexible(data, "text"));
 
           parsedToolCalls = firstNonEmpty(
+              getStringListFlexible(data, "t"),
               getStringListFlexible(data, "tool-calls"),
               getStringListFlexible(data, "tool_calls"),
               getStringListFlexible(data, "tools"));
 
           parsedCloseConversation = getBooleanFlexible(
               data,
-              List.of("close-conversation", "close_conversation"),
+              List.of("c", "close-conversation", "close_conversation"),
               false);
           structured = true;
         }
@@ -79,12 +83,20 @@ public class AssistantResponse {
     // structured envelope and therefore can never be invented by this fallback.
     if (!structured && !cleanedResponse.isBlank()
         && plugin.getConfig().getBoolean("provider-response.accept-plain-text-fallback", true)) {
-      parsedMessages = List.of(cleanedResponse);
+      String recovered = recoverProtocolMessage(cleanedResponse, 0);
+      if (!recovered.isBlank()) {
+        parsedMessages = List.of(recovered);
+      } else if (!looksLikeProtocolLeak(cleanedResponse)) {
+        parsedMessages = List.of(cleanedResponse);
+      } else {
+        parsedMessages = List.of();
+        plugin.getLogger().warning("Blocked malformed AI protocol text from reaching public chat.");
+      }
       parsedToolCalls = List.of();
       parsedCloseConversation = false;
 
       if (plugin.getConfig().getBoolean("provider-response.log-fallbacks", false)) {
-        plugin.getLogger().info("Recovered a non-structured AI response as plain chat text.");
+        plugin.getLogger().info("Recovered a non-structured AI response as safe plain chat text.");
       }
     }
 
@@ -117,6 +129,59 @@ public class AssistantResponse {
 
   public boolean shouldCloseConversation() {
     return closeConversation;
+  }
+
+  /** Only the visible dialogue is sent back as assistant history. Protocol metadata stays in Java. */
+  public String historyText() {
+    return String.join(" ", messages).trim();
+  }
+
+  private static final Pattern PROTOCOL_MESSAGE_PATTERN = Pattern.compile(
+      "(?is)(?:\"?(?:m|messages|message|response|text)\"?)\\s*:\\s*(?:-\\s*)?(?:\\[\\s*)?\"((?:\\\\.|[^\"\\\\])*)\"");
+
+  private static String recoverProtocolMessage(String text, int depth) {
+    if (text == null || text.isBlank() || depth > 2) {
+      return "";
+    }
+    Matcher matcher = PROTOCOL_MESSAGE_PATTERN.matcher(text);
+    if (!matcher.find()) {
+      return "";
+    }
+    String value = unescapeProtocolString(matcher.group(1)).trim();
+    if (value.isBlank()) {
+      return "";
+    }
+    if (looksLikeProtocolLeak(value)) {
+      String nested = recoverProtocolMessage(value, depth + 1);
+      return nested.isBlank() ? "" : nested;
+    }
+    return value;
+  }
+
+  private static String unescapeProtocolString(String text) {
+    return text
+        .replace("\\\"", "\"")
+        .replace("\\n", " ")
+        .replace("\\r", " ")
+        .replace("\\t", " ")
+        .replace("\\\\", "\\");
+  }
+
+  private static boolean looksLikeProtocolLeak(String text) {
+    if (text == null || text.isBlank()) {
+      return false;
+    }
+    String lower = text.trim().toLowerCase();
+    if (lower.startsWith("[core]") || lower.startsWith("messages:")
+        || lower.startsWith("\"messages\"") || lower.startsWith("{m:")
+        || lower.startsWith("{\"m\"")) {
+      return true;
+    }
+    int signals = 0;
+    if (lower.contains("messages:" ) || lower.contains("\"messages\":")) signals++;
+    if (lower.contains("tool-calls") || lower.contains("tool_calls")) signals++;
+    if (lower.contains("close-conversation") || lower.contains("close_conversation")) signals++;
+    return signals >= 2;
   }
 
   private static boolean containsAnyKey(Map<?, ?> data, String... keys) {
@@ -224,7 +289,16 @@ public class AssistantResponse {
         break;
       }
 
-      String message = sanitizeMessage(rawMessage == null ? "" : rawMessage).trim();
+      String source = rawMessage == null ? "" : rawMessage;
+      if (looksLikeProtocolLeak(source)) {
+        String recovered = recoverProtocolMessage(source, 0);
+        if (recovered.isBlank()) {
+          continue;
+        }
+        source = recovered;
+      }
+
+      String message = sanitizeMessage(source).trim();
       if (message.isEmpty()) {
         continue;
       }
