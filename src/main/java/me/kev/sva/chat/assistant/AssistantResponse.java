@@ -34,7 +34,11 @@ public class AssistantResponse {
     boolean structured = false;
 
     try {
-      Object loaded = cleanedResponse.isBlank() ? null : new Yaml().load(cleanedResponse);
+      // JSON mode should not emit literal TAB characters, but compatibility/model
+      // edge cases occasionally do. SnakeYAML rejects TABs before it can recover the
+      // otherwise valid compact envelope, so normalize them only for parsing.
+      String parseCandidate = cleanedResponse.replace('\t', ' ');
+      Object loaded = parseCandidate.isBlank() ? null : new Yaml().load(parseCandidate);
 
       if (loaded instanceof Map<?, ?> data) {
         boolean hasKnownField = containsAnyKey(
@@ -102,7 +106,10 @@ public class AssistantResponse {
         plugin.getLogger().warning("Blocked malformed AI protocol text from reaching public chat.");
       }
       parsedToolCalls = List.of();
-      parsedRelationshipUpdates = List.of();
+      // Never salvage ACTION tools from malformed output. Relationship bookkeeping
+      // is safe to recover because RelationshipManager still validates current speaker,
+      // semantic signal, cooldowns and romance capacity before mutating anything.
+      parsedRelationshipUpdates = recoverRelationshipUpdatesFromMalformed(cleanedResponse);
       parsedCloseConversation = false;
 
       if (plugin.getConfig().getBoolean("provider-response.log-fallbacks", false)) {
@@ -165,6 +172,9 @@ public class AssistantResponse {
   private static final Pattern PROTOCOL_MESSAGE_PATTERN = Pattern.compile(
       "(?is)(?:\"?(?:m|messages|message|response|text)\"?)\\s*:\\s*(?:-\\s*)?(?:\\[\\s*)?\"((?:\\\\.|[^\"\\\\])*)\"");
 
+  private static final Pattern MALFORMED_RELATIONSHIP_PATTERN = Pattern.compile(
+      "(?iu)([A-Za-z0-9_]{1,32})\\|([+-]?\\d{1,2})\\|(n|r|p|none|recent|persistent)\\|(\\d)\\|([^|\"}\\]\\r\\n]{0,90})(?:\\|([^\"}\\]\\r\\n,]{0,16}))?");
+
   private static String recoverProtocolMessage(String text, int depth) {
     if (text == null || text.isBlank() || depth > 2) {
       return "";
@@ -182,6 +192,20 @@ public class AssistantResponse {
       return nested.isBlank() ? "" : nested;
     }
     return value;
+  }
+
+  private static List<Object> recoverRelationshipUpdatesFromMalformed(String text) {
+    if (text == null || text.isBlank()) return List.of();
+    List<Object> recovered = new ArrayList<>();
+    Matcher matcher = MALFORMED_RELATIONSHIP_PATTERN.matcher(text);
+    while (matcher.find() && recovered.size() < 2) {
+      String memory = matcher.group(5) == null ? "" : matcher.group(5).trim();
+      String romance = matcher.group(6) == null ? "" : matcher.group(6).trim();
+      String compact = matcher.group(1) + "|" + matcher.group(2) + "|" + matcher.group(3)
+          + "|" + matcher.group(4) + "|" + memory + "|" + romance;
+      if (RelationshipUpdate.parseCompact(compact) != null) recovered.add(compact);
+    }
+    return List.copyOf(recovered);
   }
 
   private static String unescapeProtocolString(String text) {

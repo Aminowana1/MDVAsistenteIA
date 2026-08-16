@@ -730,25 +730,35 @@ public final class ConversationManager {
             + "Only these lines may authorize ACTION tools."));
     modelMessages.addAll(requestMessages);
 
-    // CONTEXT tools and wiki retrieval are driven only by the addressed request.
-    // Unrelated group chatter cannot consume a local-tool slot or steal its target.
-    String wiki = retrieveLocalWiki(requestMessages);
-    String localTools = plugin.getToolManager() == null
-        ? ""
-        : plugin.getToolManager().buildLocalContext(requestMessages, currentContextNames);
-    String recentEvents = retrieveRecentEventContext(requestMessages);
     String involved = involvedNames.isEmpty() ? "none" : String.join(",", involvedNames);
     String currentActionText = selectedChats.stream()
         .filter(chat -> chat.timestampMs() >= capture.triggerAt())
         .filter(chat -> chat.playerId().equals(capture.triggerPlayerId()) || containsAssistantMention(chat.content()))
-        .map(PublicChatRecord::content)
-        .collect(java.util.stream.Collectors.joining(" "));
+        // Keep the action-request speaker bound to the text. ToolManager uses this
+        // only locally for authorization/target correction; it is not extra prompt text.
+        .map(chat -> "speaker=" + chat.playerName() + "|" + chat.content())
+        .collect(java.util.stream.Collectors.joining("\n"));
 
+    // Historical/journal intent is resolved BEFORE wiki/context tools. A question such
+    // as "que paso mientras no estaba" must never receive random lore pages merely
+    // because words like "paso" happen to score inside the wiki. Only the triggering
+    // player's addressed lines are used to classify their own absence/history request.
     String activityHistory = "";
     if (plugin.getActivityJournal() != null && triggerRecord != null) {
+      String journalQueryText = requestTextForPlayer(requestMessages, triggerRecord.playerId());
       activityHistory = plugin.getActivityJournal().buildContext(
-          triggerRecord.playerId(), triggerRecord.playerName(), triggerRecord.admin(), currentActionText);
+          triggerRecord.playerId(), triggerRecord.playerName(), triggerRecord.admin(), journalQueryText);
     }
+
+    // CONTEXT tools and wiki retrieval are driven only by the addressed request.
+    // When the journal recognized a history query it becomes the sole factual source
+    // for that historical question: no wiki/player-data/recent-event contamination.
+    boolean journalIntent = activityHistory != null && !activityHistory.isBlank();
+    String wiki = journalIntent ? "" : retrieveLocalWiki(requestMessages);
+    String localTools = journalIntent || plugin.getToolManager() == null
+        ? ""
+        : plugin.getToolManager().buildLocalContext(requestMessages, currentContextNames);
+    String recentEvents = journalIntent ? "" : retrieveRecentEventContext(requestMessages);
     String relationshipContext = plugin.getRelationshipManager() == null
         ? ""
         : plugin.getRelationshipManager().buildContext(currentMessages, currentContextNames);
@@ -774,6 +784,20 @@ public final class ConversationManager {
         currentActionText,
         AssistantManager.PRIMARY,
         0);
+  }
+
+  private static String requestTextForPlayer(List<ChatMessage> messages, UUID playerId) {
+    if (messages == null || playerId == null) return "";
+    StringBuilder out = new StringBuilder();
+    for (ChatMessage message : messages) {
+      if (message instanceof PlayerChatMessage playerMessage
+          && playerId.equals(playerMessage.playerId)
+          && playerMessage.content != null && !playerMessage.content.isBlank()) {
+        if (!out.isEmpty()) out.append(' ');
+        out.append(playerMessage.content);
+      }
+    }
+    return out.toString().trim();
   }
 
   private List<ChatMessage> selectRequestMessages(
@@ -1251,13 +1275,33 @@ public final class ConversationManager {
       return "";
     }
 
-    StringBuilder queryBuilder = new StringBuilder();
-    for (ChatMessage message : currentMessages) {
-      queryBuilder.append(message.content).append(' ');
+    // Pick ONE addressed knowledge request instead of concatenating every speaker in
+    // a group scene. Social lines such as "yo muy bien" + "por que eres mala conmigo"
+    // must never combine into a fake wiki query. The newest actual wiki-style request
+    // wins because Isolda can publish only one short line anyway.
+    WikiQuerySelection selection = selectWikiQuery(currentMessages);
+    if (selection == null || selection.rawQuery().isBlank()) {
+      if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
+        plugin.getLogger().info("Wiki retrieval skipped=no-knowledge-intent");
+      }
+      return "";
     }
-    String query = normalizeForSearch(queryBuilder.toString());
+
+    String rawQuery = selection.rawQuery();
+    String directQuery = normalizeForSearch(rawQuery);
+
+    // A SMART follow-up such as "y de donde consigo eso?" or "como se craftea?"
+    // contains no useful noun on its own. Reuse only the immediately previous
+    // SAME-SPEAKER wiki scene as a local retrieval seed. This costs zero model
+    // calls/tokens and avoids leaking another player's topic into the query.
+    String expandedRawQuery = expandWikiFollowUpQuery(
+        rawQuery, directQuery, List.<ChatMessage>of(selection.message()));
+    String query = normalizeForSearch(expandedRawQuery);
     Set<String> queryTerms = meaningfulTerms(query);
     if (queryTerms.isEmpty()) {
+      if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
+        plugin.getLogger().info("Wiki retrieval skipped=no-meaningful-terms query='" + directQuery + "'");
+      }
       return "";
     }
     String meaningfulPhrase = String.join(" ", queryTerms);
@@ -1332,9 +1376,156 @@ public final class ConversationManager {
       used++;
     }
     if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
-      plugin.getLogger().info("Wiki retrieval query='" + query + "' selected=" + selectedKeys);
+      String expansion = query.equals(directQuery) ? "" : " expanded_from='" + directQuery + "'";
+      plugin.getLogger().info("Wiki retrieval query='" + query + "'" + expansion + " selected=" + selectedKeys);
     }
     return out.toString();
+  }
+
+  private WikiQuerySelection selectWikiQuery(List<ChatMessage> currentMessages) {
+    if (currentMessages == null || currentMessages.isEmpty()) return null;
+    for (int i = currentMessages.size() - 1; i >= 0; i--) {
+      ChatMessage message = currentMessages.get(i);
+      if (!(message instanceof PlayerChatMessage playerMessage)) continue;
+      String raw = playerMessage.content == null ? "" : playerMessage.content.trim();
+      String normalized = normalizeForSearch(raw);
+      if (normalized.isBlank() || isObviousSocialSmallTalk(normalized)) continue;
+      if (looksLikeWikiFollowUp(normalized) || looksLikeLikelyWikiKnowledgeRequest(normalized)) {
+        return new WikiQuerySelection(playerMessage, raw);
+      }
+    }
+    return null;
+  }
+
+  private static boolean looksLikeLikelyWikiKnowledgeRequest(String normalized) {
+    if (normalized == null || normalized.isBlank()) return false;
+
+    // Direct observation belongs to local context tools, not the static wiki.
+    if (containsAnyTerm(normalized,
+        "inventario", "que tengo equipado", "que tiene equipado", "que tiene en la mano",
+        "donde esta el jugador", "donde esta aminowana", "donde esta kroattan")) {
+      return false;
+    }
+
+    return containsAnyTerm(normalized,
+        "que es ", "q es ", "que son ", "q son ", "que significa ",
+        "para que sirve", "para que se usa", "como funciona",
+        "como se craftea", "como crafteo", "como craftear", "crafteo", "craftear",
+        "como se hace", "receta", "recetas",
+        "como consigo", "como obtengo", "de donde consigo", "donde consigo",
+        "donde se consigue", "donde se obtiene", "como obtener",
+        "como hago para", "que comandos", "q comandos", "comandos hay",
+        "que minerales", "q minerales", "que armas", "que armaduras", "que sets",
+        "que raza tiene", "que profesion", "drops", "dropea", "droppea",
+        "cuanto cuesta", "cuanto vale");
+  }
+
+  private String expandWikiFollowUpQuery(
+      String rawQuery,
+      String normalizedDirectQuery,
+      List<ChatMessage> currentMessages) {
+
+    if (!looksLikeWikiFollowUp(normalizedDirectQuery) || sceneHistory.isEmpty()) {
+      return rawQuery;
+    }
+
+    SceneMemory previous = sceneHistory.peekLast();
+    if (previous == null || !previous.wikiContextUsed()) {
+      return rawQuery;
+    }
+
+    UUID currentSpeaker = lastPlayerId(currentMessages);
+    UUID previousSpeaker = lastPlayerId(previous.messages());
+    if (currentSpeaker == null || previousSpeaker == null || !currentSpeaker.equals(previousSpeaker)) {
+      return rawQuery;
+    }
+
+    StringBuilder expanded = new StringBuilder(rawQuery == null ? "" : rawQuery.trim());
+    for (ChatMessage message : previous.messages()) {
+      if (message instanceof PlayerChatMessage playerMessage
+          && currentSpeaker.equals(playerMessage.playerId)) {
+        expanded.append(' ').append(playerMessage.content);
+      }
+    }
+
+    String previousReply = previous.assistantReply();
+    if (previousReply != null && !previousReply.isBlank()) {
+      // Retrieval-only seed: keep it compact and never send this string itself as
+      // extra prompt text. The selected wiki sections are what reach the model.
+      String compactReply = previousReply.length() > 420
+          ? previousReply.substring(0, 420)
+          : previousReply;
+      expanded.append(' ').append(compactReply);
+    }
+    return expanded.toString().trim();
+  }
+
+  private static UUID lastPlayerId(List<ChatMessage> messages) {
+    if (messages == null) return null;
+    for (int i = messages.size() - 1; i >= 0; i--) {
+      if (messages.get(i) instanceof PlayerChatMessage playerMessage) {
+        return playerMessage.playerId;
+      }
+    }
+    return null;
+  }
+
+  private static boolean looksLikeWikiFollowUp(String normalized) {
+    if (normalized == null || normalized.isBlank()) return false;
+    Set<String> terms = meaningfulTerms(normalized);
+    if (terms.size() > 2) return false;
+
+    return normalized.contains(" eso")
+        || normalized.contains(" esa")
+        || normalized.contains(" ese")
+        || normalized.contains(" esto")
+        || normalized.startsWith("y ")
+        || normalized.contains(" como se craftea")
+        || normalized.startsWith("como se craftea")
+        || normalized.contains(" como lo crafteo")
+        || normalized.contains(" de donde consigo")
+        || normalized.startsWith("de donde consigo")
+        || normalized.contains(" como consigo")
+        || normalized.startsWith("como consigo")
+        || normalized.contains(" donde lo consigo")
+        || normalized.contains(" donde se consigue")
+        || normalized.contains(" como se hace")
+        || normalized.startsWith("como se hace");
+  }
+
+  private static boolean isObviousSocialSmallTalk(String normalized) {
+    if (normalized == null || normalized.isBlank()) return true;
+    String q = " " + normalized + " ";
+    return q.contains(" como estas ")
+        || q.contains(" como andas ")
+        || q.contains(" como te va ")
+        || q.contains(" todo bien ")
+        || q.contains(" que tal iso ")
+        || q.contains(" que tal isolda ")
+        || q.contains(" que opinas de mi ")
+        || q.contains(" por que me tratas ")
+        || q.contains(" porque me tratas ")
+        || q.contains(" pq me tratas ")
+        || q.contains(" por que eres mala conmigo ")
+        || q.contains(" pq eres mala conmigo ")
+        || q.contains(" eres mala conmigo ")
+        || q.contains(" eres malo conmigo ")
+        || q.contains(" nuestro amor ")
+        || q.contains(" tu amor ")
+        || q.contains(" me quieres ")
+        || q.contains(" te quiero ")
+        || q.contains(" me gustas ")
+        || q.contains(" no me hagas llorar ")
+        || q.contains(" mi ex me trataba ")
+        || q.contains(" buena charla ")
+        || q.contains(" hola iso ")
+        || q.contains(" hola isolda ")
+        || q.contains(" holaa iso ")
+        || q.contains(" holaa isolda ")
+        || q.trim().equals("hola")
+        || q.trim().equals("holi")
+        || q.trim().equals("holaa")
+        || q.trim().equals("buenas");
   }
 
   private String fullWikiContext() {
@@ -1536,6 +1727,8 @@ public final class ConversationManager {
 
       String guardedReply = plugin.getRelationshipManager().guardRomanceReply(
           response.historyText(), scene.currentSceneMessages(), scene.followUpEligiblePlayerIds()).trim();
+      guardedReply = plugin.getRelationshipManager().guardPartnerFactReply(
+          guardedReply, scene.currentSceneMessages(), scene.followUpEligiblePlayerIds()).trim();
       if (!guardedReply.equals(response.historyText().trim())) {
         response = new AssistantResponse(
             plugin,
@@ -1547,6 +1740,12 @@ public final class ConversationManager {
     }
 
     String reply = response.historyText().trim();
+    if (!reply.isBlank() && isDuplicateSmartFollowUpReply(scene, reply)) {
+      if (plugin.getConfig().getBoolean("provider-response.debug-empty-direct-replies", false)) {
+        plugin.getLogger().info("Suppressed duplicate smart-follow-up reply for scene " + scene.sceneId());
+      }
+      reply = "";
+    }
     if (reply.isBlank()
         && scene.context() != null
         && scene.context().sceneMeta() != null
@@ -1609,6 +1808,17 @@ public final class ConversationManager {
     return smartFollowUpUntilByPlayer.size();
   }
 
+  private boolean isDuplicateSmartFollowUpReply(SceneRequest scene, String reply) {
+    if (scene == null || reply == null || reply.isBlank() || sceneHistory.isEmpty()) return false;
+    String meta = scene.context() == null ? "" : scene.context().sceneMeta();
+    if (meta == null || !meta.contains("trigger=smart_followup")) return false;
+    SceneMemory previous = sceneHistory.peekLast();
+    if (previous == null || previous.assistantReply() == null || previous.assistantReply().isBlank()) return false;
+    String current = me.kev.sva.chat.tools.ToolManager.normalize(reply);
+    String last = me.kev.sva.chat.tools.ToolManager.normalize(previous.assistantReply());
+    return !current.isBlank() && current.equals(last);
+  }
+
   private void rememberScene(SceneRequest scene, String assistantReply) {
     int keep = Math.max(plugin.getConfig().getInt("global-conversation.history.max-scenes", 2), 0);
     if (keep == 0) {
@@ -1628,7 +1838,13 @@ public final class ConversationManager {
     List<ChatMessage> compactMemory = idleScene
         ? List.of()
         : List.copyOf(source.subList(start, source.size()));
-    sceneHistory.addLast(new SceneMemory(compactMemory, assistantReply == null ? "" : assistantReply));
+    boolean wikiContextUsed = scene.context() != null
+        && scene.context().locallyRetrievedWiki() != null
+        && !scene.context().locallyRetrievedWiki().isBlank();
+    sceneHistory.addLast(new SceneMemory(
+        compactMemory,
+        assistantReply == null ? "" : assistantReply,
+        wikiContextUsed));
     while (sceneHistory.size() > keep) {
       sceneHistory.removeFirst();
     }
@@ -1795,7 +2011,12 @@ public final class ConversationManager {
     }
   }
 
-  private record SceneMemory(List<ChatMessage> messages, String assistantReply) { }
+  private record SceneMemory(
+      List<ChatMessage> messages,
+      String assistantReply,
+      boolean wikiContextUsed) { }
+
+  private record WikiQuerySelection(PlayerChatMessage message, String rawQuery) { }
 
   private record WikiCandidate(String key, String description, String content, int score) { }
   private record WikiIndexEntry(

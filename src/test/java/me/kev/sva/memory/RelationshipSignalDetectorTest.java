@@ -3,6 +3,7 @@ package me.kev.sva.memory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +40,24 @@ final class RelationshipSignalDetectorTest {
 
     assertNotNull(update);
     assertEquals(-1, update.delta());
+  }
+
+  @Test
+  void greetingsAndRelationshipMetaQuestionsAreBookkeepingNeutral() {
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("holaa iso"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("iso pq me tratas asi?"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("queee :c"));
+  }
+
+  @Test
+  void realComplimentIsNotNeutralAndGetsLocalSignal() {
+    assertNotNull(RelationshipSignalDetector.detect(
+        "En3Minutos", "iso, como esta la chica mas linda del server?"));
+  }
+
+  @Test
+  void genericTierTextIsNotAcceptedAsMemorySummary() {
+    assertTrue(RelationshipSignalDetector.isGenericMemorySummary("Confianza y afecto profundos"));
   }
 
   @Test

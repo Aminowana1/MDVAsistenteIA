@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.7.5 - Romance continuity + group-action binding hotfix
+
+- Formal romance proposals now recognize natural variants such as `aceptas ser mi novia?`, `aceptarias ser mi pareja?` and `te pregunte si querias ser mi novia`.
+- Eligible formal proposals must receive a decisive yes/no instead of repeated `asi de golpe?` / `estas seguro?` stalling. If the model still stalls, a short RAM-only pending proposal keeps the question alive for follow-ups such as `cual es tu respuesta?`.
+- A clear accepting follow-up can complete romance locally even if GPT omits `r`; Java still enforces minimum score, explicit/pending proposal authority, visible acceptance and the global partner cap.
+- Relationship context now includes a tiny global partner roster, so Isolda cannot forget an existing partner merely because that player is absent from the current scene.
+- Direct `quien es tu pareja/novio/novia?` questions receive a Java factual guard backed by persisted romance state, preventing contradictory `no tengo pareja` replies.
+- Partner behavior now has `happy`, `strained` and `critical` score bands. Lowering a current partner to 30 or -10 therefore changes the romantic tone without automatically deleting the relationship.
+- Lightning requests are bound locally to the player/target that actually requested the action. In mixed scenes, a model call aimed at the wrong participant is corrected when Java can resolve one authorized target.
+- Exact repeated replies on SMART follow-ups are suppressed locally, fixing cases where a bare `xd` caused Isolda to repeat the previous sentence verbatim.
+- Relationship anti-drift now treats more meta/setup lines (`como te llevas con`, `que sientes por`, `defiendeme`, `cual es tu respuesta`, etc.) as non-scoring unless the current message itself contains a genuine social signal.
+- Keeps all 1.7.4 journal truthfulness, wiki gating, parser recovery, SQLite persistence and one-model-call architecture. No extra AI request was added.
+
+
+## 1.7.3 - Wiki follow-up continuity + parser/debug cleanup
+
+- Fixed ambiguous wiki follow-ups such as `y de donde consigo eso?` / `como se craftea?`: retrieval now reuses only the immediately previous same-speaker wiki scene as a local zero-token query seed.
+- Prevented obvious social small-talk such as `Iso como estas?` from selecting random wiki sections in large wikis.
+- Wiki debug now reports when a query was expanded from a follow-up or intentionally skipped.
+- Normalizes literal TAB characters before structured response parsing, preserving the safe plain-text fallback as a final guard.
+- History-only assistant messages no longer reparse visible chat as protocol, removing duplicate `Model relationship payload: []` debug lines.
+- No extra model requests were added; wiki continuation remains entirely local.
+
+
 ## 1.7.2 - Scene isolation + context reliability hotfix
 
 - Separates `pre-lookback` chat/events from the CURRENT scene. Old immediate context is now marked context-only and cannot be re-answered as if it were the new request.

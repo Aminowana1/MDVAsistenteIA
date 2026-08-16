@@ -60,6 +60,19 @@ final class RelationshipUpdateTest {
   }
 
   @Test
+  void acceptsCompactUpdateWhenOptionalRomanceFieldIsMissing() {
+    RelationshipUpdate update = RelationshipUpdate.parseCompact(
+        "En3Minutos|1|r|3|Le hizo un cumplido");
+
+    assertNotNull(update);
+    assertEquals("En3Minutos", update.playerName());
+    assertEquals(1, update.delta());
+    assertEquals("r", update.memoryKind());
+    assertEquals("Le hizo un cumplido", update.memory());
+    assertEquals("", update.romanceAction());
+  }
+
+  @Test
   void rejectsMalformedCompactUpdate() {
     assertNull(RelationshipUpdate.parseCompact("Kroattan|1|r"));
     assertNull(RelationshipUpdate.parseCompact("Kroattan|not-a-number|r|2|x|-"));

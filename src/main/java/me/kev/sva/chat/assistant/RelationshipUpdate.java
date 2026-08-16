@@ -27,7 +27,10 @@ public record RelationshipUpdate(
   public static RelationshipUpdate parseCompact(String raw) {
     if (raw == null || raw.isBlank()) return null;
     String[] parts = raw.split("\\|", -1);
-    if (parts.length < 6) return null;
+    // Small models sometimes omit the optional trailing ROMANCE field (or both
+    // optional MEMORY/ROMANCE fields). The first four fields are enough to validate
+    // the bookkeeping safely; missing optional values default to none.
+    if (parts.length < 4) return null;
 
     String player = parts[0].trim();
     if (player.isBlank()) return null;
@@ -41,8 +44,8 @@ public record RelationshipUpdate(
         delta,
         parts[2],
         importance,
-        parts[4],
-        parts[5]);
+        parts.length >= 5 ? parts[4] : "",
+        parts.length >= 6 ? parts[5] : "");
   }
 
   public static RelationshipUpdate parseMap(Map<?, ?> map) {
@@ -82,6 +85,8 @@ public record RelationshipUpdate(
     if (memory.equals("-") || memory.equalsIgnoreCase("none") || memory.equalsIgnoreCase("null")) memory = "";
 
     String romance = rawRomance == null ? "" : rawRomance.trim().toLowerCase(Locale.ROOT);
+    // Small models often append punctuation (`partner.`, `-.`) even inside compact r.
+    romance = romance.replaceAll("[^\\p{L}+-]+", "");
     if (romance.equals("begin") || romance.equals("accept") || romance.equals("partner")) romance = "start";
     if (romance.equals("breakup") || romance.equals("break-up") || romance.equals("stop")) romance = "end";
     if (!romance.equals("start") && !romance.equals("end")) romance = "";

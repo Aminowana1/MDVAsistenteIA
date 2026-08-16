@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.2 - RELATIONSHIPS / SOCIAL MEMORY
+# SERVER ASSISTANT 1.7.5 - RELATIONSHIPS / SOCIAL MEMORY
 # ============================================================
 # This file controls Isolda's persistent relationship system.
 # Relationship data itself is stored in relationships.db; this YAML contains only rules.
 # Missing keys are added automatically without replacing your edits.
-config-version: 2
+config-version: 3
 
 enabled: true
 
@@ -70,6 +70,22 @@ romance:
   # visible reply clearly accepts it.
   require-explicit-proposal: true
   require-visible-acceptance: true
+
+  # If the model stalls instead of saying yes/no, Java remembers the unresolved
+  # formal proposal for a short RAM-only window so "cual es tu respuesta?" keeps context.
+  pending-proposal-seconds: 120
+
+  # Partner-specific relationship health. These replace the generic partner behavior
+  # when present, so a low score no longer behaves like a perfectly happy romance.
+  behaviors:
+    happy:
+      min: 75
+      behavior: "Es tu pareja y la relacion esta muy bien. Hay carino, confianza, complicidad y coqueteo natural, pero no conviertas cada mensaje en romance ni pierdas tu personalidad."
+    strained:
+      min: 25
+      behavior: "Sigue siendo tu pareja, pero la relacion se ha enfriado o esta desgastada. Hay afecto, pero menos paciencia y menos muestras constantes de carino; pueden existir dudas, roces o distancia sin fingir que todo esta perfecto."
+    critical:
+      behavior: "Sigue siendo oficialmente tu pareja, pero la relacion esta seriamente deteriorada. Hay poca confianza, tension o resentimiento; se mas fria o confrontativa y puedes plantearte terminar si la situacion lo justifica. No actues como una pareja feliz."
 
   # Extra behavior layered on top of the normal score tier only for real partners.
   # If their score later drops, the tier still controls whether the relationship

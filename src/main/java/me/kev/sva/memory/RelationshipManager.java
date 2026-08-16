@@ -52,6 +52,10 @@ public final class RelationshipManager {
   private final Map<String, UUID> nameIndex = new HashMap<>();
   private final Map<UUID, Deque<DeltaStamp>> positiveRecent = new HashMap<>();
   private final Map<UUID, Deque<DeltaStamp>> negativeRecent = new HashMap<>();
+  // Short-lived unresolved formal proposals. This is RAM-only conversational state,
+  // not a relationship fact; it exists only so a follow-up like "cual es tu respuesta"
+  // cannot forget the proposal one scene later.
+  private final Map<UUID, Long> pendingRomanceProposals = new HashMap<>();
   // Blocks stale in-flight scene results from recreating data after an admin purge.
   // The marker is cleared only by a genuinely new player observation (join/chat).
   private final Set<UUID> purgedUntilNextObservation = new HashSet<>();
@@ -127,7 +131,19 @@ public final class RelationshipManager {
     int maxChars = Math.max(config().getInt("context.max-chars", 1800), 400);
     long now = System.currentTimeMillis();
 
+    prunePendingRomanceProposals(now);
     StringBuilder out = new StringBuilder();
+    int maxPartners = Math.max(config().getInt("romance.max-partners", 0), 0);
+    if (maxPartners > 0) {
+      List<String> partnerNames = profiles.values().stream()
+          .filter(profile -> profile.romantic)
+          .map(profile -> profile.lastName)
+          .sorted(String.CASE_INSENSITIVE_ORDER)
+          .toList();
+      out.append("romance_global partners=")
+          .append(partnerNames.isEmpty() ? "none" : String.join(",", partnerNames))
+          .append(" count=").append(partnerNames.size()).append('/').append(maxPartners).append('\n');
+    }
     int count = 0;
     for (Map.Entry<UUID, String> entry : relevant.entrySet()) {
       if (count++ >= maxPlayers) break;
@@ -148,9 +164,14 @@ public final class RelationshipManager {
         out.append("behavior=").append(compact(tier.behavior, 220)).append('\n');
       }
       if (profile.romantic) {
-        String partnerBehavior = config().getString("romance.partner-behavior", "");
+        String romanceState = romanceState(profile.score);
+        out.append("romance_state=").append(romanceState).append('\n');
+        String stateBehavior = config().getString("romance.behaviors." + romanceState + ".behavior", "");
+        String partnerBehavior = stateBehavior == null || stateBehavior.isBlank()
+            ? config().getString("romance.partner-behavior", "")
+            : stateBehavior;
         if (partnerBehavior != null && !partnerBehavior.isBlank()) {
-          out.append("romance_behavior=").append(compact(partnerBehavior, 260)).append('\n');
+          out.append("romance_behavior=").append(compact(partnerBehavior, 280)).append('\n');
         }
       } else if ("capacity-full".equals(romance.reason)) {
         String fullBehavior = config().getString("romance.capacity-full-behavior", "");
@@ -167,6 +188,10 @@ public final class RelationshipManager {
         if (disabledBehavior != null && !disabledBehavior.isBlank()) {
           out.append("romance_rule=").append(compact(disabledBehavior, 220)).append('\n');
         }
+      }
+
+      if (hasPendingRomanceProposal(profile.uuid, now)) {
+        out.append("pending_romance_proposal=true rule=Ya te propuso formalizar la relacion y aun no diste una respuesta definitiva. Responde si o no con claridad; no vuelvas a aplazar la decision.\n");
       }
 
       pruneExpiredMemoriesFor(profile.uuid, now, true);
@@ -214,7 +239,14 @@ public final class RelationshipManager {
         }
       }
     }
+    long proposalNow = System.currentTimeMillis();
+    prunePendingRomanceProposals(proposalNow);
     boolean visiblePartnershipAcceptance = RelationshipSignalDetector.replyClearlyAcceptsPartnership(assistantReply);
+    boolean visiblePartnershipRejection = RelationshipSignalDetector.replyClearlyRejectsPartnership(assistantReply);
+    Set<UUID> proposalAuthority = new HashSet<>(explicitPartnershipProposals);
+    for (UUID playerId : speakers.values().stream().map(message -> message.playerId).toList()) {
+      if (hasPendingRomanceProposal(playerId, proposalNow)) proposalAuthority.add(playerId);
+    }
 
     Map<UUID, RelationshipUpdate> localSignals = new LinkedHashMap<>();
     if (config().getBoolean("updates.local-fallback.enabled", true) && currentMessages != null) {
@@ -258,45 +290,84 @@ public final class RelationshipManager {
         modelHandled.add(speaker.playerId);
         RelationshipUpdate effective = mergeWithLocalSignal(requested, localSignals.get(speaker.playerId));
         if ((effective.romanceAction() == null || effective.romanceAction().isBlank())
-            && explicitPartnershipProposals.contains(speaker.playerId)
+            && proposalAuthority.contains(speaker.playerId)
             && visiblePartnershipAcceptance) {
           effective = new RelationshipUpdate(
               effective.playerName(), effective.delta(), effective.memoryKind(), effective.importance(),
               effective.memory(), "start");
         }
         if (applyOne(effective, speaker, "model",
-            explicitPartnershipProposals.contains(speaker.playerId), visiblePartnershipAcceptance)) applied++;
+            proposalAuthority.contains(speaker.playerId), visiblePartnershipAcceptance)) applied++;
       }
     }
 
-    if (applied >= maxUpdates || !config().getBoolean("updates.local-fallback.enabled", true)) return;
+    if (applied < maxUpdates && config().getBoolean("updates.local-fallback.enabled", true)) {
+      // Scan newest-to-oldest so a trigger such as a bare "isolda?" can still pick up
+      // the meaningful line just before it (for example "quieres tener una cita?").
+      List<ChatMessage> reversed = currentMessages == null ? List.of() : new ArrayList<>(currentMessages);
+      java.util.Collections.reverse(reversed);
+      Set<UUID> fallbackTried = new HashSet<>();
+      for (ChatMessage message : reversed) {
+        if (applied >= maxUpdates) break;
+        if (!(message instanceof PlayerChatMessage speaker)) continue;
+        if (relationshipEligiblePlayerIds == null || relationshipEligiblePlayerIds.isEmpty()
+            || !relationshipEligiblePlayerIds.contains(speaker.playerId)) continue;
+        if (modelHandled.contains(speaker.playerId) || !fallbackTried.add(speaker.playerId)) continue;
+        if (purgedUntilNextObservation.contains(speaker.playerId)) continue;
 
-    // Scan newest-to-oldest so a trigger such as a bare "isolda?" can still pick up
-    // the meaningful line just before it (for example "quieres tener una cita?").
-    List<ChatMessage> reversed = currentMessages == null ? List.of() : new ArrayList<>(currentMessages);
-    java.util.Collections.reverse(reversed);
-    Set<UUID> fallbackTried = new HashSet<>();
-    for (ChatMessage message : reversed) {
-      if (applied >= maxUpdates) break;
-      if (!(message instanceof PlayerChatMessage speaker)) continue;
-      if (relationshipEligiblePlayerIds == null || relationshipEligiblePlayerIds.isEmpty()
-          || !relationshipEligiblePlayerIds.contains(speaker.playerId)) continue;
-      if (modelHandled.contains(speaker.playerId) || !fallbackTried.add(speaker.playerId)) continue;
-      if (purgedUntilNextObservation.contains(speaker.playerId)) continue;
+        RelationshipUpdate fallback = localSignals.get(speaker.playerId);
+        if (fallback == null) {
+          fallbackTried.remove(speaker.playerId);
+          continue;
+        }
+        if (proposalAuthority.contains(speaker.playerId)
+            && visiblePartnershipAcceptance) {
+          fallback = new RelationshipUpdate(
+              fallback.playerName(), fallback.delta(), "p", Math.max(4, fallback.importance()),
+              "Acordaron iniciar una relacion romantica", "start");
+        }
+        if (applyOne(fallback, speaker, "local-fallback",
+            proposalAuthority.contains(speaker.playerId), visiblePartnershipAcceptance)) applied++;
+      }
+    }
 
-      RelationshipUpdate fallback = localSignals.get(speaker.playerId);
-      if (fallback == null) {
-        fallbackTried.remove(speaker.playerId);
-        continue;
+    // If a pending proposal is finally answered with a clear yes but the small model
+    // forgets to emit r, complete the romance locally for the latest eligible speaker.
+    if (visiblePartnershipAcceptance && applied < maxUpdates) {
+      List<ChatMessage> newestFirst = currentMessages == null ? List.of() : new ArrayList<>(currentMessages);
+      java.util.Collections.reverse(newestFirst);
+      for (ChatMessage message : newestFirst) {
+        if (!(message instanceof PlayerChatMessage speaker)) continue;
+        if (!proposalAuthority.contains(speaker.playerId)) continue;
+        if (relationshipEligiblePlayerIds == null || !relationshipEligiblePlayerIds.contains(speaker.playerId)) continue;
+        Profile profile = profile(speaker.playerId, speaker.playerName);
+        if (profile.romantic) break;
+        RelationshipUpdate accepted = new RelationshipUpdate(
+            speaker.playerName, 0, "p", 4, "Acordaron iniciar una relacion romantica", "start");
+        if (applyOne(accepted, speaker, "romance-acceptance-fallback", true, true)) applied++;
+        break;
       }
-      if (explicitPartnershipProposals.contains(speaker.playerId)
-          && visiblePartnershipAcceptance) {
-        fallback = new RelationshipUpdate(
-            fallback.playerName(), fallback.delta(), "p", Math.max(4, fallback.importance()),
-            "Acordaron iniciar una relacion romantica", "start");
+    }
+
+    // Keep only genuinely unresolved, currently eligible formal proposals. A clear yes/no
+    // resolves the pending state; a manual/automatic partnership also resolves it.
+    for (UUID playerId : explicitPartnershipProposals) {
+      Profile profile = profiles.get(playerId);
+      if (profile == null || profile.romantic || visiblePartnershipAcceptance || visiblePartnershipRejection
+          || !romanceAvailability(profile).allowed) {
+        pendingRomanceProposals.remove(playerId);
+      } else {
+        long ttl = Math.max(config().getLong("romance.pending-proposal-seconds", 120L), 15L) * 1000L;
+        pendingRomanceProposals.put(playerId, proposalNow + ttl);
       }
-      if (applyOne(fallback, speaker, "local-fallback",
-          explicitPartnershipProposals.contains(speaker.playerId), visiblePartnershipAcceptance)) applied++;
+    }
+    if (visiblePartnershipAcceptance || visiblePartnershipRejection) {
+      for (UUID playerId : proposalAuthority) {
+        Profile profile = profiles.get(playerId);
+        if (visiblePartnershipRejection || (profile != null && profile.romantic)) {
+          pendingRomanceProposals.remove(playerId);
+        }
+      }
     }
   }
 
@@ -317,11 +388,15 @@ public final class RelationshipManager {
     if (model == null) return local;
     if (local == null) return model;
 
-    int delta = model.delta() == 0 ? local.delta() : model.delta();
+    // For obvious local signals, Java owns the ordinary +/-1 magnitude. This stops
+    // a small model from turning a normal compliment/insult into a large swing while
+    // still letting the model handle nuanced interactions that have no local signal.
+    int delta = local.delta() != 0 ? local.delta() : model.delta();
     String kind = model.memoryKind();
     String memory = model.memory();
     int importance = model.importance();
-    if ((memory == null || memory.isBlank()) && local.memory() != null && !local.memory().isBlank()) {
+    if ((memory == null || memory.isBlank() || RelationshipSignalDetector.isGenericMemorySummary(memory))
+        && local.memory() != null && !local.memory().isBlank()) {
       kind = local.memoryKind();
       memory = local.memory();
       importance = Math.max(importance, local.importance());
@@ -341,6 +416,15 @@ public final class RelationshipManager {
     boolean logRejected = config().getBoolean("debug.log-rejected-updates", false);
     int maxAbs = Math.max(config().getInt("updates.max-absolute-delta", 5), 0);
     int delta = Math.max(-maxAbs, Math.min(maxAbs, requested.delta()));
+
+    boolean bookkeepingNeutral = RelationshipSignalDetector.isBookkeepingNeutral(speaker.content);
+    if (bookkeepingNeutral && !explicitPartnershipProposal) {
+      if (logRejected && (delta != 0 || (requested.memory() != null && !requested.memory().isBlank()))) {
+        plugin.getLogger().info("Relationship bookkeeping ignored for neutral/meta message from "
+            + profile.lastName + ": '" + compact(speaker.content, 90) + "'");
+      }
+      delta = 0;
+    }
 
     // Repetitive praise/insults should not allow instant farming. Positive and
     // negative directions have independent cooldowns and rolling hourly caps.
@@ -364,7 +448,12 @@ public final class RelationshipManager {
       rememberDelta(profile.uuid, Math.abs(delta), delta > 0, now);
     }
 
-    String memoryText = sanitizeMemory(requested.memory());
+    String memoryText = bookkeepingNeutral ? "" : sanitizeMemory(requested.memory());
+    if (RelationshipSignalDetector.isGenericMemorySummary(memoryText)) {
+      if (logRejected) plugin.getLogger().info(
+          "Rejected generic relationship memory for " + profile.lastName + ": '" + compact(memoryText, 90) + "'");
+      memoryText = "";
+    }
     MemoryKind memoryKind = parseMemoryKind(requested.memoryKind());
     int importance = Math.max(1, Math.min(5, requested.importance()));
     boolean memoryAdded = false;
@@ -409,7 +498,9 @@ public final class RelationshipManager {
     for (ChatMessage message : newestFirst) {
       if (!(message instanceof PlayerChatMessage speaker)) continue;
       if (!relationshipEligiblePlayerIds.contains(speaker.playerId)) continue;
-      if (!RelationshipSignalDetector.isExplicitPartnershipProposal(speaker.content)) continue;
+      boolean proposalAuthority = RelationshipSignalDetector.isExplicitPartnershipProposal(speaker.content)
+          || hasPendingRomanceProposal(speaker.playerId, System.currentTimeMillis());
+      if (!proposalAuthority) continue;
 
       Profile profile = profile(speaker.playerId, speaker.playerName);
       if (profile.romantic) return reply; // accepted legally in this scene or already partner.
@@ -427,9 +518,44 @@ public final class RelationshipManager {
         plugin.getLogger().info("Replaced illegal romance acceptance for " + profile.lastName
             + " reason=" + availability.reason);
       }
+      pendingRomanceProposals.remove(profile.uuid);
       return guarded.trim();
     }
     return reply;
+  }
+
+  /**
+   * Zero-token factual guard for direct questions about Isolda's current partner(s).
+   * The model still writes the normal reply, but a contradictory "no tengo pareja"
+   * can never override persisted relationship state.
+   */
+  public String guardPartnerFactReply(
+      String reply,
+      List<ChatMessage> currentMessages,
+      Set<UUID> relationshipEligiblePlayerIds) {
+    if (!enabled() || currentMessages == null || currentMessages.isEmpty()) return reply == null ? "" : reply;
+    PlayerChatMessage latestEligible = null;
+    for (int i = currentMessages.size() - 1; i >= 0; i--) {
+      ChatMessage message = currentMessages.get(i);
+      if (message instanceof PlayerChatMessage playerMessage
+          && relationshipEligiblePlayerIds != null
+          && relationshipEligiblePlayerIds.contains(playerMessage.playerId)) {
+        latestEligible = playerMessage;
+        break;
+      }
+    }
+    if (latestEligible == null || !RelationshipSignalDetector.isPartnerIdentityQuestion(latestEligible.content)) {
+      return reply == null ? "" : reply;
+    }
+
+    List<String> partners = profiles.values().stream()
+        .filter(profile -> profile.romantic)
+        .map(profile -> profile.lastName)
+        .sorted(String.CASE_INSENSITIVE_ORDER)
+        .toList();
+    if (partners.isEmpty()) return "no tengo pareja ahora";
+    if (partners.size() == 1) return "mi pareja es " + partners.get(0);
+    return "mis parejas son " + String.join(", ", partners);
   }
 
   public boolean shouldIgnoreDirectMessage(Player player, String content) {
@@ -520,7 +646,9 @@ public final class RelationshipManager {
     long recent = list.stream().filter(m -> m.kind == MemoryKind.RECENT && !m.expired(System.currentTimeMillis())).count();
     RomanceAvailability romance = romanceAvailability(profile);
     return profile.lastName + " score=" + profile.score + " tier=" + tierFor(profile.score).id
-        + " romance=" + profile.romantic + " romance_status=" + romance.reason
+        + " romance=" + profile.romantic
+        + (profile.romantic ? " romance_state=" + romanceState(profile.score) : "")
+        + " romance_status=" + romance.reason
         + " partners=" + romance.currentPartners + "/" + romance.maxPartners
         + " memories=" + persistent + "P/" + recent + "R";
   }
@@ -548,6 +676,7 @@ public final class RelationshipManager {
       if (online == null) return false;
       profile = profile(uuid, online.getName());
     }
+    pendingRomanceProposals.remove(uuid);
     profile.score = clampScore(score);
     profile.updatedAt = System.currentTimeMillis();
     persistProfile(profile);
@@ -569,6 +698,7 @@ public final class RelationshipManager {
       profile = profile(uuid, online.getName());
     }
 
+    pendingRomanceProposals.remove(uuid);
     if (romantic) {
       if (profile.romantic) return profile.lastName + " is already a romantic partner.";
       RomanceAvailability availability = romanceAvailability(profile);
@@ -624,6 +754,7 @@ public final class RelationshipManager {
     List<Memory> removedMemories = memories.remove(uuid);
     positiveRecent.remove(uuid);
     negativeRecent.remove(uuid);
+    pendingRomanceProposals.remove(uuid);
     purgedUntilNextObservation.add(uuid);
     if (removed != null) nameIndex.remove(removed.lastName.toLowerCase(Locale.ROOT));
 
@@ -817,6 +948,30 @@ public final class RelationshipManager {
     profile.romantic = true;
     profile.updatedAt = now;
     return true;
+  }
+
+  private String romanceState(int score) {
+    int happyMin = config().getInt("romance.behaviors.happy.min", 75);
+    int strainedMin = config().getInt("romance.behaviors.strained.min", 25);
+    if (happyMin < strainedMin) happyMin = strainedMin;
+    if (score >= happyMin) return "happy";
+    if (score >= strainedMin) return "strained";
+    return "critical";
+  }
+
+  private boolean hasPendingRomanceProposal(UUID playerId, long now) {
+    if (playerId == null) return false;
+    Long until = pendingRomanceProposals.get(playerId);
+    if (until == null) return false;
+    if (until < now) {
+      pendingRomanceProposals.remove(playerId);
+      return false;
+    }
+    return true;
+  }
+
+  private void prunePendingRomanceProposals(long now) {
+    pendingRomanceProposals.entrySet().removeIf(entry -> entry.getValue() == null || entry.getValue() < now);
   }
 
   private boolean canStartRomance(Profile profile) {

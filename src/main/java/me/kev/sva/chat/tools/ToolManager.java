@@ -490,16 +490,30 @@ public final class ToolManager {
       }
       processed++;
 
-      if (!isModelCallAuthorized(tool, parsed.arguments(), currentActionText)) {
+      String authorizedArguments = parsed.arguments();
+      if ("lightning".equals(tool.name)) {
+        authorizedArguments = resolveAuthorizedLightningTarget(currentActionText, parsed.arguments());
+        if (authorizedArguments == null) {
+          anyRejected = true;
+          plugin.getLogger().warning("Ignored stale/policy-blocked AI tool call: " + call);
+          continue;
+        }
+        if (!authorizedArguments.equalsIgnoreCase(parsed.arguments() == null ? "" : parsed.arguments().trim())) {
+          plugin.getLogger().info("Corrected lightning target from model '" + parsed.arguments()
+              + "' to current requester target '" + authorizedArguments + "'.");
+        }
+      }
+
+      if (!isModelCallAuthorized(tool, authorizedArguments, currentActionText)) {
         anyRejected = true;
         plugin.getLogger().warning("Ignored stale/policy-blocked AI tool call: " + call);
         continue;
       }
 
       if (tool.activation() == ToolActivation.ASK) {
-        queueApproval(tool, parsed.arguments(), call);
+        queueApproval(tool, authorizedArguments, tool.name + " " + authorizedArguments);
       } else {
-        executeAndLog(tool, parsed.arguments(), "AI");
+        executeAndLog(tool, authorizedArguments, "AI");
       }
       anyAccepted = true;
     }
@@ -523,7 +537,70 @@ public final class ToolManager {
       return isMuteEligible(arguments);
     }
 
-    return hasCurrentActionIntent(tool.name, text);
+    if (!hasCurrentActionIntent(tool.name, text)) return false;
+    if ("lightning".equals(tool.name)) {
+      Set<String> targets = authorizedLightningTargets(currentActionText);
+      return arguments != null && targets.stream().anyMatch(name -> name.equalsIgnoreCase(arguments.trim()));
+    }
+    return true;
+  }
+
+  private String resolveAuthorizedLightningTarget(String currentActionText, String modelArgument) {
+    Set<String> targets = authorizedLightningTargets(currentActionText);
+    if (targets.isEmpty()) return null;
+
+    String requested = modelArgument == null ? "" : modelArgument.trim();
+    if (!requested.isBlank()) {
+      for (String target : targets) {
+        if (target.equalsIgnoreCase(requested)) return target;
+      }
+      List<String> prefix = targets.stream()
+          .filter(target -> target.toLowerCase(Locale.ROOT).startsWith(requested.toLowerCase(Locale.ROOT)))
+          .toList();
+      if (prefix.size() == 1) return prefix.get(0);
+    }
+
+    // In a mixed social scene GPT can bind "tirame" to the wrong participant.
+    // If Java can see exactly one currently authorized lightning target, correct it
+    // instead of executing on the wrong player or wasting the already-paid reply.
+    return targets.size() == 1 ? targets.iterator().next() : null;
+  }
+
+  private Set<String> authorizedLightningTargets(String currentActionText) {
+    LinkedHashSet<String> targets = new LinkedHashSet<>();
+    if (currentActionText == null || currentActionText.isBlank()) return targets;
+
+    for (String rawLine : currentActionText.split("\\R")) {
+      String line = rawLine == null ? "" : rawLine.trim();
+      if (line.isBlank()) continue;
+      String speaker = "";
+      String content = line;
+      if (line.startsWith("speaker=")) {
+        int separator = line.indexOf('|');
+        if (separator > 8) {
+          speaker = line.substring(8, separator).trim();
+          content = line.substring(separator + 1).trim();
+        }
+      }
+      String normalized = normalize(content);
+      if (!hasCurrentActionIntent("lightning", normalized)) continue;
+
+      LinkedHashSet<String> explicit = new LinkedHashSet<>();
+      for (Player online : plugin.getServer().getOnlinePlayers()) {
+        if (ContextTargetResolver.mentionsName(normalized, online.getName())) {
+          explicit.add(online.getName());
+        }
+      }
+      targets.addAll(explicit);
+
+      boolean selfWording = containsAny(normalized,
+          "tirame", "echame", "a mi", "ami", "sobre mi", "encima mio", "electrocutame");
+      if (!speaker.isBlank() && (explicit.isEmpty() || selfWording)) {
+        Player requester = plugin.getServer().getPlayerExact(speaker);
+        if (requester != null) targets.add(requester.getName());
+      }
+    }
+    return targets;
   }
 
   private boolean isMuteEligible(String requestedName) {

@@ -115,16 +115,38 @@ public final class ActivityJournal {
     KnownPlayer target = resolveTarget(normalized, requesterId);
     boolean playerHistory = target != null && looksLikePlayerHistoryQuestion(normalized);
 
-    // A named player wins over a broad-history interpretation, e.g. "que paso con
-    // Kroattan mientras no estuve" should return Kroattan's records, not everyone.
+    // A named player wins over a broad-history interpretation. If the question also
+    // says "mientras no estaba", constrain that player's history to the requester's
+    // actual disconnect->rejoin interval instead of silently using the last 2 hours.
     if (playerHistory) {
       if (!hasAccess(requesterAdmin, "activity-journal.access.player-history", "admin-only")) {
         return "[ACTIVITY JOURNAL] access=denied, scope=player. Esta consulta historica esta limitada a administradores.";
       }
-      long requestedWindow = parseRequestedWindowMs(normalized, defaultPlayerWindowMs());
-      long from = Math.max(now - requestedWindow, retentionStart(now));
-      String result = formatTargetHistory(target, from, now);
-      debug("scope=player target=" + target.name() + " window_ms=" + (now - from));
+
+      long from;
+      long to;
+      String basis;
+      if (generalSinceDisconnect) {
+        AbsenceWindow absence = absenceWindow(requesterId, requesterName, now);
+        if (absence == null) {
+          String result = "[ACTIVITY JOURNAL] scope=player, target=" + target.name()
+              + ", result=no_disconnect_marker. No hay una desconexion y regreso recientes registrados en esta sesion del plugin; no inventes lo que hizo durante esa ausencia.";
+          debug("scope=player target=" + target.name() + " result=no_disconnect_marker");
+          return result;
+        }
+        from = Math.max(absence.fromMs(), retentionStart(now));
+        to = absence.toMs();
+        basis = absence.inferredFromJournalStart()
+            ? "desde el inicio del journal en esta sesion hasta la conexion de " + safe(requesterName) + " (ventana parcial)"
+            : "durante la ultima ausencia registrada de " + safe(requesterName);
+      } else {
+        long requestedWindow = parseRequestedWindowMs(normalized, defaultPlayerWindowMs());
+        from = Math.max(now - requestedWindow, retentionStart(now));
+        to = now;
+        basis = "ultimos " + Math.max(1L, (to - from) / 60_000L) + " minutos";
+      }
+      String result = formatTargetHistory(target, from, to, basis);
+      debug("scope=player target=" + target.name() + " basis=" + basis + " window_ms=" + Math.max(0L, to - from));
       return result;
     }
 
@@ -134,22 +156,28 @@ public final class ActivityJournal {
       }
 
       long from;
+      long to;
       String basis;
       if (generalSinceDisconnect) {
-        Long disconnect = requesterId == null ? null : lastDisconnectAt.get(requesterId);
-        Long join = requesterId == null ? null : lastJoinAt.get(requesterId);
-        if (disconnect == null || (join != null && join < disconnect)) {
-          return "[ACTIVITY JOURNAL] scope=general, result=no_disconnect_marker. No hay una desconexion reciente registrada en esta sesion del plugin.";
+        AbsenceWindow absence = absenceWindow(requesterId, requesterName, now);
+        if (absence == null) {
+          String result = "[ACTIVITY JOURNAL] scope=general, result=no_disconnect_marker. No hay una desconexion y regreso recientes registrados en esta sesion del plugin; no reconstruyas ni inventes lo ocurrido durante esa ausencia.";
+          debug("scope=general result=no_disconnect_marker requester=" + safe(requesterName));
+          return result;
         }
-        from = Math.max(disconnect, retentionStart(now));
-        basis = "desde la ultima desconexion registrada de " + safe(requesterName);
+        from = Math.max(absence.fromMs(), retentionStart(now));
+        to = absence.toMs();
+        basis = absence.inferredFromJournalStart()
+            ? "desde el inicio del journal en esta sesion hasta la conexion de " + safe(requesterName) + " (ventana parcial)"
+            : "durante la ultima ausencia registrada de " + safe(requesterName);
       } else {
         long requestedWindow = parseRequestedWindowMs(normalized, defaultPlayerWindowMs());
         from = Math.max(now - requestedWindow, retentionStart(now));
-        basis = "ultimos " + Math.max(1L, (now - from) / 60_000L) + " minutos";
+        to = now;
+        basis = "ultimos " + Math.max(1L, (to - from) / 60_000L) + " minutos";
       }
-      String result = formatGeneralHistory(from, now, basis);
-      debug("scope=general basis=" + basis + " window_ms=" + (now - from));
+      String result = formatGeneralHistory(from, to, basis);
+      debug("scope=general basis=" + basis + " window_ms=" + Math.max(0L, to - from));
       return result;
     }
 
@@ -198,16 +226,17 @@ public final class ActivityJournal {
         + " generalAccess=" + accessMode("activity-journal.access.general-history", "admin-only");
   }
 
-  private String formatTargetHistory(KnownPlayer target, long from, long now) {
+  private String formatTargetHistory(KnownPlayer target, long from, long to, String basis) {
     List<ActivityRecord> matched = records.stream()
-        .filter(record -> record.timestampMs() >= from && record.timestampMs() <= now)
+        .filter(record -> record.timestampMs() >= from && record.timestampMs() <= to)
         .filter(record -> record.references(target.uuid(), normalize(target.name())))
         .toList();
 
     List<ActivityRecord> selected = selectRecords(matched, true);
     StringBuilder out = new StringBuilder("[ACTIVITY JOURNAL]\n")
         .append("scope=player, target=").append(target.name())
-        .append(", window_minutes=").append(Math.max(1L, (now - from) / 60_000L))
+        .append(", basis=").append(basis)
+        .append(", window_minutes=").append(Math.max(1L, Math.max(0L, to - from) / 60_000L))
         .append(", matched=").append(matched.size())
         .append(", included=").append(selected.size()).append('\n');
     appendRecords(out, selected);
@@ -215,9 +244,9 @@ public final class ActivityJournal {
     return trimToConfiguredChars(out.toString());
   }
 
-  private String formatGeneralHistory(long from, long now, String basis) {
+  private String formatGeneralHistory(long from, long to, String basis) {
     List<ActivityRecord> matched = records.stream()
-        .filter(record -> record.timestampMs() >= from && record.timestampMs() <= now)
+        .filter(record -> record.timestampMs() >= from && record.timestampMs() <= to)
         .toList();
     List<ActivityRecord> selected = selectRecords(matched, true);
 
@@ -334,7 +363,8 @@ public final class ActivityJournal {
 
   private static boolean looksLikeSinceDisconnectQuestion(String text) {
     return containsAny(text,
-        "desde que me desconect", "mientras no estuve", "mientras no estaba", "cuando no estaba",
+        "desde que me desconect", "mientras no estuve", "mientras no estaba",
+        "mientras yo no estuve", "mientras yo no estaba", "cuando no estaba", "cuando yo no estaba",
         "mientras estaba fuera", "desde que me fui", "desde que sali", "desde mi ultima conexion",
         "desde mi ultima desconexion", "en mi ausencia", "que me perdi");
   }
@@ -343,6 +373,31 @@ public final class ActivityJournal {
     boolean timeHint = text.contains("ultima hora") || text.contains("ultimas horas")
         || text.contains("ultimos minutos") || DURATION_PATTERN.matcher(text).find();
     return timeHint && containsAny(text, "que paso", "que ha pasado", "que ocurrio", "que hicieron", "resumen");
+  }
+
+  /**
+   * Returns the last completed absence interval known to this in-memory journal.
+   * If the player first appears by joining after the journal already contains data,
+   * we can still safely summarize the RECORDED portion before that join. That partial
+   * window is explicitly labeled instead of pretending we know activity before the
+   * plugin started recording.
+   */
+  private AbsenceWindow absenceWindow(UUID requesterId, String requesterName, long now) {
+    if (requesterId == null) return null;
+    Long disconnect = lastDisconnectAt.get(requesterId);
+    Long join = lastJoinAt.get(requesterId);
+    if (join == null) return null;
+
+    long to = Math.min(join, now);
+    if (disconnect != null && join > disconnect) {
+      return new AbsenceWindow(disconnect, to, false);
+    }
+
+    ActivityRecord first = records.peekFirst();
+    if (first != null && first.timestampMs() < to) {
+      return new AbsenceWindow(first.timestampMs(), to, true);
+    }
+    return null;
   }
 
   private long parseRequestedWindowMs(String normalizedText, long fallback) {
@@ -450,6 +505,8 @@ public final class ActivityJournal {
   }
 
   private enum RecordKind { CHAT, EVENT }
+
+  private record AbsenceWindow(long fromMs, long toMs, boolean inferredFromJournalStart) { }
 
   private record KnownPlayer(UUID uuid, String name) { }
 
