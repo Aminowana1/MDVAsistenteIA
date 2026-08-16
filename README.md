@@ -1,20 +1,50 @@
-# ServerAssistant 1.6.9
+# ServerAssistant 1.7.0
 
-ServerAssistant 1.6.9 keeps the MDVCRAFT **single global conversation** design from 1.5 and merges the useful capabilities from the alternate ServerAssistant branch without restoring conversation slots or multi-request tool loops.
+ServerAssistant 1.7.0 keeps the MDVCRAFT **single global conversation** architecture and adds two bounded local-memory systems without creating a second AI request during normal conversation: a rolling activity journal and persistent per-player relationships/social memories.
 
-1.6.9 keeps the 1.6.8 identity context and 1.6.7/1.6.6 reliability fixes, then adds OpenAI prompt-cache-friendly request construction plus a pre-normalized local wiki index. The 4-second group-scene behavior, one normal model request per scene, action isolation, target-aware local context and moderation flow remain unchanged.
+The normal chat path stays economical: the activity journal costs zero prompt tokens unless a historical question is detected, while relationship changes are proposed inside the same compact `m`/`t`/`r` response Isolda already returns and are validated by Java before being stored.
 
+
+
+## 1.7.0 activity journal + relationships
+
+The rolling activity journal is RAM-only and bounded by `activity-journal.retention-minutes`, `max-records`, `max-context-records` and `max-context-chars`. It records public player chat plus trusted join/quit/kick/death/advancement events, but it is inserted into the AI prompt only for recognizable historical questions. Both history scopes start `admin-only` for safe testing and can be changed at runtime:
+
+```text
+/sva history status
+/sva history player admin-only
+/sva history player everyone
+/sva history general admin-only
+/sva history general everyone
+```
+
+Examples include `Iso, que paso con Kroattan en las ultimas 2 horas?` and `Iso, que paso mientras no estuve?`. The latter uses the requester's last disconnect marker from the current plugin/server session and is still capped by the configured retention window. A full server restart intentionally clears this rolling journal; relationship data does not.
+
+Relationships are stored in `relationships.db` with an in-RAM cache. Everyone begins at score `0` unless the YAML default is deliberately changed. `relationships.yml` controls score limits, anti-farming cooldowns, the maximum 8 persistent / 12 recent memories, recent-memory expiry, behavior tiers, enemy ignore chances, dynamic smart-follow-up windows, romance capacity and optional event reactions. `romance.max-partners: 0` disables romance completely by default. Spontaneous event reactions are also disabled by default because each firing intentionally consumes one normal AI request.
+
+Admin diagnostics/data controls:
+
+```text
+/sva relationship info <player|uuid>
+/sva relationship memories <player|uuid>
+/sva relationship set <player|uuid> <-100..100>
+/sva relationship purge <player|uuid>
+/sva data purge <player|uuid>
+```
+
+The purge command removes the relationship profile, stored memories, rolling activity attributable to the player and the plugin's small runtime conversation traces. Database deletion is serialized behind older writes so queued saves cannot restore data after the purge.
 
 ## Runtime reliability + modular integrations
 
-ServerAssistant now keeps configuration in four focused files:
+ServerAssistant now keeps configuration in five focused files:
 
 ```text
 plugins/ServerAssistant/
 ├── config.yml        # runtime, providers, scenes, tools, moderation, chat output
 ├── personality.yml   # Isolda character/tone prompt only
 ├── wiki.yml          # local retrieval settings + wiki entries
-└── integrations.yml  # optional external plugin profile hooks
+├── integrations.yml  # optional external plugin profile hooks
+└── relationships.yml # relationship scores, memories, romance and reactions
 ```
 
 `integrations.yml` is created automatically when upgrading. MMOCore and MDVSocial are independent soft integrations: they can be enabled/disabled without removing either plugin, and missing plugins are skipped safely. Profile context is local and read-only, so it does not add another AI request.
@@ -162,13 +192,13 @@ When a player becomes involved in a model scene, ServerAssistant automatically a
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-To release 1.6.9, for example, change only:
+For 1.7.0 the Maven version is:
 
 ```xml
-<version>1.6.9</version>
+<version>1.7.0</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.6.9.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.7.0.jar`.
 
 
 ### Reused GitHub repositories

@@ -9,6 +9,7 @@ CONFIG_PATHS = [
     RESOURCE_DIR / "personality.yml",
     RESOURCE_DIR / "wiki.yml",
     RESOURCE_DIR / "integrations.yml",
+    RESOURCE_DIR / "relationships.yml",
 ]
 
 

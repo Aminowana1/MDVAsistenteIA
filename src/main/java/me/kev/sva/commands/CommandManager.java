@@ -5,7 +5,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
+import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
@@ -25,6 +27,7 @@ public final class CommandManager implements TabExecutor {
       "death", "advancement", "join", "quit", "kick", "joinquit", "all");
   private static final List<String> ENABLE_OPTIONS = List.of("enabled", "disabled");
   private static final List<String> TOOL_ACTIVATIONS = List.of("smart", "ask", "never");
+  private static final List<String> ACCESS_MODES = List.of("everyone", "admin-only");
 
   private final ServerAssistantPlugin plugin;
 
@@ -54,6 +57,9 @@ public final class CommandManager implements TabExecutor {
       case "listener", "listen" -> handleListener(sender, args);
       case "tools", "tool" -> handleTools(sender, args);
       case "integrations", "integration" -> handleIntegrations(sender, args);
+      case "history", "journal" -> handleHistory(sender, args);
+      case "relationship", "relation", "rel" -> handleRelationship(sender, args);
+      case "data" -> handleData(sender, args);
       case "approve" -> handleApprove(sender, args);
       case "deny" -> handleDeny(sender, args);
       default -> sendHelp(sender);
@@ -262,6 +268,130 @@ public final class CommandManager implements TabExecutor {
     MessageSender.Error(sender, "Usage: /sva integrations [list|set <mmocore|mdvsocial|all> <enabled|disabled>]");
   }
 
+
+  private void handleHistory(CommandSender sender, String[] args) {
+    if (plugin.getActivityJournal() == null) {
+      MessageSender.Error(sender, "Activity journal is not initialized.");
+      return;
+    }
+    if (args.length == 1 || (args.length == 2 && args[1].equalsIgnoreCase("status"))) {
+      MessageSender.Success(sender, plugin.getActivityJournal().status());
+      return;
+    }
+    if (args.length == 3 && (args[1].equalsIgnoreCase("general") || args[1].equalsIgnoreCase("player"))) {
+      String mode = args[2].toLowerCase(Locale.ROOT);
+      if (!ACCESS_MODES.contains(mode)) {
+        MessageSender.Error(sender, "Access must be everyone or admin-only.");
+        return;
+      }
+      String scope = args[1].equalsIgnoreCase("general") ? "general-history" : "player-history";
+      plugin.getConfig().set("activity-journal.access." + scope, mode);
+      plugin.saveConfig();
+      MessageSender.Success(sender, "History " + args[1].toLowerCase(Locale.ROOT) + " access set to " + mode + ".");
+      return;
+    }
+    MessageSender.Error(sender, "Usage: /sva history [status|general <everyone|admin-only>|player <everyone|admin-only>]");
+  }
+
+  private void handleRelationship(CommandSender sender, String[] args) {
+    if (plugin.getRelationshipManager() == null) {
+      MessageSender.Error(sender, "Relationship manager is not initialized.");
+      return;
+    }
+    if (args.length < 2) {
+      MessageSender.Error(sender, "Usage: /sva relationship <info|memories|set|purge> ...");
+      return;
+    }
+    String action = args[1].toLowerCase(Locale.ROOT);
+    switch (action) {
+      case "info" -> {
+        if (args.length != 3) {
+          MessageSender.Error(sender, "Usage: /sva relationship info <player|uuid>");
+          return;
+        }
+        MessageSender.Success(sender, plugin.getRelationshipManager().info(args[2]));
+      }
+      case "memories" -> {
+        if (args.length != 3) {
+          MessageSender.Error(sender, "Usage: /sva relationship memories <player|uuid>");
+          return;
+        }
+        List<String> rows = plugin.getRelationshipManager().memorySummaries(args[2]);
+        MessageSender.Success(sender, rows.isEmpty() ? "No stored relationship memories." : String.join(" | ", rows));
+      }
+      case "set" -> {
+        if (args.length != 4) {
+          MessageSender.Error(sender, "Usage: /sva relationship set <player|uuid> <-100..100>");
+          return;
+        }
+        try {
+          int score = Integer.parseInt(args[3]);
+          if (!plugin.getRelationshipManager().setScore(args[2], score)) {
+            MessageSender.Error(sender, "Player not found in current relationship data/online players.");
+            return;
+          }
+          MessageSender.Success(sender, "Relationship score updated: " + plugin.getRelationshipManager().info(args[2]));
+        } catch (NumberFormatException ex) {
+          MessageSender.Error(sender, "Score must be a number.");
+        }
+      }
+      case "purge" -> {
+        if (args.length != 3) {
+          MessageSender.Error(sender, "Usage: /sva relationship purge <player|uuid>");
+          return;
+        }
+        purgePlayerData(sender, args[2]);
+      }
+      default -> MessageSender.Error(sender, "Usage: /sva relationship <info|memories|set|purge> ...");
+    }
+  }
+
+  private void handleData(CommandSender sender, String[] args) {
+    if (args.length == 3 && args[1].equalsIgnoreCase("purge")) {
+      purgePlayerData(sender, args[2]);
+      return;
+    }
+    MessageSender.Error(sender, "Usage: /sva data purge <player|uuid>");
+  }
+
+  private void purgePlayerData(CommandSender sender, String token) {
+    UUID uuid = plugin.getRelationshipManager() == null ? null : plugin.getRelationshipManager().resolve(token);
+    if (uuid == null && plugin.getActivityJournal() != null) {
+      uuid = plugin.getActivityJournal().resolveKnownPlayer(token);
+    }
+    if (uuid == null) {
+      try {
+        UUID parsed = UUID.fromString(token);
+        if (Bukkit.getPlayer(parsed) != null) uuid = parsed;
+      } catch (IllegalArgumentException ignored) {
+      }
+    }
+    if (uuid == null) {
+      var online = Bukkit.getPlayerExact(token);
+      if (online != null) uuid = online.getUniqueId();
+    }
+    if (uuid == null) {
+      MessageSender.Error(sender, "Player not found in relationship/activity data.");
+      return;
+    }
+
+    String name = plugin.getRelationshipManager() == null ? "" : plugin.getRelationshipManager().lastKnownName(uuid);
+    if ((name == null || name.isBlank()) && plugin.getActivityJournal() != null) {
+      name = plugin.getActivityJournal().knownName(uuid);
+    }
+    var online = Bukkit.getPlayer(uuid);
+    if ((name == null || name.isBlank()) && online != null) name = online.getName();
+
+    boolean persistentRemoved = plugin.getRelationshipManager() != null && plugin.getRelationshipManager().purge(uuid);
+    if (plugin.getActivityJournal() != null) plugin.getActivityJournal().purgePlayer(uuid, name);
+    if (plugin.getConversationManager() != null) plugin.getConversationManager().purgePlayerFromRuntime(uuid, name);
+
+    MessageSender.Success(sender, "Purged new ServerAssistant data for "
+        + (name == null || name.isBlank() ? uuid : name)
+        + " (relationship/memories=" + (persistentRemoved ? "removed" : "none")
+        + ", activity/runtime=removed)." );
+  }
+
   private void handleApprove(CommandSender sender, String[] args) {
     if (args.length != 2) {
       MessageSender.Error(sender, "Usage: /sva approve <id>");
@@ -290,7 +420,7 @@ public final class CommandManager implements TabExecutor {
 
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(Component.text(
-        "SVA: /sva reload | status | trigger | listener playerchat <mode> | listener events <event> <enabled|disabled> | listener idle <enabled|disabled> | tools [list|pending|moderation|set|run] | integrations [list|set] | approve <id> | deny <id>"));
+        "SVA: /sva reload | status | trigger | listener ... | history [status|general|player] | relationship <info|memories|set|purge> | data purge <player> | tools ... | integrations ... | approve/deny"));
   }
 
   @Override
@@ -300,7 +430,7 @@ public final class CommandManager implements TabExecutor {
     }
     if (args.length == 1) {
       return complete(args[0], List.of(
-          "reload", "status", "trigger", "listener", "listen", "playerchatmode", "tools", "integrations", "approve", "deny"));
+          "reload", "status", "trigger", "listener", "listen", "playerchatmode", "history", "relationship", "data", "tools", "integrations", "approve", "deny"));
     }
     if (args.length == 2 && args[0].equalsIgnoreCase("playerchatmode")) {
       return complete(args[1], MODES);
@@ -330,6 +460,24 @@ public final class CommandManager implements TabExecutor {
     if (args.length == 4 && (args[0].equalsIgnoreCase("integrations") || args[0].equalsIgnoreCase("integration"))
         && args[1].equalsIgnoreCase("set")) {
       return complete(args[3], ENABLE_OPTIONS);
+    }
+    if (args.length == 2 && (args[0].equalsIgnoreCase("history") || args[0].equalsIgnoreCase("journal"))) {
+      return complete(args[1], List.of("status", "general", "player"));
+    }
+    if (args.length == 3 && (args[0].equalsIgnoreCase("history") || args[0].equalsIgnoreCase("journal"))
+        && (args[1].equalsIgnoreCase("general") || args[1].equalsIgnoreCase("player"))) {
+      return complete(args[2], ACCESS_MODES);
+    }
+    if (args.length == 2 && (args[0].equalsIgnoreCase("relationship") || args[0].equalsIgnoreCase("relation") || args[0].equalsIgnoreCase("rel"))) {
+      return complete(args[1], List.of("info", "memories", "set", "purge"));
+    }
+    if (args.length == 2 && args[0].equalsIgnoreCase("data")) {
+      return complete(args[1], List.of("purge"));
+    }
+    if (args.length == 3 && ((args[0].equalsIgnoreCase("relationship") || args[0].equalsIgnoreCase("relation") || args[0].equalsIgnoreCase("rel"))
+        && List.of("info", "memories", "set", "purge").contains(args[1].toLowerCase(Locale.ROOT))
+        || (args[0].equalsIgnoreCase("data") && args[1].equalsIgnoreCase("purge")))) {
+      return complete(args[2], Bukkit.getOnlinePlayers().stream().map(player -> player.getName()).toList());
     }
     if (args.length == 2 && (args[0].equalsIgnoreCase("tools") || args[0].equalsIgnoreCase("tool"))) {
       return complete(args[1], List.of("list", "pending", "moderation", "set", "run"));

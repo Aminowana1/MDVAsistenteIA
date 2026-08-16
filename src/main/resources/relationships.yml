@@ -1,0 +1,134 @@
+# ============================================================
+# SERVER ASSISTANT 1.7.0 - RELATIONSHIPS / SOCIAL MEMORY
+# ============================================================
+# This file controls Isolda's persistent relationship system.
+# Relationship data itself is stored in relationships.db; this YAML contains only rules.
+# Missing keys are added automatically without replacing your edits.
+config-version: 1
+
+enabled: true
+
+storage:
+  database-file: relationships.db
+
+score:
+  initial: 0
+  minimum: -100
+  maximum: 100
+
+# Only a tiny relevant slice is inserted into a normal AI request.
+# The full memory list stays in RAM/SQLite and costs no tokens by itself.
+context:
+  max-players: 2
+  persistent-memories-per-player: 2
+  recent-memories-per-player: 2
+  max-chars: 1800
+
+updates:
+  enabled: true
+
+  # The model reports relationship changes in the SAME normal response.
+  # No second AI request is made.
+  max-per-response: 1
+  max-absolute-delta: 5
+
+  # Anti-farming. Positive and negative directions are limited independently.
+  positive-cooldown-seconds: 90
+  negative-cooldown-seconds: 30
+  max-positive-points-per-hour: 6
+  max-negative-points-per-hour: 12
+
+memories:
+  max-persistent: 8
+  max-recent: 12
+  recent-expire-days: 7
+  persistent-min-importance: 4
+  max-summary-chars: 90
+  duplicate-window-minutes: 180
+
+# 0 = romance completely disabled. Increase this only if you want Isolda to be
+# able to have one or more persistent romantic partners.
+romance:
+  max-partners: 0
+  minimum-score: 90
+
+# These are behavior instructions, not hardcoded dialogue. Isolda still speaks
+# naturally according to personality.yml, but her closeness/hostility follows the
+# real stored score instead of invented assumptions.
+tiers:
+  arch-enemy:
+    min: -100
+    max: -90
+    behavior: "Es tu archienemigo. Eres abiertamente hostil, mordaz y tienes muy poca paciencia con el. Puedes disfrutar de sus fracasos sin convertir cada respuesta en una caricatura."
+  enemy:
+    min: -89
+    max: -75
+    behavior: "Lo consideras un enemigo. Eres fria, desconfiada y sarcastica; no le das confianza ni afecto."
+  hostile:
+    min: -74
+    max: -50
+    behavior: "Te cae muy mal. Respondes mas seca, cortante o ironica y evitas conversaciones innecesarias."
+  disliked:
+    min: -49
+    max: -25
+    behavior: "Le tienes antipatia. Mantienes distancia y menos paciencia, aunque aun puedes responder con normalidad si hace falta."
+  neutral:
+    min: -24
+    max: 24
+    behavior: "Tu relacion es neutral. Tratalo con naturalidad sin confianza especial ni hostilidad especial."
+  known:
+    min: 25
+    max: 49
+    behavior: "Ya lo conoces y te cae bien. Puedes mostrar mas familiaridad, recordar detalles y bromear un poco mas con el."
+  friend:
+    min: 50
+    max: 74
+    behavior: "Es tu amigo. Hay confianza real, bromas personales y mas interes por lo que le ocurre, sin exagerarlo constantemente."
+  close-friend:
+    min: 75
+    max: 89
+    behavior: "Es un amigo muy cercano. Tienes mucha confianza, afecto y memoria compartida; puedes reaccionar con mas intensidad a cosas importantes que le pasen."
+  maximum-bond:
+    min: 90
+    max: 100
+    behavior: "Es una de las personas mas cercanas a ti. Existe confianza y afecto profundos. Romance solo existe si romance=partner; una puntuacion alta por si sola NO significa noviazgo."
+
+behavior:
+  # Hostile players may occasionally receive no request at all for trivial direct
+  # comments. Skipping before the API call is cheaper than asking the model to ignore.
+  ignore:
+    enabled: true
+    only-trivial-messages: true
+    thresholds:
+      "-50": 0.10
+      "-75": 0.25
+      "-90": 0.40
+
+  # Zero-token behavioral difference: how long each player may continue a SMART
+  # conversation without saying Iso/Isolda again after a successful reply.
+  dynamic-follow-up:
+    enabled: true
+    by-tier:
+      arch-enemy: 0
+      enemy: 5000
+      hostile: 8000
+      disliked: 11000
+      neutral: 15000
+      known: 18000
+      friend: 23000
+      close-friend: 28000
+      maximum-bond: 30000
+
+# Optional spontaneous reactions to trusted server events. Each firing intentionally
+# spends ONE normal AI request, therefore it is OFF by default for maximum economy.
+event-reactions:
+  enabled: false
+  event-types:
+    - player-death
+  minimum-absolute-score: 70
+  chance: 0.25
+  cooldown-seconds: 180
+  max-per-hour: 3
+
+debug:
+  log-updates: false

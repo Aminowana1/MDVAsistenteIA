@@ -9,6 +9,8 @@ public record AssistantRequestContext(
     String locallyRetrievedWiki,
     String localToolContext,
     String recentEventContext,
+    String activityHistoryContext,
+    String relationshipContext,
     String currentActionText) {
 
   public static AssistantRequestContext scene(
@@ -19,6 +21,8 @@ public record AssistantRequestContext(
       String locallyRetrievedWiki,
       String localToolContext,
       String recentEventContext,
+      String activityHistoryContext,
+      String relationshipContext,
       String currentActionText) {
     return new AssistantRequestContext(
         sceneId,
@@ -28,6 +32,8 @@ public record AssistantRequestContext(
         locallyRetrievedWiki == null ? "" : locallyRetrievedWiki,
         localToolContext == null ? "" : localToolContext,
         recentEventContext == null ? "" : recentEventContext,
+        activityHistoryContext == null ? "" : activityHistoryContext,
+        relationshipContext == null ? "" : relationshipContext,
         currentActionText == null ? "" : currentActionText);
   }
 }

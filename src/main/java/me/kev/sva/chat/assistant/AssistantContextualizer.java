@@ -10,8 +10,9 @@ import org.bukkit.Bukkit;
 public abstract class AssistantContextualizer {
   public static final String PRIMARY_SYSTEM_INSTRUCTIONS = """
       [CORE]
-      Return only compact JSON: {"m":[],"t":[]}.
+      Return only compact JSON: {"m":[],"t":[],"r":[]}.
       m contains at most one public-chat reply. t contains only exact ACTION tool calls listed in [TOOLS].
+      r is optional relationship bookkeeping for a CURRENT-scene player and must stay [] unless a meaningful interpersonal change occurred.
       Never output explanations, Markdown or protocol text outside that JSON.
 
       ACTION TOOL CONTRACT:
@@ -41,8 +42,17 @@ public abstract class AssistantContextualizer {
       Never invent server-specific commands, mechanics, item properties, merchant stock, locations or player state. Use [WIKI], [LOCAL CONTEXT],
       [RECENT EVENTS] and [SERVER] when supplied. A broad fact does not imply a specific one: for example, "vende cosas del Nether"
       does NOT prove that netherite, a specific tool, price or stock exists. If the supplied knowledge does not support a server-specific fact, say you do not know.
-      Context tools (wiki/player-data/inventory/profile) are already resolved locally before this one request;
+      Context tools (wiki/player-data/inventory/profile/history/relationship) are already resolved locally before this one request;
       do not ask to call them. ACTION tools execute after this response and do not create a second model request.
+      If [ACTIVITY JOURNAL] says access=denied, do not reconstruct or approximate the denied history from incidental scene context;
+      simply say that this historical review is not available to that player.
+
+      RELATIONSHIP CONTRACT:
+      [RELATIONSHIPS] is trusted persistent state and overrides assumed closeness/hostility/romance.
+      Only for a meaningful change with a CURRENT speaker, r may contain ONE "Name|DELTA|KIND|IMPORTANCE|MEMORY|ROMANCE".
+      DELTA -5..5 (ordinary good/bad interaction usually +/-1); KIND n/r/p = none/recent/persistent; IMPORTANCE 1..5; MEMORY <=60 chars, no |, or -.
+      ROMANCE is start/end/- and start requires can_start_romance=true. No r for neutral/repetitive farming, gossip about non-speakers, or mere high score.
+      r is handled in this SAME response; never expose bookkeeping unless explicitly asked.
       Trusted local context is direct observation. If [INVENTORY] provides requested=held and mainhand=..., you CAN see that item and must answer from it;
       never ask the player what they are holding or say you cannot see it. If requested=armor, answer from the explicit armor_* fields.
       If [PLAYER-DATA] supplies a named player's world/xyz/status, use that exact row rather than guessing where they might be.
@@ -114,6 +124,14 @@ public abstract class AssistantContextualizer {
     if (context.recentEventContext() != null && !context.recentEventContext().isBlank()) {
       if (!out.isEmpty()) out.append('\n');
       out.append("[RECENT EVENTS]\n").append(context.recentEventContext().trim());
+    }
+    if (context.activityHistoryContext() != null && !context.activityHistoryContext().isBlank()) {
+      if (!out.isEmpty()) out.append('\n');
+      out.append(context.activityHistoryContext().trim());
+    }
+    if (context.relationshipContext() != null && !context.relationshipContext().isBlank()) {
+      if (!out.isEmpty()) out.append('\n');
+      out.append("[RELATIONSHIPS]\n").append(context.relationshipContext().trim());
     }
     return out.isEmpty() ? "[LOCAL CONTEXT] none selected" : out.toString();
   }

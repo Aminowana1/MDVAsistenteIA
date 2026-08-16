@@ -18,6 +18,7 @@ public class AssistantResponse {
   public final String raw;
   private final List<String> messages;
   private final List<String> toolCalls;
+  private final List<RelationshipUpdate> relationshipUpdates;
   private final boolean closeConversation;
   private final ServerAssistantPlugin plugin;
 
@@ -26,6 +27,7 @@ public class AssistantResponse {
 
     List<String> parsedMessages = List.of();
     List<String> parsedToolCalls = List.of();
+    List<String> parsedRelationshipUpdates = List.of();
     boolean parsedCloseConversation = false;
 
     String cleanedResponse = stripOuterCodeFence(response == null ? "" : response).trim();
@@ -39,6 +41,7 @@ public class AssistantResponse {
             data,
             "m", "messages", "message", "response", "text",
             "t", "tool-calls", "tool_calls", "tools",
+            "r", "relationships", "relationship-updates", "relationship_updates",
             "c", "close-conversation", "close_conversation");
 
         if (hasKnownField) {
@@ -54,6 +57,12 @@ public class AssistantResponse {
               getStringListFlexible(data, "tool-calls"),
               getStringListFlexible(data, "tool_calls"),
               getStringListFlexible(data, "tools"));
+
+          parsedRelationshipUpdates = firstNonEmpty(
+              getStringListFlexible(data, "r"),
+              getStringListFlexible(data, "relationships"),
+              getStringListFlexible(data, "relationship-updates"),
+              getStringListFlexible(data, "relationship_updates"));
 
           parsedCloseConversation = getBooleanFlexible(
               data,
@@ -93,6 +102,7 @@ public class AssistantResponse {
         plugin.getLogger().warning("Blocked malformed AI protocol text from reaching public chat.");
       }
       parsedToolCalls = List.of();
+      parsedRelationshipUpdates = List.of();
       parsedCloseConversation = false;
 
       if (plugin.getConfig().getBoolean("provider-response.log-fallbacks", false)) {
@@ -102,8 +112,9 @@ public class AssistantResponse {
 
     this.messages = normalizeMessages(parsedMessages);
     this.toolCalls = normalizeToolCalls(parsedToolCalls);
+    this.relationshipUpdates = normalizeRelationshipUpdates(parsedRelationshipUpdates);
     this.closeConversation = parsedCloseConversation;
-    this.raw = toYaml(this.messages, this.toolCalls, this.closeConversation);
+    this.raw = toYaml(this.messages, this.toolCalls, this.relationshipUpdates, this.closeConversation);
   }
 
   public AssistantResponse(
@@ -112,11 +123,22 @@ public class AssistantResponse {
       List<String> toolCalls,
       boolean closeConversation) {
 
+    this(plugin, messages, toolCalls, List.of(), closeConversation);
+  }
+
+  public AssistantResponse(
+      ServerAssistantPlugin plugin,
+      List<String> messages,
+      List<String> toolCalls,
+      List<RelationshipUpdate> relationshipUpdates,
+      boolean closeConversation) {
+
     this.plugin = plugin;
     this.messages = normalizeMessages(messages);
     this.toolCalls = normalizeToolCalls(toolCalls);
+    this.relationshipUpdates = relationshipUpdates == null ? List.of() : List.copyOf(relationshipUpdates);
     this.closeConversation = closeConversation;
-    this.raw = toYaml(this.messages, this.toolCalls, this.closeConversation);
+    this.raw = toYaml(this.messages, this.toolCalls, this.relationshipUpdates, this.closeConversation);
   }
 
   public List<String> getMessages() {
@@ -125,6 +147,10 @@ public class AssistantResponse {
 
   public List<String> getToolCalls() {
     return List.copyOf(toolCalls);
+  }
+
+  public List<RelationshipUpdate> getRelationshipUpdates() {
+    return List.copyOf(relationshipUpdates);
   }
 
   public boolean shouldCloseConversation() {
@@ -184,7 +210,8 @@ public class AssistantResponse {
         || lower.startsWith("{\"m\"") || lower.startsWith("m:")
         || lower.startsWith("\"m\":") || lower.startsWith("t:")
         || lower.startsWith("\"t\":") || lower.startsWith("c:")
-        || lower.startsWith("\"c\":")) {
+        || lower.startsWith("\"c\":") || lower.startsWith("r:")
+        || lower.startsWith("\"r\":")) {
       return true;
     }
 
@@ -192,7 +219,8 @@ public class AssistantResponse {
     // rest of a brace-less compact envelope: `[], t: [], c: false`.
     if ((compact.startsWith("[]") || compact.startsWith("[ ]"))
         && (compact.contains(",t:") || compact.contains(",\"t\":"))
-        && (compact.contains(",c:") || compact.contains(",\"c\":"))) {
+        && ((compact.contains(",c:") || compact.contains(",\"c\":"))
+            || (compact.contains(",r:") || compact.contains(",\"r\":")))) {
       return true;
     }
 
@@ -202,6 +230,8 @@ public class AssistantResponse {
     if (lower.contains("close-conversation") || lower.contains("close_conversation")) signals++;
     if (compact.contains(",t:") || compact.contains(",\"t\":")) signals++;
     if (compact.contains(",c:") || compact.contains(",\"c\":")) signals++;
+    if (compact.contains(",r:") || compact.contains(",\"r\":")) signals++;
+    if (lower.contains("relationship-updates") || lower.contains("relationship_updates")) signals++;
     return signals >= 2;
   }
 
@@ -395,14 +425,33 @@ public class AssistantResponse {
     return List.copyOf(result);
   }
 
+  private List<RelationshipUpdate> normalizeRelationshipUpdates(List<String> input) {
+    if (input == null || input.isEmpty()) return List.of();
+    int max = Math.max(plugin.getRelationshipsConfig() == null
+        ? 1
+        : plugin.getRelationshipsConfig().getInt("updates.max-per-response", 1), 0);
+    if (max == 0) return List.of();
+    List<RelationshipUpdate> result = new ArrayList<>();
+    for (String raw : input) {
+      if (result.size() >= max) break;
+      RelationshipUpdate update = RelationshipUpdate.parseCompact(raw);
+      if (update != null) result.add(update);
+    }
+    return List.copyOf(result);
+  }
+
   private String toYaml(
       List<String> messages,
       List<String> toolCalls,
+      List<RelationshipUpdate> relationshipUpdates,
       boolean closeConversation) {
 
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("messages", messages);
     data.put("tool-calls", toolCalls);
+    data.put("relationship-updates", relationshipUpdates == null
+        ? List.of()
+        : relationshipUpdates.stream().map(RelationshipUpdate::toCompact).toList());
     data.put("close-conversation", closeConversation);
 
     DumperOptions options = new DumperOptions();

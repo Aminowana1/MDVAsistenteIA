@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.6.9 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.0 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 8
+config-version: 9
 
 assistant-name: Isolda
 
@@ -119,6 +119,33 @@ global-conversation:
     # even when the event happened outside scene.pre-lookback-ms.
     recent-context-limit: 1
     recent-context-max-age-ms: 180000
+
+
+# ============================================================
+# RECENT PUBLIC ACTIVITY JOURNAL (RAM ONLY)
+# ============================================================
+# Captures only public chat plus trusted Bukkit join/quit/death/etc. No commands,
+# IPs or latest.log scanning. It costs zero AI tokens until someone explicitly asks
+# about recent history, and is intentionally cleared by a full server/plugin restart.
+activity-journal:
+  enabled: true
+  retention-minutes: 120
+  max-records: 10000
+
+  # If the player asks "que hizo Kroattan?" without giving a duration.
+  default-player-window-minutes: 120
+
+  # Hard prompt budget only when a history question is detected.
+  max-context-records: 18
+  max-context-chars: 3200
+
+  access:
+    # everyone | admin-only
+    # Safe testing default: both scopes begin admin-only.
+    player-history: admin-only
+
+    # Broad questions such as "Iso, que paso mientras no estuve?".
+    general-history: admin-only
 
 # ============================================================
 # RATE LIMITS

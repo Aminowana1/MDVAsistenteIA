@@ -13,6 +13,8 @@ import me.kev.sva.commands.CommandManager;
 import me.kev.sva.config.ConfigurationManager;
 import me.kev.sva.constants.Constants;
 import me.kev.sva.integrations.IntegrationManager;
+import me.kev.sva.memory.ActivityJournal;
+import me.kev.sva.memory.RelationshipManager;
 import me.kev.sva.utils.MessageSender;
 
 public final class ServerAssistantPlugin extends JavaPlugin {
@@ -22,6 +24,8 @@ public final class ServerAssistantPlugin extends JavaPlugin {
     private ToolManager toolManager;
     private IntegrationManager integrationManager;
     private ConfigurationManager configurationManager;
+    private ActivityJournal activityJournal;
+    private RelationshipManager relationshipManager;
 
     /** Survives /sva reload so provider cooldowns cannot be bypassed by reloading. */
     private final ProviderThrottleRegistry providerThrottleRegistry = new ProviderThrottleRegistry();
@@ -39,6 +43,8 @@ public final class ServerAssistantPlugin extends JavaPlugin {
             getCommand("sva").setTabCompleter(commandManager);
         }
 
+        activityJournal = new ActivityJournal(this);
+        relationshipManager = new RelationshipManager(this);
         initializePlugin();
 
         Bukkit.getConsoleSender().sendMessage(Constants.ASCII_LOGO);
@@ -97,6 +103,10 @@ public final class ServerAssistantPlugin extends JavaPlugin {
 
         integrationManager = null;
 
+        if (activityJournal == null) activityJournal = new ActivityJournal(this);
+        if (relationshipManager == null) relationshipManager = new RelationshipManager(this);
+        else relationshipManager.reloadSettings();
+
         // Optional read-only integrations are created before tools so the profile
         // context tool can query MMOCore/MDVSocial without hard dependencies.
         integrationManager = new IntegrationManager(this);
@@ -135,6 +145,22 @@ public final class ServerAssistantPlugin extends JavaPlugin {
 
     public org.bukkit.configuration.file.FileConfiguration getIntegrationsConfig() {
         return configurationManager.integrations();
+    }
+
+    public org.bukkit.configuration.file.FileConfiguration getRelationshipsConfig() {
+        return configurationManager.relationships();
+    }
+
+    public void saveRelationshipsConfig() {
+        configurationManager.saveRelationships();
+    }
+
+    public ActivityJournal getActivityJournal() {
+        return activityJournal;
+    }
+
+    public RelationshipManager getRelationshipManager() {
+        return relationshipManager;
     }
 
     public void saveIntegrationsConfig() {
@@ -178,6 +204,12 @@ public final class ServerAssistantPlugin extends JavaPlugin {
         }
 
         integrationManager = null;
+
+        if (relationshipManager != null) {
+            try { relationshipManager.shutdown(); } catch (Exception ignored) { }
+            relationshipManager = null;
+        }
+        activityJournal = null;
 
         MessageSender.Error("Plugin Disabled!");
     }

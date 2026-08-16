@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.7.0 - Activity journal + persistent relationships
+
+- Adds a bounded RAM-only activity journal for public player chat and trusted server events. Normal scenes receive zero journal tokens unless a historical question is detected.
+- Adds named-player history queries with configurable retention (120 minutes by default) and broad `since I disconnected` summaries using a per-player disconnect marker.
+- Adds independent `admin-only|everyone` access controls for named-player and general history; both ship `admin-only` for safe testing.
+- Adds `/sva history status|player|general` runtime controls.
+- Adds persistent SQLite relationship profiles with score `-100..100`, an in-RAM read cache and serialized asynchronous writes. Everyone starts neutral at `0` by default.
+- Adds bounded social memory: 8 persistent and 12 recent memories by default, with recent expiry, importance, deduplication and replacement limits.
+- Relationship mutations are returned through compact `r` metadata in the SAME model response as normal chat/actions. No second AI call is made. Java clamps updates and applies anti-farming cooldown/hourly limits.
+- Adds configurable relationship behavior tiers, local hostile-player ignore chances and tier-based smart follow-up windows. Ignored trivial messages are dropped before the API call.
+- Adds optional relationship-aware spontaneous event reactions. They are disabled by default and have score/chance/cooldown/hourly gates because each accepted reaction spends one normal request.
+- Adds exclusive romance capacity controlled by `relationships.yml -> romance.max-partners`; the default `0` disables romance completely.
+- Removes the old bundled hardcoded Aminowana romance assumption and migrates only that exact legacy default so persistent relationship state is authoritative.
+- Adds `/sva relationship info|memories|set|purge` and `/sva data purge`. Purge removes persistent relationship/memory rows plus new-system RAM traces and serializes deletion behind queued DB writes.
+- Adds `relationships.yml` and bundles the SQLite JDBC driver in the shaded plugin JAR.
+- Keeps GitHub Actions/Maven Java 21 build flow and the single-global-scene architecture.
+
+
 ## 1.6.9 - OpenAI prompt-cache friendly prefix + cached wiki index
 
 - Keeps the GPT/OpenAI path as the primary target; Gemini/fallback providers do not receive OpenAI-specific `prompt_cache_key`.

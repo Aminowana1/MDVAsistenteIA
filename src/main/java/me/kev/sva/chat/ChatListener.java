@@ -65,7 +65,6 @@ public final class ChatListener implements Listener {
 
   @EventHandler
   public void onPlayerDeath(PlayerDeathEvent event) {
-    if (!captureEvent("player-death")) return;
     Player victim = event.getEntity();
     Player killer = victim.getKiller();
     List<String> actors = new ArrayList<>();
@@ -79,45 +78,76 @@ public final class ChatListener implements Listener {
     if (victim.getLastDamageCause() != null) {
       text += " [cause=" + victim.getLastDamageCause().getCause().name() + "]";
     }
-    conversationManager.recordServerEvent("player-death", text, actors);
+    if (plugin.getActivityJournal() != null) {
+      plugin.getActivityJournal().recordEvent("player-death", text, killer == null ? List.of(victim) : List.of(victim, killer));
+    }
+    if (captureEvent("player-death")) {
+      conversationManager.recordServerEvent("player-death", text, actors);
+    }
+    conversationManager.maybeQueueRelationshipReaction(
+        "player-death", text, killer == null ? List.of(victim) : List.of(victim, killer));
   }
 
   @EventHandler
   public void onPlayerAdvancement(PlayerAdvancementDoneEvent event) {
-    if (!captureEvent("player-advancement")) return;
     String text = plain(event.message());
     if (!text.isBlank()) {
-      conversationManager.recordServerEvent(
-          "player-advancement", text, List.of(event.getPlayer().getName()));
+      if (plugin.getActivityJournal() != null) {
+        plugin.getActivityJournal().recordEvent("player-advancement", text, List.of(event.getPlayer()));
+      }
+      if (captureEvent("player-advancement")) {
+        conversationManager.recordServerEvent(
+            "player-advancement", text, List.of(event.getPlayer().getName()));
+      }
+      conversationManager.maybeQueueRelationshipReaction("player-advancement", text, List.of(event.getPlayer()));
     }
   }
 
   @EventHandler
   public void onPlayerJoin(PlayerJoinEvent event) {
-    if (!captureEvent("player-join")) return;
+    Player player = event.getPlayer();
+    if (plugin.getActivityJournal() != null) plugin.getActivityJournal().recordJoin(player);
+    if (plugin.getRelationshipManager() != null) plugin.getRelationshipManager().observePlayer(player);
     String text = plain(event.joinMessage());
-    if (text.isBlank()) text = event.getPlayer().getName() + " joined";
-    conversationManager.recordServerEvent(
-        "player-join", text, List.of(event.getPlayer().getName()));
+    if (text.isBlank()) text = player.getName() + " joined";
+    if (plugin.getActivityJournal() != null) {
+      plugin.getActivityJournal().recordEvent("player-join", text, List.of(player));
+    }
+    if (captureEvent("player-join")) {
+      conversationManager.recordServerEvent("player-join", text, List.of(player.getName()));
+    }
+    conversationManager.maybeQueueRelationshipReaction("player-join", text, List.of(player));
   }
 
   @EventHandler
   public void onPlayerQuit(PlayerQuitEvent event) {
-    conversationManager.handlePlayerDisconnect(event.getPlayer().getUniqueId());
-    if (!captureEvent("player-quit")) return;
+    Player player = event.getPlayer();
+    if (plugin.getActivityJournal() != null) plugin.getActivityJournal().recordDisconnect(player);
+    conversationManager.handlePlayerDisconnect(player.getUniqueId());
     String text = plain(event.quitMessage());
-    if (text.isBlank()) text = event.getPlayer().getName() + " left";
-    conversationManager.recordServerEvent(
-        "player-quit", text, List.of(event.getPlayer().getName()));
+    if (text.isBlank()) text = player.getName() + " left";
+    if (plugin.getActivityJournal() != null) {
+      plugin.getActivityJournal().recordEvent("player-quit", text, List.of(player));
+    }
+    if (captureEvent("player-quit")) {
+      conversationManager.recordServerEvent("player-quit", text, List.of(player.getName()));
+    }
+    conversationManager.maybeQueueRelationshipReaction("player-quit", text, List.of(player));
   }
 
   @EventHandler
   public void onPlayerKick(PlayerKickEvent event) {
-    conversationManager.handlePlayerDisconnect(event.getPlayer().getUniqueId());
-    if (!captureEvent("player-kick")) return;
+    Player player = event.getPlayer();
+    if (plugin.getActivityJournal() != null) plugin.getActivityJournal().recordDisconnect(player);
+    conversationManager.handlePlayerDisconnect(player.getUniqueId());
     String text = plain(event.leaveMessage());
-    if (text.isBlank()) text = event.getPlayer().getName() + " was kicked";
-    conversationManager.recordServerEvent(
-        "player-kick", text, List.of(event.getPlayer().getName()));
+    if (text.isBlank()) text = player.getName() + " was kicked";
+    if (plugin.getActivityJournal() != null) {
+      plugin.getActivityJournal().recordEvent("player-kick", text, List.of(player));
+    }
+    if (captureEvent("player-kick")) {
+      conversationManager.recordServerEvent("player-kick", text, List.of(player.getName()));
+    }
+    conversationManager.maybeQueueRelationshipReaction("player-kick", text, List.of(player));
   }
 }

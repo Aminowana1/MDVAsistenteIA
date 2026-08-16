@@ -108,6 +108,8 @@ public final class ConversationManager {
         + ", event_log=" + serverEventLog.size()
         + ", history_scenes=" + sceneHistory.size()
         + ", smart_followups=" + activeSmartFollowUps()
+        + ", journal_records=" + (plugin.getActivityJournal() == null ? 0 : plugin.getActivityJournal().size())
+        + ", relationship_profiles=" + (plugin.getRelationshipManager() == null ? 0 : plugin.getRelationshipManager().profileCount())
         + ", idle_timer=" + (idleScheduleTask == null ? "off" : "scheduled")
         + ", pending_tool_approvals=" + (plugin.getToolManager() == null
             ? 0 : plugin.getToolManager().pendingApprovalSummaries().size());
@@ -170,6 +172,8 @@ public final class ConversationManager {
     long now = System.currentTimeMillis();
     PublicChatRecord record = snapshotPlayerMessage(player, content, now);
     rememberPublicChat(record);
+    if (plugin.getActivityJournal() != null) plugin.getActivityJournal().recordChat(player, content);
+    if (plugin.getRelationshipManager() != null) plugin.getRelationshipManager().observePlayer(player);
     scheduleIdleRequestAfterActivity();
 
     if (!plugin.getConfig().getBoolean("global-conversation.enabled", true)) {
@@ -184,6 +188,15 @@ public final class ConversationManager {
     boolean directMention = containsAssistantMention(content);
     boolean existingSmartFollowUp = "smart".equals(mode)
         && hasActiveSmartFollowUp(player.getUniqueId(), now);
+
+    // Hostile relationship tiers may skip a trivial direct message before any API
+    // request is created. This is both more natural and cheaper than asking the model
+    // to decide whether to ignore it.
+    if (activeCapture == null && directMention && plugin.getRelationshipManager() != null
+        && plugin.getRelationshipManager().shouldIgnoreDirectMessage(player, content)) {
+      return;
+    }
+
     boolean directedAtAssistant = directMention || existingSmartFollowUp
         || (activeCapture != null && activeAddressers.contains(player.getUniqueId()));
     if (plugin.getToolManager() != null) {
@@ -338,6 +351,8 @@ public final class ConversationManager {
             sceneId,
             "none",
             "trigger=idle_scheduling, chat_lines=0, events=0",
+            "",
+            "",
             "",
             "",
             "",
@@ -658,6 +673,16 @@ public final class ConversationManager {
         .filter(chat -> chat.playerId().equals(capture.triggerPlayerId()) || containsAssistantMention(chat.content()))
         .map(PublicChatRecord::content)
         .collect(java.util.stream.Collectors.joining(" "));
+
+    String activityHistory = "";
+    if (plugin.getActivityJournal() != null && triggerRecord != null) {
+      activityHistory = plugin.getActivityJournal().buildContext(
+          triggerRecord.playerId(), triggerRecord.playerName(), triggerRecord.admin(), currentActionText);
+    }
+    String relationshipContext = plugin.getRelationshipManager() == null
+        ? ""
+        : plugin.getRelationshipManager().buildContext(currentMessages, involvedNames);
+
     String meta = "window_ms=" + Math.max(0L, capture.endsAt() - capture.triggerAt())
         + ", chat_lines=" + selectedChats.size()
         + ", events=" + selectedEvents.size()
@@ -671,7 +696,8 @@ public final class ConversationManager {
         Set.copyOf(involvedNames),
         Set.copyOf(eligibleAddressers),
         AssistantRequestContext.scene(
-            capture.sceneId(), involved, meta, identityContext, wiki, localTools, recentEvents, currentActionText),
+            capture.sceneId(), involved, meta, identityContext, wiki, localTools, recentEvents,
+            activityHistory, relationshipContext, currentActionText),
         currentActionText,
         AssistantManager.PRIMARY,
         0);
@@ -912,6 +938,78 @@ public final class ConversationManager {
    * the join happened before the normal 8-10 second chat lookback. It is selected
    * only when the current scene semantically refers to a recent event.
    */
+  /**
+   * Optional relationship-driven autonomous reaction. Disabled by default because
+   * every accepted event intentionally spends one normal model request.
+   */
+  public void maybeQueueRelationshipReaction(String type, String text, List<Player> actors) {
+    if (shutdown || plugin.getRelationshipManager() == null || actors == null || actors.isEmpty()) return;
+    // If players are already talking to Isolda, the trusted event can be folded into
+    // that scene instead of paying for a second reaction.
+    if (activeCapture != null || requestInFlight || requestRateRetryTask != null || !sceneQueue.isEmpty()) return;
+    if (!plugin.getRelationshipManager().shouldReactToEvent(type, actors)) return;
+
+    long sceneId = nextSceneId++;
+    List<String> names = actors.stream().filter(java.util.Objects::nonNull)
+        .map(Player::getName).distinct().toList();
+    String relation = plugin.getRelationshipManager().eventRelationshipContext(actors);
+    SystemContextMessage event = new SystemContextMessage(
+        plugin,
+        "[EVENT type=" + type + " players=" + (names.isEmpty() ? "none" : String.join(",", names)) + "] ",
+        text == null ? "" : text);
+    List<ChatMessage> current = List.of(event);
+    List<ChatMessage> modelMessages = new ArrayList<>();
+    modelMessages.add(new SystemContextMessage(
+        plugin,
+        "[RELATIONSHIP EVENT REACTION] ",
+        "This trusted event may merit one spontaneous in-character reaction because of a strong stored relationship. A reply is optional. Do not invent extra facts."));
+    modelMessages.add(event);
+
+    SceneRequest scene = new SceneRequest(
+        sceneId,
+        List.copyOf(modelMessages),
+        current,
+        Set.of(),
+        Set.copyOf(names),
+        Set.of(),
+        AssistantRequestContext.scene(
+            sceneId,
+            names.isEmpty() ? "none" : String.join(",", names),
+            "trigger=relationship_event, chat_lines=0, events=1",
+            "", "", "", "", "", relation, ""),
+        "",
+        AssistantManager.PRIMARY,
+        0);
+    sceneQueue.addLast(scene);
+    processNextRequest();
+  }
+
+  /** Removes the player's rolling scene/log traces from this runtime. */
+  public void purgePlayerFromRuntime(UUID playerId, String playerName) {
+    if (playerId == null) return;
+    String lower = playerName == null ? "" : playerName.toLowerCase(Locale.ROOT);
+    publicChatLog.removeIf(chat -> playerId.equals(chat.playerId())
+        || (!lower.isBlank() && containsWholeWordIgnoreCase(chat.content(), playerName)));
+    serverEventLog.removeIf(event -> event.involvedPlayers().stream().anyMatch(name ->
+        name != null && (!lower.isBlank() && name.equalsIgnoreCase(playerName))));
+    triggerTimes.remove(playerId);
+    smartFollowUpUntilByPlayer.remove(playerId);
+    activeAddressers.remove(playerId);
+    sceneQueue.removeIf(scene -> scene.involvedPlayerIds().contains(playerId)
+        || scene.involvedPlayerNames().stream().anyMatch(name ->
+            name != null && !lower.isBlank() && name.equalsIgnoreCase(playerName)));
+    if (activeCapture != null && playerId.equals(activeCapture.triggerPlayerId())) {
+      if (captureTask != null) {
+        captureTask.cancel();
+        captureTask = null;
+      }
+      activeCapture = null;
+    }
+    // Scene history is tiny; clearing it avoids retaining an assistant line that may
+    // mention the purged player even when that line cannot be attributed structurally.
+    sceneHistory.clear();
+  }
+
   private String retrieveRecentEventContext(List<ChatMessage> currentMessages) {
     if (!plugin.getConfig().getBoolean("global-conversation.events.enabled", true)) {
       return "";
@@ -1245,6 +1343,10 @@ public final class ConversationManager {
       response = new AssistantResponse(plugin, List.of(), List.of(), false);
     }
 
+    if (plugin.getRelationshipManager() != null && !response.getRelationshipUpdates().isEmpty()) {
+      plugin.getRelationshipManager().applyUpdates(response.getRelationshipUpdates(), scene.currentSceneMessages());
+    }
+
     String reply = response.historyText().trim();
     if (reply.isBlank()
         && scene.context() != null
@@ -1271,14 +1373,17 @@ public final class ConversationManager {
     }
 
     rememberScene(scene, reply);
-    long followUpMs = Math.max(plugin.getConfig().getLong(
+    long baseFollowUpMs = Math.max(plugin.getConfig().getLong(
         "global-conversation.smart-follow-up-ms", 12_000L), 0L);
     long now = System.currentTimeMillis();
     pruneSmartFollowUps(now);
-    if (followUpMs > 0L && !reply.isBlank()) {
-      long until = now + followUpMs;
+    if (!reply.isBlank()) {
       for (UUID playerId : scene.followUpEligiblePlayerIds()) {
-        smartFollowUpUntilByPlayer.put(playerId, until);
+        long followUpMs = plugin.getRelationshipManager() == null
+            ? baseFollowUpMs
+            : plugin.getRelationshipManager().followUpMs(playerId, baseFollowUpMs);
+        if (followUpMs > 0L) smartFollowUpUntilByPlayer.put(playerId, now + followUpMs);
+        else smartFollowUpUntilByPlayer.remove(playerId);
       }
     }
 

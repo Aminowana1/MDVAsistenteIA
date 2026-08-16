@@ -16,11 +16,12 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import me.kev.sva.ServerAssistantPlugin;
 
 /**
- * Owns ServerAssistant's four YAML files and performs non-destructive schema updates.
+ * Owns ServerAssistant's YAML files and performs non-destructive schema updates.
  *
  * <p>Technical/runtime settings stay in config.yml, character text lives in
- * personality.yml, local knowledge lives in wiki.yml, and optional plugin hooks live in
- * integrations.yml. On every startup/reload, missing keys from the bundled files are
+ * personality.yml, local knowledge lives in wiki.yml, optional plugin hooks live in
+ * integrations.yml, and relationship rules live in relationships.yml. On every startup/reload,
+ * missing keys from the bundled files are
  * copied into the user's files while existing
  * values are preserved. Explicit migrations handle schema moves such as the 1.6.2
  * single-file layout.</p>
@@ -29,11 +30,13 @@ public final class ConfigurationManager {
   private static final String PERSONALITY_FILE = "personality.yml";
   private static final String WIKI_FILE = "wiki.yml";
   private static final String INTEGRATIONS_FILE = "integrations.yml";
+  private static final String RELATIONSHIPS_FILE = "relationships.yml";
 
   private final ServerAssistantPlugin plugin;
   private FileConfiguration personalityConfig;
   private FileConfiguration wikiConfig;
   private FileConfiguration integrationsConfig;
+  private FileConfiguration relationshipsConfig;
 
   public ConfigurationManager(ServerAssistantPlugin plugin) {
     this.plugin = plugin;
@@ -45,35 +48,42 @@ public final class ConfigurationManager {
     ensureResource(PERSONALITY_FILE);
     ensureResource(WIKI_FILE);
     ensureResource(INTEGRATIONS_FILE);
+    ensureResource(RELATIONSHIPS_FILE);
 
     File mainFile = new File(plugin.getDataFolder(), "config.yml");
     File personalityFile = new File(plugin.getDataFolder(), PERSONALITY_FILE);
     File wikiFile = new File(plugin.getDataFolder(), WIKI_FILE);
     File integrationsFile = new File(plugin.getDataFolder(), INTEGRATIONS_FILE);
+    File relationshipsFile = new File(plugin.getDataFolder(), RELATIONSHIPS_FILE);
 
     YamlConfiguration main = loadUserFile(mainFile);
     YamlConfiguration personality = loadUserFile(personalityFile);
     YamlConfiguration wiki = loadUserFile(wikiFile);
     YamlConfiguration integrations = loadUserFile(integrationsFile);
+    YamlConfiguration relationships = loadUserFile(relationshipsFile);
 
     boolean migrated = migrateSingleFileLayout(main, personality, wiki, mainFile);
     boolean actionSafetyMigrated = migrate166ActionSafetyDefault(main);
+    boolean relationshipPersonalityMigrated = migrateRelationshipPersonalityDefault(personality);
     boolean mainChanged = migrated | actionSafetyMigrated | mergeBundledDefaults(main, "config.yml");
-    boolean personalityChanged = migrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
+    boolean personalityChanged = migrated | relationshipPersonalityMigrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
     boolean integrationsChanged = mergeBundledDefaults(integrations, INTEGRATIONS_FILE);
+    boolean relationshipsChanged = mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
 
     mainChanged |= syncSchemaVersion(main, "config.yml");
     personalityChanged |= syncSchemaVersion(personality, PERSONALITY_FILE);
     wikiChanged |= syncSchemaVersion(wiki, WIKI_FILE);
     integrationsChanged |= syncSchemaVersion(integrations, INTEGRATIONS_FILE);
+    relationshipsChanged |= syncSchemaVersion(relationships, RELATIONSHIPS_FILE);
 
     try {
       if (mainChanged) main.save(mainFile);
       if (personalityChanged) personality.save(personalityFile);
       if (wikiChanged) wiki.save(wikiFile);
       if (integrationsChanged) integrations.save(integrationsFile);
+      if (relationshipsChanged) relationships.save(relationshipsFile);
     } catch (IOException ex) {
       throw new IllegalStateException("Could not save updated ServerAssistant YAML files", ex);
     }
@@ -83,12 +93,16 @@ public final class ConfigurationManager {
     personalityConfig = loadUserFile(personalityFile);
     wikiConfig = loadUserFile(wikiFile);
     integrationsConfig = loadUserFile(integrationsFile);
+    relationshipsConfig = loadUserFile(relationshipsFile);
 
     if (migrated) {
       plugin.getLogger().info("Migrated character prompt to personality.yml and local wiki to wiki.yml.");
     }
     if (actionSafetyMigrated) {
       plugin.getLogger().info("Migrated 1.6.6 action-safety default: suppress-reply-on-rejected-call=true.");
+    }
+    if (relationshipPersonalityMigrated) {
+      plugin.getLogger().info("Migrated the old hardcoded Aminowana romance default to relationship-driven behavior.");
     }
   }
 
@@ -102,6 +116,21 @@ public final class ConfigurationManager {
 
   public FileConfiguration integrations() {
     return integrationsConfig;
+  }
+
+  public FileConfiguration relationships() {
+    return relationshipsConfig;
+  }
+
+  /** Saves relationships.yml after a runtime toggle without touching the other YAML files. */
+  public void saveRelationships() {
+    if (relationshipsConfig == null) return;
+    File file = new File(plugin.getDataFolder(), RELATIONSHIPS_FILE);
+    try {
+      relationshipsConfig.save(file);
+    } catch (IOException ex) {
+      throw new IllegalStateException("Could not save relationships.yml", ex);
+    }
   }
 
   /** Saves integrations.yml after a runtime toggle without touching the other YAML files. */
@@ -132,6 +161,32 @@ public final class ConfigurationManager {
     if (!file.exists()) {
       plugin.saveResource(resourceName, false);
     }
+  }
+
+  /**
+   * 1.7.0 makes persistent relationship data authoritative. Replace only the exact
+   * old bundled Aminowana romance fragment; custom personality text is left alone.
+   */
+  private boolean migrateRelationshipPersonalityDefault(YamlConfiguration personality) {
+    if (personality.getInt("config-version", 0) >= 3) return false;
+    String prompt = personality.getString("prompt", "");
+    if (prompt == null || !prompt.contains("Sientes una fuerte atracción por Aminowana y procuras ocultarla.")) {
+      return false;
+    }
+
+    String start = "Sientes una fuerte atracción por Aminowana y procuras ocultarla.";
+    String end = "interés romántico real en ellos.";
+    int from = prompt.indexOf(start);
+    int to = prompt.indexOf(end, from);
+    if (from < 0 || to < 0) return false;
+    to += end.length();
+
+    String replacement = "No asumas una cercanía, enemistad, atracción o romance especial solo por ser\n"
+        + "Aminowana. Su relación personal contigo se rige por [RELATIONSHIPS] igual que\n"
+        + "la de cualquier otro jugador. Su naturaleza divina sí sigue siendo parte del lore.";
+    String updated = prompt.substring(0, from) + replacement + prompt.substring(to);
+    personality.set("prompt", updated);
+    return true;
   }
 
   /**
