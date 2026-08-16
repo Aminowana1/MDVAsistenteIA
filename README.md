@@ -1,14 +1,14 @@
-# ServerAssistant 1.7.5
+# ServerAssistant 1.7.5.1
 
-ServerAssistant 1.7.5 keeps the MDVCRAFT **single global conversation** architecture and adds two bounded local-memory systems without creating a second AI request during normal conversation: a rolling activity journal and persistent per-player relationships/social memories.
+ServerAssistant 1.7.5.1 keeps the MDVCRAFT **single global conversation** architecture and adds two bounded local-memory systems without creating a second AI request during normal conversation: a rolling activity journal and persistent per-player relationships/social memories.
 
-1.7.5 adds romance-continuity and group-action safeguards on top of the 1.7.4 journal/anti-drift fixes. Formal proposals are recognized in natural wording, unresolved proposals survive a short RAM-only follow-up window, the current partner roster is injected as trusted state, partner behavior changes between happy/strained/critical score bands, SMART duplicate replies are suppressed, and lightning targets are bound to the actual current requester/target. 1.7.2 scene isolation remains in place, so pre-trigger context cannot re-authorize old actions or steal wiki/inventory targets.
+1.7.5.1 adds romance-continuity and group-action safeguards on top of the 1.7.4 journal/anti-drift fixes. Formal proposals are recognized in natural wording, unresolved proposals survive a short RAM-only follow-up window, the current partner roster is injected as trusted state, partner behavior changes between happy/strained/critical score bands, SMART duplicate replies are suppressed, and lightning targets are bound to the actual current requester/target. 1.7.2 scene isolation remains in place, so pre-trigger context cannot re-authorize old actions or steal wiki/inventory targets.
 
 The normal chat path stays economical: the activity journal costs zero prompt tokens unless a historical question is detected, while relationship changes are proposed inside the same compact `m`/`t`/`r` response Isolda already returns and are validated by Java before being stored.
 
 
 
-## 1.7.5 activity journal + relationships
+## 1.7.5.1 activity journal + relationships
 
 The rolling activity journal is RAM-only and bounded by `activity-journal.retention-minutes`, `max-records`, `max-context-records` and `max-context-chars`. It records public player chat plus trusted join/quit/kick/death/advancement events, but it is inserted into the AI prompt only for recognizable historical questions. Both history scopes start `admin-only` for safe testing and can be changed at runtime:
 
@@ -197,13 +197,13 @@ When a player becomes involved in a model scene, ServerAssistant automatically a
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-For 1.7.5 the Maven version is:
+For 1.7.5.1 the Maven version is:
 
 ```xml
-<version>1.7.5</version>
+<version>1.7.5.1</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.7.5.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.7.5.1.jar`.
 
 
 ### Reused GitHub repositories

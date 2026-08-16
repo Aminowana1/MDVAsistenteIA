@@ -131,7 +131,10 @@ public final class RelationshipSignalDetector {
       return true;
     }
 
-    return text.matches("^(iso |isolda )?(que+|quee+|queee+|xd+|jaja+|jeje+|:?[cuv])$");
+    // normalize() strips ':' from emoticons, so "queee :c" becomes "queee c".
+    // Treat tiny reaction + emoticon combinations as neutral bookkeeping too.
+    return text.matches("^(iso |isolda )?(?:que+|xd+|jaja+|jeje+|mmm+|uff+)(?: [cuv3])?$")
+        || text.matches("^(iso |isolda )?[cuv3]$");
   }
 
   /** Reject tier-descriptions/attitude text that are not memories of an event. */

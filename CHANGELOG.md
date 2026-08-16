@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.5.1 - Build test hotfix
+
+- Fixed `RelationshipSignalDetector.isBookkeepingNeutral` for tiny reactions with emoticons such as `queee :c`. Normalization removes `:`, so the previous regex saw `queee c` and incorrectly marked it non-neutral.
+- This keeps the intended anti-drift behavior: tiny reactions do not alter relationship score/bookkeeping.
+- No API-call or token-cost change.
+
 ## 1.7.5 - Romance continuity + group-action binding hotfix
 
 - Formal romance proposals now recognize natural variants such as `aceptas ser mi novia?`, `aceptarias ser mi pareja?` and `te pregunte si querias ser mi novia`.

@@ -47,6 +47,8 @@ final class RelationshipSignalDetectorTest {
     assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("holaa iso"));
     assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("iso pq me tratas asi?"));
     assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("queee :c"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("queee :3"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("xd :c"));
   }
 
   @Test
