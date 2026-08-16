@@ -4,7 +4,7 @@
 # Missing default keys are added automatically; your wiki entries are never overwritten.
 # ============================================================
 
-config-version: 1
+config-version: 2
 
 lazy-mode: true
 
@@ -13,6 +13,8 @@ local-retrieval:
   max-sections: 2
   min-score: 2
   max-section-chars: 3500
+  # Diagnostic only: logs the query and selected section keys. No AI calls.
+  debug-log: false
 
 wiki:
   commands:

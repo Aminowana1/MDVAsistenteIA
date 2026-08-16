@@ -52,7 +52,7 @@ public final class ContextTargetResolver {
     Set<String> explicit = new LinkedHashSet<>();
     if (!latestText.isBlank()) {
       for (String candidate : candidates) {
-        if (containsWholeToken(latestText, ToolManager.normalize(candidate))) {
+        if (mentionsName(latestText, candidate)) {
           explicit.add(candidate);
         }
       }
@@ -77,7 +77,7 @@ public final class ContextTargetResolver {
     // mentioned elsewhere in the filtered scene can preserve a multi-line target.
     if (normalizedSceneText != null && !normalizedSceneText.isBlank()) {
       for (String candidate : candidates) {
-        if (containsWholeToken(normalizedSceneText, ToolManager.normalize(candidate))) {
+        if (mentionsName(normalizedSceneText, candidate)) {
           explicit.add(candidate);
         }
       }
@@ -118,6 +118,82 @@ public final class ContextTargetResolver {
         || padded.contains(" soy ")
         || padded.contains(" dame ")
         || padded.contains(" dime ");
+  }
+
+
+
+  /**
+   * Resolves common human ways of writing Minecraft names without turning target
+   * selection into a broad fuzzy search. Exact names still win, then a compact
+   * no-space form handles names such as "En3Minutos" written as "en 3 minutos".
+   * Finally, only the alphabetic stem of an involved name may match a single
+   * similarly-sized token with a tiny edit distance (e.g. WITHE9033 -> "white").
+   *
+   * <p>The candidate set is already restricted to players involved/online in the
+   * scene, so this does not search arbitrary offline identities.</p>
+   */
+  public static boolean mentionsName(String normalizedText, String candidateName) {
+    if (mentionsNameStrict(normalizedText, candidateName)) return true;
+    if (normalizedText == null || candidateName == null
+        || normalizedText.isBlank() || candidateName.isBlank()) return false;
+
+    String text = ToolManager.normalize(normalizedText);
+    String candidate = ToolManager.normalize(candidateName);
+    String compactCandidate = candidate.replaceAll("[^\\p{L}\\p{N}]+", "");
+    String alphaCandidate = compactCandidate.replaceAll("[^\\p{L}]+", "");
+    if (alphaCandidate.length() < 4) return false;
+
+    int allowedDistance = alphaCandidate.length() >= 5 ? 2 : 1;
+    for (String rawToken : text.split("\\s+")) {
+      String token = rawToken.replaceAll("[^\\p{L}]+", "");
+      if (token.length() < 4) continue;
+      if (Math.abs(token.length() - alphaCandidate.length()) > allowedDistance) continue;
+      if (levenshteinWithin(token, alphaCandidate, allowedDistance)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Exact/compact form only; safe to use while scanning every online player.
+   */
+  public static boolean mentionsNameStrict(String normalizedText, String candidateName) {
+    if (normalizedText == null || candidateName == null
+        || normalizedText.isBlank() || candidateName.isBlank()) return false;
+
+    String text = ToolManager.normalize(normalizedText);
+    String candidate = ToolManager.normalize(candidateName);
+    if (candidate.isBlank()) return false;
+    if (containsWholeToken(text, candidate)) return true;
+
+    String compactText = text.replaceAll("[^\\p{L}\\p{N}]+", "");
+    String compactCandidate = candidate.replaceAll("[^\\p{L}\\p{N}]+", "");
+    return compactCandidate.length() >= 4 && compactText.contains(compactCandidate);
+  }
+
+  private static boolean levenshteinWithin(String left, String right, int maxDistance) {
+    if (left.equals(right)) return true;
+    if (Math.abs(left.length() - right.length()) > maxDistance) return false;
+
+    int[] previous = new int[right.length() + 1];
+    int[] current = new int[right.length() + 1];
+    for (int j = 0; j <= right.length(); j++) previous[j] = j;
+
+    for (int i = 1; i <= left.length(); i++) {
+      current[0] = i;
+      int rowMin = current[0];
+      for (int j = 1; j <= right.length(); j++) {
+        int cost = left.charAt(i - 1) == right.charAt(j - 1) ? 0 : 1;
+        current[j] = Math.min(
+            Math.min(current[j - 1] + 1, previous[j] + 1),
+            previous[j - 1] + cost);
+        rowMin = Math.min(rowMin, current[j]);
+      }
+      if (rowMin > maxDistance) return false;
+      int[] swap = previous;
+      previous = current;
+      current = swap;
+    }
+    return previous[right.length()] <= maxDistance;
   }
 
   public static boolean containsWholeToken(String normalizedText, String normalizedToken) {

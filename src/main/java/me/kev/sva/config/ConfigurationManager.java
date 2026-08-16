@@ -64,13 +64,15 @@ public final class ConfigurationManager {
 
     boolean migrated = migrateSingleFileLayout(main, personality, wiki, mainFile);
     boolean actionSafetyMigrated = migrate166ActionSafetyDefault(main);
+    boolean outputBudgetMigrated = migrate171OutputBudget(main);
     boolean relationshipPersonalityMigrated = migrateRelationshipPersonalityDefault(personality);
-    boolean mainChanged = migrated | actionSafetyMigrated | mergeBundledDefaults(main, "config.yml");
+    boolean relationshipCapacityMigrated = migrate171RelationshipUpdateCapacity(relationships);
+    boolean mainChanged = migrated | actionSafetyMigrated | outputBudgetMigrated | mergeBundledDefaults(main, "config.yml");
     boolean personalityChanged = migrated | relationshipPersonalityMigrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
     boolean integrationsChanged = mergeBundledDefaults(integrations, INTEGRATIONS_FILE);
-    boolean relationshipsChanged = mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
+    boolean relationshipsChanged = relationshipCapacityMigrated | mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
 
     mainChanged |= syncSchemaVersion(main, "config.yml");
     personalityChanged |= syncSchemaVersion(personality, PERSONALITY_FILE);
@@ -103,6 +105,12 @@ public final class ConfigurationManager {
     }
     if (relationshipPersonalityMigrated) {
       plugin.getLogger().info("Migrated the old hardcoded Aminowana romance default to relationship-driven behavior.");
+    }
+    if (outputBudgetMigrated) {
+      plugin.getLogger().info("Raised the old 75-token output ceiling to 120 for reliable m+t+r JSON responses.");
+    }
+    if (relationshipCapacityMigrated) {
+      plugin.getLogger().info("Raised the old relationship updates-per-scene default from 1 to 2 for group scenes.");
     }
   }
 
@@ -161,6 +169,32 @@ public final class ConfigurationManager {
     if (!file.exists()) {
       plugin.saveResource(resourceName, false);
     }
+  }
+
+  /**
+   * 1.7.1 needs a little more headroom for the compact m+t+r envelope. This changes
+   * only the exact old bundled 75-token value; custom larger limits are preserved.
+   * A higher ceiling is not a reservation and does not force the model to spend it.
+   */
+  private boolean migrate171OutputBudget(YamlConfiguration main) {
+    if (main.getInt("config-version", 0) > 9) return false;
+    String path = "ai.max-output-tokens";
+    if (!main.isSet(path) || main.getInt(path, 75) != 75) return false;
+    main.set(path, 120);
+    return true;
+  }
+
+  /**
+   * 1.7.1 lets a single group scene update both sides of an interaction (for example,
+   * one player insults Isolda while another defends her). Only the exact old bundled
+   * schema-1 value is migrated; deliberate custom limits are otherwise preserved.
+   */
+  private boolean migrate171RelationshipUpdateCapacity(YamlConfiguration relationships) {
+    if (relationships.getInt("config-version", 0) > 1) return false;
+    String path = "updates.max-per-response";
+    if (!relationships.isSet(path) || relationships.getInt(path, 1) != 1) return false;
+    relationships.set(path, 2);
+    return true;
   }
 
   /**

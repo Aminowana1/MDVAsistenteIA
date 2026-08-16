@@ -1,12 +1,14 @@
-# ServerAssistant 1.7.0
+# ServerAssistant 1.7.2
 
-ServerAssistant 1.7.0 keeps the MDVCRAFT **single global conversation** architecture and adds two bounded local-memory systems without creating a second AI request during normal conversation: a rolling activity journal and persistent per-player relationships/social memories.
+ServerAssistant 1.7.2 keeps the MDVCRAFT **single global conversation** architecture and adds two bounded local-memory systems without creating a second AI request during normal conversation: a rolling activity journal and persistent per-player relationships/social memories.
+
+1.7.2 also hardens scene isolation: pre-trigger lookback is now explicitly context-only and can no longer re-answer an old question, re-authorize an action, pollute wiki retrieval, or steal an inventory/profile target. Local CONTEXT tools are driven by the players who actually addressed Isolda in the current scene. Player-name resolution accepts compact/spaced forms such as `En3Minutos` / `en 3 minutos` and small involved-name typos such as `WITHE9033` / `white`.
 
 The normal chat path stays economical: the activity journal costs zero prompt tokens unless a historical question is detected, while relationship changes are proposed inside the same compact `m`/`t`/`r` response Isolda already returns and are validated by Java before being stored.
 
 
 
-## 1.7.0 activity journal + relationships
+## 1.7.2 scene isolation + activity journal + relationships
 
 The rolling activity journal is RAM-only and bounded by `activity-journal.retention-minutes`, `max-records`, `max-context-records` and `max-context-chars`. It records public player chat plus trusted join/quit/kick/death/advancement events, but it is inserted into the AI prompt only for recognizable historical questions. Both history scopes start `admin-only` for safe testing and can be changed at runtime:
 
@@ -20,7 +22,9 @@ The rolling activity journal is RAM-only and bounded by `activity-journal.retent
 
 Examples include `Iso, que paso con Kroattan en las ultimas 2 horas?` and `Iso, que paso mientras no estuve?`. The latter uses the requester's last disconnect marker from the current plugin/server session and is still capped by the configured retention window. A full server restart intentionally clears this rolling journal; relationship data does not.
 
-Relationships are stored in `relationships.db` with an in-RAM cache. Everyone begins at score `0` unless the YAML default is deliberately changed. `relationships.yml` controls score limits, anti-farming cooldowns, the maximum 8 persistent / 12 recent memories, recent-memory expiry, behavior tiers, enemy ignore chances, dynamic smart-follow-up windows, romance capacity and optional event reactions. `romance.max-partners: 0` disables romance completely by default. Spontaneous event reactions are also disabled by default because each firing intentionally consumes one normal AI request.
+Relationships are stored in `relationships.db` with an in-RAM cache. Everyone begins at score `0` unless the YAML default is deliberately changed. `relationships.yml` controls score limits, anti-farming cooldowns, the maximum 8 persistent / 12 recent memories, recent-memory expiry, behavior tiers, enemy ignore chances, dynamic smart-follow-up windows, romance capacity and optional event reactions. `romance.max-partners: 0` disables romance completely by default; set it to `1` for one exclusive partner. Partner, below-threshold, disabled and capacity-full behavior are separately configurable. Java hard-enforces the global partner cap. The bundled SQLite journal mode is `DELETE`, so committed changes live in the main `.db` file and a FileZilla/DB Browser copy is easier to inspect; `WAL` remains configurable if desired.
+
+1.7.1 makes relationship writes reliable even with small models: the model may return either the compact `r` string or a structured JSON object, and a conservative zero-token Java fallback records obvious events such as date proposals, strong affection, support, apologies and direct hostility when the model omits `r`. Up to two players can be updated in the same group scene, so an insult and another player's defense are not forced to compete for one slot. The fallback uses the same anti-farming limits and never starts romance by itself unless the current scene contains an explicit partnership proposal and Isolda's visible reply clearly accepts it. Spontaneous event reactions remain disabled by default because each firing intentionally consumes one normal AI request.
 
 Admin diagnostics/data controls:
 
@@ -28,6 +32,7 @@ Admin diagnostics/data controls:
 /sva relationship info <player|uuid>
 /sva relationship memories <player|uuid>
 /sva relationship set <player|uuid> <-100..100>
+/sva relationship romance <player|uuid> <on|off>
 /sva relationship purge <player|uuid>
 /sva data purge <player|uuid>
 ```
@@ -192,13 +197,13 @@ When a player becomes involved in a model scene, ServerAssistant automatically a
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-For 1.7.0 the Maven version is:
+For 1.7.2 the Maven version is:
 
 ```xml
-<version>1.7.0</version>
+<version>1.7.2</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.7.0.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.7.2.jar`.
 
 
 ### Reused GitHub repositories

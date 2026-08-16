@@ -1,15 +1,20 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.0 - RELATIONSHIPS / SOCIAL MEMORY
+# SERVER ASSISTANT 1.7.2 - RELATIONSHIPS / SOCIAL MEMORY
 # ============================================================
 # This file controls Isolda's persistent relationship system.
 # Relationship data itself is stored in relationships.db; this YAML contains only rules.
 # Missing keys are added automatically without replacing your edits.
-config-version: 1
+config-version: 2
 
 enabled: true
 
 storage:
   database-file: relationships.db
+
+  # DELETE keeps committed data in the main .db file, which makes live read-only
+  # inspection through FileZilla/DB Browser much less confusing. WAL is also accepted
+  # but then recent commits may temporarily live in relationships.db-wal.
+  journal-mode: DELETE
 
 score:
   initial: 0
@@ -29,8 +34,14 @@ updates:
 
   # The model reports relationship changes in the SAME normal response.
   # No second AI request is made.
-  max-per-response: 1
+  max-per-response: 2
   max-absolute-delta: 5
+
+  # Zero-token reliability fallback. The model still handles nuanced cases, but
+  # Java records obvious date proposals, strong affection, support, apologies and
+  # direct hostility if the model omits r entirely. No extra AI request is made.
+  local-fallback:
+    enabled: true
 
   # Anti-farming. Positive and negative directions are limited independently.
   positive-cooldown-seconds: 90
@@ -49,8 +60,40 @@ memories:
 # 0 = romance completely disabled. Increase this only if you want Isolda to be
 # able to have one or more persistent romantic partners.
 romance:
+  # Global hard cap enforced by Java. 0 disables romance completely; 1 means
+  # Isolda can have only one romantic partner at a time, etc.
   max-partners: 0
   minimum-score: 90
+
+  # Hard Java guards in addition to the prompt. A model cannot create a romance
+  # unless the current scene contains a real partnership proposal AND Isolda's
+  # visible reply clearly accepts it.
+  require-explicit-proposal: true
+  require-visible-acceptance: true
+
+  # Extra behavior layered on top of the normal score tier only for real partners.
+  # If their score later drops, the tier still controls whether the relationship
+  # feels strained/hostile; being partners does not magically erase conflict.
+  partner-behavior: "Es tu pareja romantica. Hay una confianza y cercania especiales: puedes ser carinosa, coqueta, protectora y tener bromas privadas o celos juguetones ocasionales, pero no conviertas cada mensaje en romance. Sigue teniendo personalidad propia. Si el tier actual es negativo, trata la relacion como deteriorada o en conflicto en vez de fingir que todo esta perfecto."
+
+  # Injected only when another non-partner reaches the romance threshold but the
+  # configured maximum is already occupied. This is authoritative: do not accept
+  # una nueva pareja mientras no haya un lugar libre.
+  capacity-full-behavior: "Ya alcanzaste tu maximo de parejas romanticas. Si este jugador intenta iniciar otro noviazgo, no lo aceptes ni prometas ser su pareja. Rechazalo de forma natural acorde a tu personalidad; puedes seguir siendo amable o cercana si corresponde."
+
+  # Injected when the player has not reached minimum-score yet. Dates/flirting can
+  # still happen; this only prevents an instant formal relationship.
+  below-threshold-behavior: "Todavia no existe suficiente confianza para formalizar un noviazgo. Puedes coquetear, aceptar una cita o seguir conociendolo si te nace, pero no aceptes ser su pareja todavia."
+
+  # Injected when max-partners=0.
+  disabled-behavior: "El romance esta deshabilitado. No aceptes convertir a ningun jugador en tu pareja romantica aunque coquetee o tenga relacion alta."
+
+  # Emergency Java-only lines used only if a small model explicitly says it accepts
+  # a prohibited partnership despite the trusted rules above. Normally they never fire.
+  guard-replies:
+    capacity-full: "mmm... no, ya tengo el lugar de pareja ocupado y no voy a prometerte algo que no puedo cumplir"
+    score-too-low: "vas demasiado rapido... primero tendras que ganarte bastante mas mi confianza"
+    disabled: "nah, no estoy buscando un noviazgo"
 
 # These are behavior instructions, not hardcoded dialogue. Isolda still speaks
 # naturally according to personality.yml, but her closeness/hostility follows the
@@ -131,4 +174,7 @@ event-reactions:
   max-per-hour: 3
 
 debug:
+  # Useful during testing; keep false in production to avoid noisy console output.
   log-updates: false
+  log-rejected-updates: false
+  log-model-relationship-output: false

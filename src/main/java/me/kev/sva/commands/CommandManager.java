@@ -299,7 +299,7 @@ public final class CommandManager implements TabExecutor {
       return;
     }
     if (args.length < 2) {
-      MessageSender.Error(sender, "Usage: /sva relationship <info|memories|set|purge> ...");
+      MessageSender.Error(sender, "Usage: /sva relationship <info|memories|set|romance|purge> ...");
       return;
     }
     String action = args[1].toLowerCase(Locale.ROOT);
@@ -335,6 +335,14 @@ public final class CommandManager implements TabExecutor {
           MessageSender.Error(sender, "Score must be a number.");
         }
       }
+      case "romance" -> {
+        if (args.length != 4 || (!args[3].equalsIgnoreCase("on") && !args[3].equalsIgnoreCase("off"))) {
+          MessageSender.Error(sender, "Usage: /sva relationship romance <player|uuid> <on|off>");
+          return;
+        }
+        MessageSender.Success(sender,
+            plugin.getRelationshipManager().setRomance(args[2], args[3].equalsIgnoreCase("on")));
+      }
       case "purge" -> {
         if (args.length != 3) {
           MessageSender.Error(sender, "Usage: /sva relationship purge <player|uuid>");
@@ -342,7 +350,7 @@ public final class CommandManager implements TabExecutor {
         }
         purgePlayerData(sender, args[2]);
       }
-      default -> MessageSender.Error(sender, "Usage: /sva relationship <info|memories|set|purge> ...");
+      default -> MessageSender.Error(sender, "Usage: /sva relationship <info|memories|set|romance|purge> ...");
     }
   }
 
@@ -420,7 +428,7 @@ public final class CommandManager implements TabExecutor {
 
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(Component.text(
-        "SVA: /sva reload | status | trigger | listener ... | history [status|general|player] | relationship <info|memories|set|purge> | data purge <player> | tools ... | integrations ... | approve/deny"));
+        "SVA: /sva reload | status | trigger | listener ... | history [status|general|player] | relationship <info|memories|set|romance|purge> | data purge <player> | tools ... | integrations ... | approve/deny"));
   }
 
   @Override
@@ -469,15 +477,19 @@ public final class CommandManager implements TabExecutor {
       return complete(args[2], ACCESS_MODES);
     }
     if (args.length == 2 && (args[0].equalsIgnoreCase("relationship") || args[0].equalsIgnoreCase("relation") || args[0].equalsIgnoreCase("rel"))) {
-      return complete(args[1], List.of("info", "memories", "set", "purge"));
+      return complete(args[1], List.of("info", "memories", "set", "romance", "purge"));
     }
     if (args.length == 2 && args[0].equalsIgnoreCase("data")) {
       return complete(args[1], List.of("purge"));
     }
     if (args.length == 3 && ((args[0].equalsIgnoreCase("relationship") || args[0].equalsIgnoreCase("relation") || args[0].equalsIgnoreCase("rel"))
-        && List.of("info", "memories", "set", "purge").contains(args[1].toLowerCase(Locale.ROOT))
+        && List.of("info", "memories", "set", "romance", "purge").contains(args[1].toLowerCase(Locale.ROOT))
         || (args[0].equalsIgnoreCase("data") && args[1].equalsIgnoreCase("purge")))) {
       return complete(args[2], Bukkit.getOnlinePlayers().stream().map(player -> player.getName()).toList());
+    }
+    if (args.length == 4 && (args[0].equalsIgnoreCase("relationship") || args[0].equalsIgnoreCase("relation") || args[0].equalsIgnoreCase("rel"))
+        && args[1].equalsIgnoreCase("romance")) {
+      return complete(args[3], List.of("on", "off"));
     }
     if (args.length == 2 && (args[0].equalsIgnoreCase("tools") || args[0].equalsIgnoreCase("tool"))) {
       return complete(args[1], List.of("list", "pending", "moderation", "set", "run"));

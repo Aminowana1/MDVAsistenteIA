@@ -27,7 +27,7 @@ public class AssistantResponse {
 
     List<String> parsedMessages = List.of();
     List<String> parsedToolCalls = List.of();
-    List<String> parsedRelationshipUpdates = List.of();
+    List<Object> parsedRelationshipUpdates = List.of();
     boolean parsedCloseConversation = false;
 
     String cleanedResponse = stripOuterCodeFence(response == null ? "" : response).trim();
@@ -58,11 +58,11 @@ public class AssistantResponse {
               getStringListFlexible(data, "tool_calls"),
               getStringListFlexible(data, "tools"));
 
-          parsedRelationshipUpdates = firstNonEmpty(
-              getStringListFlexible(data, "r"),
-              getStringListFlexible(data, "relationships"),
-              getStringListFlexible(data, "relationship-updates"),
-              getStringListFlexible(data, "relationship_updates"));
+          parsedRelationshipUpdates = firstNonEmptyObjects(
+              getObjectListFlexible(data, "r"),
+              getObjectListFlexible(data, "relationships"),
+              getObjectListFlexible(data, "relationship-updates"),
+              getObjectListFlexible(data, "relationship_updates"));
 
           parsedCloseConversation = getBooleanFlexible(
               data,
@@ -255,6 +255,22 @@ public class AssistantResponse {
     return List.of();
   }
 
+  private static List<Object> getObjectListFlexible(Map<?, ?> data, String key) {
+    Object value = data.get(key);
+    if (value == null) return List.of();
+    if (value instanceof List<?> list) return new ArrayList<>(list);
+    if (value instanceof String scalar && scalar.isBlank()) return List.of();
+    return List.of(value);
+  }
+
+  @SafeVarargs
+  private static List<Object> firstNonEmptyObjects(List<Object>... candidates) {
+    for (List<Object> candidate : candidates) {
+      if (candidate != null && !candidate.isEmpty()) return candidate;
+    }
+    return List.of();
+  }
+
   @SafeVarargs
   private static List<String> firstNonEmpty(List<String>... candidates) {
     for (List<String> candidate : candidates) {
@@ -425,17 +441,33 @@ public class AssistantResponse {
     return List.copyOf(result);
   }
 
-  private List<RelationshipUpdate> normalizeRelationshipUpdates(List<String> input) {
-    if (input == null || input.isEmpty()) return List.of();
+  private List<RelationshipUpdate> normalizeRelationshipUpdates(List<?> input) {
+    boolean logPayload = plugin.getRelationshipsConfig() != null
+        && plugin.getRelationshipsConfig().getBoolean("debug.log-model-relationship-output", false);
+    if (input == null || input.isEmpty()) {
+      if (logPayload) plugin.getLogger().info("Model relationship payload: []");
+      return List.of();
+    }
     int max = Math.max(plugin.getRelationshipsConfig() == null
         ? 1
         : plugin.getRelationshipsConfig().getInt("updates.max-per-response", 1), 0);
     if (max == 0) return List.of();
+
+    boolean logRejected = plugin.getRelationshipsConfig() != null
+        && plugin.getRelationshipsConfig().getBoolean("debug.log-rejected-updates", false);
+
     List<RelationshipUpdate> result = new ArrayList<>();
-    for (String raw : input) {
+    for (Object raw : input) {
       if (result.size() >= max) break;
-      RelationshipUpdate update = RelationshipUpdate.parseCompact(raw);
-      if (update != null) result.add(update);
+      if (logPayload) {
+        plugin.getLogger().info("Model relationship payload: " + String.valueOf(raw));
+      }
+      RelationshipUpdate update = RelationshipUpdate.parse(raw);
+      if (update != null) {
+        result.add(update);
+      } else if (logRejected) {
+        plugin.getLogger().warning("Rejected malformed relationship payload: " + String.valueOf(raw));
+      }
     }
     return List.copyOf(result);
   }

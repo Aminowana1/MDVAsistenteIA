@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.7.2 - Scene isolation + context reliability hotfix
+
+- Separates `pre-lookback` chat/events from the CURRENT scene. Old immediate context is now marked context-only and cannot be re-answered as if it were the new request.
+- Wiki, inventory, player-data and profile prefetching are driven only by current players who actually addressed Isolda, preventing unrelated group chatter from consuming a context-tool slot or stealing the target.
+- Fixes repeated answers caused by a smart follow-up inheriting the previous 12-18 seconds as fresh player input.
+- Fixes stale pre-lookback requests leaking into the next tool/action decision; the existing Java action authorization remains a second safety layer.
+- Improves player target resolution for natural name variants: compact/spaced numeric names (`En3Minutos` -> `en 3 minutos`) and small typos of already-involved names (`WITHE9033` -> `white`).
+- Applies the same involved-name matching to activity-journal target lookup, improving recent-history questions.
+- Improves local wiki ranking for multi-word item/recipe names and queries wiki only from the current addressed request instead of unrelated scene chatter.
+- Adds `wiki.yml -> local-retrieval.debug-log` for zero-call diagnostics showing the normalized query and selected section keys.
+- Adds `activity-journal.debug-log` to verify when player/general history queries are recognized, also with zero AI calls.
+- Strengthens CORE priority rules: PRE-CONTEXT/PREVIOUS SCENE may not be answered again; explicit trusted WIKI/INVENTORY/ACTIVITY data must be used when it directly answers the current question.
+- Keeps 1.7.1 relationship persistence, guarded romance, zero-token fallback, SQLite cache design and one-model-call architecture unchanged.
+
+## 1.7.1 - Relationship reliability + guarded romance
+
+- Fixes relationship/social-memory updates appearing inert when GPT-4o-mini omits `r`: a conservative Java fallback now records obvious date proposals, strong affection/trust, support/defense, apologies, direct hostility and basic compliments without any additional AI request.
+- Accepts both compact relationship strings and structured JSON objects in `r`, avoiding silent drops when a compatible model chooses an object shape.
+- Strengthens the relationship prompt so every direct social interaction is evaluated instead of treating `r` as merely optional bookkeeping.
+- Allows up to two relationship updates in one group scene (migrating only the old default `1`), so an insult and another player's defense can both affect their own profiles without another AI call.
+- Adds diagnostic toggles for raw model relationship payloads, rejected updates and applied updates.
+- Raises the old bundled OpenAI output ceiling from 75 to 120 tokens (migration only touches the exact old 75 value). This is a ceiling, not reserved usage, and keeps the same one-call architecture.
+- Adds configurable partner behavior plus below-threshold, romance-disabled and partner-capacity-full behavior in `relationships.yml`.
+- Romance start is now guarded in Java by minimum score, global `max-partners`, an explicit current-scene partnership proposal and a visibly accepting Isolda reply. `max-partners: 1` therefore cannot create a second partner.
+- Adds `/sva relationship romance <player|uuid> <on|off>` for admin testing; enabling romance obeys the same score/capacity rules.
+- Admin `/sva relationship set` and romance changes clear the tiny conversational carry-over so an old friendly scene cannot overpower a newly forced hostile score (or vice versa).
+- Uses SQLite `DELETE` journal mode by default (still configurable) so committed changes are visible in the main `.db` file when inspecting a FileZilla copy instead of being hidden temporarily in a `.db-wal` sidecar.
+- Adds a final zero-token dialogue guard so a small model cannot verbally accept a prohibited second partner after Java rejects the state change.
+- Previous scenes containing ACTION requests are no longer fed back as conversational history, preventing an old `rayo` request from leaking into a later unrelated scene while Java's existing action safety remains enabled.
+- Keeps SQLite + RAM cache, bounded memories, anti-farming and the GitHub Actions/Maven Java 21 build flow.
+
 ## 1.7.0 - Activity journal + persistent relationships
 
 - Adds a bounded RAM-only activity journal for public player chat and trusted server events. Normal scenes receive zero journal tokens unless a historical question is detected.

@@ -59,4 +59,35 @@ final class ContextTargetResolverTest {
     assertEquals(List.of("Aminowana"), targets);
   }
 
+  @Test
+  void spacedNumericNameResolvesToCompactMinecraftName() {
+    List<ChatMessage> messages = List.of(new PlayerChatMessage(
+        null, UUID.randomUUID(), "Aminowana", "Aminowana", true,
+        "iso que tiene en 3 minutos en su inventario?"));
+
+    List<String> targets = ContextTargetResolver.resolve(
+        List.of("Aminowana", "En3Minutos"),
+        ToolManager.normalize("iso que tiene en 3 minutos en su inventario?"),
+        messages,
+        1);
+
+    assertEquals(List.of("En3Minutos"), targets);
+  }
+
+  @Test
+  void smallTypoCanResolveAlreadyInvolvedOnlineName() {
+    List<ChatMessage> messages = List.of(new PlayerChatMessage(
+        null, UUID.randomUUID(), "Aminowana", "Aminowana", true,
+        "iso que tiene white en su inventario?"));
+
+    List<String> targets = ContextTargetResolver.resolve(
+        List.of("Aminowana", "WITHE9033"),
+        ToolManager.normalize("iso que tiene white en su inventario?"),
+        messages,
+        1);
+
+    assertEquals(List.of("WITHE9033"), targets);
+  }
+
+
 }

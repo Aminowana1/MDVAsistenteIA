@@ -31,6 +31,7 @@ import me.kev.sva.chat.message.AssistantChatMessage;
 import me.kev.sva.chat.message.ChatMessage;
 import me.kev.sva.chat.message.PlayerChatMessage;
 import me.kev.sva.chat.message.SystemContextMessage;
+import me.kev.sva.chat.tools.ContextTargetResolver;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 
 /**
@@ -326,6 +327,14 @@ public final class ConversationManager {
       int start = Math.max(0, memories.size() - historyScenes);
       for (int i = start; i < memories.size(); i++) {
         SceneMemory memory = memories.get(i);
+        // Action-request scenes are intentionally omitted from conversational history.
+        // The user already saw the result, and retaining "tirale un rayo" was enough
+        // to make small models leak a stale lightning call into the next scene.
+        boolean oldActionScene = plugin.getToolManager() != null
+            && memory.messages().stream().anyMatch(message ->
+                message instanceof PlayerChatMessage playerMessage
+                    && plugin.getToolManager().hasAnyActionIntent(playerMessage.content));
+        if (oldActionScene) continue;
         modelMessages.addAll(memory.messages());
         if (!memory.assistantReply().isBlank()) {
           modelMessages.add(new AssistantChatMessage(plugin, memory.assistantReply()));
@@ -590,12 +599,13 @@ public final class ConversationManager {
         involvedNames, selectedEvents, activeIdentities);
     String identityContext = formatIdentityContext(involvedNames, sceneIdentities);
 
-    // Only a player whose direct/smart line actually survived the relevance/cap
-    // filter receives follow-up eligibility. Context-only players never do.
+    // Only a player whose direct/smart CURRENT line actually survived the
+    // relevance/cap filter receives follow-up eligibility. Pre-lookback lines are
+    // context only and must never renew a conversation.
     Set<UUID> eligibleAddressers = new LinkedHashSet<>();
     if (addressers != null && !addressers.isEmpty()) {
       for (PublicChatRecord chat : selectedChats) {
-        if (addressers.contains(chat.playerId())) {
+        if (chat.timestampMs() >= capture.triggerAt() && addressers.contains(chat.playerId())) {
           eligibleAddressers.add(chat.playerId());
         }
       }
@@ -611,29 +621,60 @@ public final class ConversationManager {
     atoms.sort(Comparator.comparingLong(SceneAtom::timestampMs)
         .thenComparingInt(atom -> atom.event() == null ? 0 : 1));
 
+    // CRITICAL 1.7.2 isolation: the pre-lookback exists only so Isolda can understand
+    // references such as "eso" / "viste lo de antes?". It is not the CURRENT request.
+    // Feeding it through currentMessages made a smart follow-up like "xd" re-answer
+    // an older question and also polluted wiki/inventory target detection.
+    List<ChatMessage> preContextMessages = new ArrayList<>();
     List<ChatMessage> currentMessages = new ArrayList<>();
     for (SceneAtom atom : atoms) {
+      ChatMessage rendered;
       if (atom.chat() != null) {
         PublicChatRecord chat = atom.chat();
-        currentMessages.add(new PlayerChatMessage(
+        rendered = new PlayerChatMessage(
             plugin,
             chat.playerId(),
             chat.playerName(),
             chat.displayName(),
             chat.admin(),
             sceneIdentities.getOrDefault(chat.playerName().toLowerCase(Locale.ROOT), ""),
-            chat.content()));
+            chat.content());
       } else {
         ServerEventRecord event = atom.event();
         String players = event.involvedPlayers().isEmpty()
             ? "none"
             : formatEventPlayers(event.involvedPlayers(), sceneIdentities, event.playerIdentities());
-        currentMessages.add(new SystemContextMessage(
+        rendered = new SystemContextMessage(
             plugin,
             "[EVENT type=" + event.type() + " players=" + players + "] ",
-            event.text()));
+            event.text());
+      }
+
+      if (atom.timestampMs() < capture.triggerAt()) {
+        preContextMessages.add(rendered);
+      } else {
+        currentMessages.add(rendered);
       }
     }
+
+    // Resolve the actual addressed request BEFORE building the model transcript.
+    // Non-addressed current chatter remains visible as context, but is placed before
+    // the request marker so a later unrelated line cannot become the accidental task.
+    List<ChatMessage> resolvedRequestMessages = selectRequestMessages(currentMessages, eligibleAddressers);
+    if (resolvedRequestMessages.isEmpty()) {
+      resolvedRequestMessages = currentMessages.stream()
+          .filter(message -> message instanceof PlayerChatMessage)
+          .toList();
+    }
+    final List<ChatMessage> requestMessages = resolvedRequestMessages.isEmpty()
+        ? List.copyOf(currentMessages)
+        : List.copyOf(resolvedRequestMessages);
+    List<ChatMessage> related = new ArrayList<>();
+    for (ChatMessage message : currentMessages) {
+      if (!requestMessages.contains(message)) related.add(message);
+    }
+    final List<ChatMessage> currentRelatedMessages = List.copyOf(related);
+    Set<String> currentContextNames = selectCurrentContextNames(requestMessages, involvedNames);
 
     List<ChatMessage> modelMessages = new ArrayList<>();
     int historyScenes = Math.max(
@@ -650,23 +691,52 @@ public final class ConversationManager {
       int start = Math.max(0, memories.size() - historyScenes);
       for (int i = start; i < memories.size(); i++) {
         SceneMemory memory = memories.get(i);
+        // Action-request scenes are intentionally omitted from conversational history.
+        // The user already saw the result, and retaining "tirale un rayo" was enough
+        // to make small models leak a stale lightning call into the next scene.
+        boolean oldActionScene = plugin.getToolManager() != null
+            && memory.messages().stream().anyMatch(message ->
+                message instanceof PlayerChatMessage playerMessage
+                    && plugin.getToolManager().hasAnyActionIntent(playerMessage.content));
+        if (oldActionScene) continue;
         modelMessages.addAll(memory.messages());
         if (!memory.assistantReply().isBlank()) {
           modelMessages.add(new AssistantChatMessage(plugin, memory.assistantReply()));
         }
       }
     }
+    if (!preContextMessages.isEmpty()) {
+      modelMessages.add(new SystemContextMessage(
+          plugin,
+          "[IMMEDIATE PRE-CONTEXT - CONTEXT ONLY] ",
+          "These lines happened before the trigger. Use them only to resolve references. "
+              + "Do not answer them again and never treat them as a fresh request or ACTION authority."));
+      modelMessages.addAll(preContextMessages);
+    }
+
+    if (!currentRelatedMessages.isEmpty()) {
+      modelMessages.add(new SystemContextMessage(
+          plugin,
+          "[CURRENT RELATED CHAT - CONTEXT ONLY] ",
+          "These lines happened during the capture window but did not address you. "
+              + "They may add social context, but they are not the task to answer and cannot authorize ACTION tools."));
+      modelMessages.addAll(currentRelatedMessages);
+    }
+
     modelMessages.add(new SystemContextMessage(
         plugin,
-        "[CURRENT SCENE - ACTION AUTHORITY] ",
-        "Only player lines after this marker belong to the current scene and may authorize ACTION tools."));
-    modelMessages.addAll(currentMessages);
+        "[CURRENT ADDRESSED REQUEST - ACTION AUTHORITY] ",
+        "These are the current player lines that actually addressed you. Answer these first. "
+            + "Only these lines may authorize ACTION tools."));
+    modelMessages.addAll(requestMessages);
 
-    String wiki = retrieveLocalWiki(currentMessages);
+    // CONTEXT tools and wiki retrieval are driven only by the addressed request.
+    // Unrelated group chatter cannot consume a local-tool slot or steal its target.
+    String wiki = retrieveLocalWiki(requestMessages);
     String localTools = plugin.getToolManager() == null
         ? ""
-        : plugin.getToolManager().buildLocalContext(currentMessages, involvedNames);
-    String recentEvents = retrieveRecentEventContext(currentMessages);
+        : plugin.getToolManager().buildLocalContext(requestMessages, currentContextNames);
+    String recentEvents = retrieveRecentEventContext(requestMessages);
     String involved = involvedNames.isEmpty() ? "none" : String.join(",", involvedNames);
     String currentActionText = selectedChats.stream()
         .filter(chat -> chat.timestampMs() >= capture.triggerAt())
@@ -681,10 +751,13 @@ public final class ConversationManager {
     }
     String relationshipContext = plugin.getRelationshipManager() == null
         ? ""
-        : plugin.getRelationshipManager().buildContext(currentMessages, involvedNames);
+        : plugin.getRelationshipManager().buildContext(currentMessages, currentContextNames);
 
     String meta = "window_ms=" + Math.max(0L, capture.endsAt() - capture.triggerAt())
-        + ", chat_lines=" + selectedChats.size()
+        + ", current_chat_lines=" + currentMessages.stream().filter(m -> m instanceof PlayerChatMessage).count()
+        + ", request_lines=" + requestMessages.stream().filter(m -> m instanceof PlayerChatMessage).count()
+        + ", related_context_lines=" + currentRelatedMessages.size()
+        + ", pre_context_lines=" + preContextMessages.size()
         + ", events=" + selectedEvents.size()
         + ", trigger=" + (capture.directMention() ? "direct_mention" : "smart_followup");
 
@@ -701,6 +774,51 @@ public final class ConversationManager {
         currentActionText,
         AssistantManager.PRIMARY,
         0);
+  }
+
+  private List<ChatMessage> selectRequestMessages(
+      List<ChatMessage> currentMessages,
+      Set<UUID> eligibleAddressers) {
+    if (currentMessages == null || currentMessages.isEmpty()) return List.of();
+    if (eligibleAddressers == null || eligibleAddressers.isEmpty()) return List.copyOf(currentMessages);
+
+    List<ChatMessage> selected = new ArrayList<>();
+    for (ChatMessage message : currentMessages) {
+      if (message instanceof PlayerChatMessage playerMessage
+          && eligibleAddressers.contains(playerMessage.playerId)) {
+        selected.add(message);
+      }
+    }
+    return List.copyOf(selected);
+  }
+
+  /**
+   * Candidate players for local observation/relationship context must come from the
+   * CURRENT addressed request, not from names that happened to appear in pre-lookback.
+   * This keeps old group chatter from making inventory/profile inspect the wrong player.
+   */
+  private Set<String> selectCurrentContextNames(
+      List<ChatMessage> requestMessages,
+      Set<String> involvedNames) {
+    LinkedHashSet<String> selected = new LinkedHashSet<>();
+    StringBuilder requestText = new StringBuilder();
+    if (requestMessages != null) {
+      for (ChatMessage message : requestMessages) {
+        if (message instanceof PlayerChatMessage playerMessage) {
+          selected.add(playerMessage.playerName);
+          if (playerMessage.content != null) requestText.append(playerMessage.content).append(' ');
+        }
+      }
+    }
+
+    String text = requestText.toString();
+    if (involvedNames != null && !text.isBlank()) {
+      for (String name : involvedNames) {
+        if (name == null || name.isBlank()) continue;
+        if (ContextTargetResolver.mentionsName(text, name)) selected.add(name);
+      }
+    }
+    return new LinkedHashSet<>(selected);
   }
 
   private List<PublicChatRecord> limitChatRecords(List<PublicChatRecord> records, long triggerAt) {
@@ -751,19 +869,42 @@ public final class ConversationManager {
       Set<UUID> involvedIds,
       Set<String> involvedNames) {
     boolean changed = false;
+    boolean strictMatched = false;
     for (Map.Entry<String, UUID> entry : knownNames.entrySet()) {
       String lowercaseName = entry.getKey();
-      if (!containsWholeWordIgnoreCase(message, lowercaseName)
+      if (!ContextTargetResolver.mentionsNameStrict(message, lowercaseName)
           && !message.toLowerCase(Locale.ROOT).contains("@" + lowercaseName)) {
         continue;
       }
+      strictMatched = true;
       UUID id = entry.getValue();
-      if (involvedIds.add(id)) {
-        changed = true;
+      if (involvedIds.add(id)) changed = true;
+      Player online = Bukkit.getPlayer(id);
+      String canonical = online != null ? online.getName() : lowercaseName;
+      if (involvedNames.add(canonical)) changed = true;
+    }
+
+    // If no exact/compact name matched, accept ONE unambiguous fuzzy alias only for
+    // digit-bearing Minecraft names. This safely handles e.g. WITHE9033 -> "white"
+    // without fuzzily scanning ordinary alphabetic player names against normal prose.
+    if (!strictMatched) {
+      Map.Entry<String, UUID> fuzzy = null;
+      for (Map.Entry<String, UUID> entry : knownNames.entrySet()) {
+        String candidate = entry.getKey();
+        if (!candidate.matches(".*\\d.*")) continue;
+        if (!ContextTargetResolver.mentionsName(message, candidate)) continue;
+        if (fuzzy != null && !fuzzy.getValue().equals(entry.getValue())) {
+          fuzzy = null;
+          break;
+        }
+        fuzzy = entry;
       }
-      String canonical = Bukkit.getPlayer(id) != null ? Bukkit.getPlayer(id).getName() : lowercaseName;
-      if (involvedNames.add(canonical)) {
-        changed = true;
+      if (fuzzy != null) {
+        UUID id = fuzzy.getValue();
+        if (involvedIds.add(id)) changed = true;
+        Player online = Bukkit.getPlayer(id);
+        String canonical = online != null ? online.getName() : fuzzy.getKey();
+        if (involvedNames.add(canonical)) changed = true;
       }
     }
     return changed;
@@ -777,7 +918,7 @@ public final class ConversationManager {
       if (name == null || name.isBlank()) {
         continue;
       }
-      if (containsWholeWordIgnoreCase(text, name)
+      if (ContextTargetResolver.mentionsName(text, name)
           || text.toLowerCase(Locale.ROOT).contains("@" + name.toLowerCase(Locale.ROOT))) {
         return true;
       }
@@ -985,6 +1126,17 @@ public final class ConversationManager {
   }
 
   /** Removes the player's rolling scene/log traces from this runtime. */
+  /** Clears tiny conversational carry-over after an admin force-changes relationship state. */
+  public void clearRelationshipRuntimeContext(UUID playerId) {
+    if (playerId != null) {
+      smartFollowUpUntilByPlayer.remove(playerId);
+      activeAddressers.remove(playerId);
+    }
+    // Assistant replies can mention the player without a structural UUID, so the
+    // safest tiny operation is clearing the 1-2 scene history entries entirely.
+    sceneHistory.clear();
+  }
+
   public void purgePlayerFromRuntime(UUID playerId, String playerName) {
     if (playerId == null) return;
     String lower = playerName == null ? "" : playerName.toLowerCase(Locale.ROOT);
@@ -1108,12 +1260,28 @@ public final class ConversationManager {
     if (queryTerms.isEmpty()) {
       return "";
     }
+    String meaningfulPhrase = String.join(" ", queryTerms);
 
     List<WikiCandidate> candidates = new ArrayList<>();
     for (WikiIndexEntry indexed : wikiIndex) {
       int score = 0;
       if (!indexed.normalizedKey().isBlank() && query.contains(indexed.normalizedKey())) {
         score += 8;
+      }
+      // Item/recipe names are usually multi-word phrases. Rewarding the compact
+      // meaningful phrase makes "como se craftea el garrote del pantano" beat a
+      // generic section that happens to share one common word.
+      if (queryTerms.size() >= 2 && meaningfulPhrase.length() >= 7) {
+        if (indexed.normalizedKey().contains(meaningfulPhrase)) score += 14;
+        if (indexed.normalizedDescription().contains(meaningfulPhrase)) score += 10;
+        if (indexed.normalizedContent().contains(meaningfulPhrase)) score += 10;
+
+        // Stop-words such as "del" are removed from the query phrase, so exact
+        // substring matching alone would miss "garrote del pantano". Give a
+        // strong bonus when ALL meaningful terms occur in the same section.
+        if (containsAllTerms(indexed.normalizedKey(), queryTerms)) score += 12;
+        else if (containsAllTerms(indexed.normalizedDescription(), queryTerms)) score += 9;
+        else if (containsAllTerms(indexed.normalizedContent(), queryTerms)) score += 9;
       }
       for (String term : queryTerms) {
         if (containsWholeWordIgnoreCase(indexed.normalizedKey(), term)) score += 4;
@@ -1143,6 +1311,7 @@ public final class ConversationManager {
 
     candidates.sort(Comparator.comparingInt(WikiCandidate::score).reversed());
     StringBuilder out = new StringBuilder();
+    List<String> selectedKeys = new ArrayList<>();
     int used = 0;
     for (WikiCandidate candidate : candidates) {
       if (candidate.score() < minScore || used >= maxSections) {
@@ -1159,7 +1328,11 @@ public final class ConversationManager {
         out.append('\n');
       }
       out.append('[').append(candidate.key()).append("] ").append(content);
+      selectedKeys.add(candidate.key() + ":" + candidate.score());
       used++;
+    }
+    if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
+      plugin.getLogger().info("Wiki retrieval query='" + query + "' selected=" + selectedKeys);
     }
     return out.toString();
   }
@@ -1220,11 +1393,22 @@ public final class ConversationManager {
     return normalized;
   }
 
+  private static boolean containsAllTerms(String haystack, Set<String> terms) {
+    if (haystack == null || haystack.isBlank() || terms == null || terms.isEmpty()) return false;
+    for (String term : terms) {
+      if (!containsWholeWordIgnoreCase(haystack, term)) return false;
+    }
+    return true;
+  }
+
   private static Set<String> meaningfulTerms(String text) {
     Set<String> stop = Set.of(
         "que", "como", "donde", "cuando", "quien", "para", "por", "con", "una", "uno", "unos",
         "unas", "del", "las", "los", "eso", "esta", "este", "esto", "soy", "eres", "hay", "iso",
-        "isolda", "the", "and", "what", "where", "how", "when", "you", "your");
+        "isolda", "se", "un", "de", "en", "mi", "mis", "su", "sus", "es", "son", "quiero",
+        "craftea", "craftear", "crafteo", "craft", "consigo", "conseguir", "obtengo", "obtener",
+        "encuentro", "encontrar", "sirve", "sirven", "the", "and", "what", "where", "how", "when",
+        "you", "your");
     Set<String> result = new LinkedHashSet<>();
     for (String token : text.split("\\s+")) {
       if (token.length() >= 3 && !stop.contains(token)) {
@@ -1343,8 +1527,23 @@ public final class ConversationManager {
       response = new AssistantResponse(plugin, List.of(), List.of(), false);
     }
 
-    if (plugin.getRelationshipManager() != null && !response.getRelationshipUpdates().isEmpty()) {
-      plugin.getRelationshipManager().applyUpdates(response.getRelationshipUpdates(), scene.currentSceneMessages());
+    if (plugin.getRelationshipManager() != null) {
+      plugin.getRelationshipManager().applySceneUpdates(
+          response.getRelationshipUpdates(),
+          scene.currentSceneMessages(),
+          scene.followUpEligiblePlayerIds(),
+          response.historyText());
+
+      String guardedReply = plugin.getRelationshipManager().guardRomanceReply(
+          response.historyText(), scene.currentSceneMessages(), scene.followUpEligiblePlayerIds()).trim();
+      if (!guardedReply.equals(response.historyText().trim())) {
+        response = new AssistantResponse(
+            plugin,
+            guardedReply.isBlank() ? List.of() : List.of(guardedReply),
+            response.getToolCalls(),
+            response.getRelationshipUpdates(),
+            response.shouldCloseConversation());
+      }
     }
 
     String reply = response.historyText().trim();

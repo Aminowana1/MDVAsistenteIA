@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.0 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.2 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 9
+config-version: 11
 
 assistant-name: Isolda
 
@@ -17,7 +17,7 @@ ai:
   api-key: YOUR_OPENAI_API_KEY_HERE
   base-url: https://api.openai.com/v1/
   model: gpt-4o-mini
-  max-output-tokens: 75
+  max-output-tokens: 120
   temperature: 0.75
   max-requests-per-minute: 12
 
@@ -129,6 +129,8 @@ global-conversation:
 # about recent history, and is intentionally cleared by a full server/plugin restart.
 activity-journal:
   enabled: true
+  # Diagnostic only; logs when a history query is recognized and selected.
+  debug-log: false
   retention-minutes: 120
   max-records: 10000
 

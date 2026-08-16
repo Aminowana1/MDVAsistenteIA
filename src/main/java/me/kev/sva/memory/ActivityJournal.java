@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 import org.bukkit.entity.Player;
 
 import me.kev.sva.ServerAssistantPlugin;
+import me.kev.sva.chat.tools.ContextTargetResolver;
 
 /**
  * Small rolling public activity journal kept only in RAM.
@@ -122,7 +123,9 @@ public final class ActivityJournal {
       }
       long requestedWindow = parseRequestedWindowMs(normalized, defaultPlayerWindowMs());
       long from = Math.max(now - requestedWindow, retentionStart(now));
-      return formatTargetHistory(target, from, now);
+      String result = formatTargetHistory(target, from, now);
+      debug("scope=player target=" + target.name() + " window_ms=" + (now - from));
+      return result;
     }
 
     if (generalSinceDisconnect || generalTimed) {
@@ -145,7 +148,9 @@ public final class ActivityJournal {
         from = Math.max(now - requestedWindow, retentionStart(now));
         basis = "ultimos " + Math.max(1L, (now - from) / 60_000L) + " minutos";
       }
-      return formatGeneralHistory(from, now, basis);
+      String result = formatGeneralHistory(from, now, basis);
+      debug("scope=general basis=" + basis + " window_ms=" + (now - from));
+      return result;
     }
 
     return "";
@@ -294,18 +299,31 @@ public final class ActivityJournal {
 
   private KnownPlayer resolveTarget(String normalizedText, UUID requesterId) {
     if (normalizedText == null || normalizedText.isBlank()) return null;
-    KnownPlayer best = null;
+
+    KnownPlayer bestStrict = null;
     int bestLength = -1;
     for (KnownPlayer known : knownPlayers.values()) {
       if (requesterId != null && requesterId.equals(known.uuid())) continue;
       String normalizedName = normalize(known.name());
       if (normalizedName.isBlank()) continue;
-      if (containsWholeWord(normalizedText, normalizedName) && normalizedName.length() > bestLength) {
-        best = known;
+      if (ContextTargetResolver.mentionsNameStrict(normalizedText, known.name())
+          && normalizedName.length() > bestLength) {
+        bestStrict = known;
         bestLength = normalizedName.length();
       }
     }
-    return best;
+    if (bestStrict != null) return bestStrict;
+
+    // Fuzzy nickname/typo matching is accepted only when exactly one known player
+    // fits. This keeps "white" -> WITHE9033 useful without guessing among aliases.
+    KnownPlayer fuzzy = null;
+    for (KnownPlayer known : knownPlayers.values()) {
+      if (requesterId != null && requesterId.equals(known.uuid())) continue;
+      if (!ContextTargetResolver.mentionsName(normalizedText, known.name())) continue;
+      if (fuzzy != null && !fuzzy.uuid().equals(known.uuid())) return null;
+      fuzzy = known;
+    }
+    return fuzzy;
   }
 
   private static boolean looksLikePlayerHistoryQuestion(String text) {
@@ -353,6 +371,12 @@ public final class ActivityJournal {
     String mode = plugin.getConfig().getString(path, fallback);
     mode = mode == null ? fallback : mode.trim().toLowerCase(Locale.ROOT);
     return "everyone".equals(mode) ? "everyone" : "admin-only";
+  }
+
+  private void debug(String message) {
+    if (plugin.getConfig().getBoolean("activity-journal.debug-log", false)) {
+      plugin.getLogger().info("Activity journal selected: " + message);
+    }
   }
 
   private boolean enabled() {

@@ -186,6 +186,16 @@ public final class ToolManager {
     return getAvailableActionToolsPrompt("rayo sonido recuerdame mute");
   }
 
+  /** True when text contains any currently implemented ACTION intent. Used to keep old action requests out of model history. */
+  public boolean hasAnyActionIntent(String rawText) {
+    String text = normalize(rawText);
+    if (text.isBlank()) return false;
+    return hasCurrentActionIntent("lightning", text)
+        || hasCurrentActionIntent("sound", text)
+        || hasCurrentActionIntent("schedule", text)
+        || containsAny(text, "mute", "mutea", "mutear", "silencia", "silenciar");
+  }
+
   private boolean hasCurrentActionIntent(String toolName, String normalizedText) {
     if (toolName == null || normalizedText == null || normalizedText.isBlank()) return false;
     return switch (toolName) {
