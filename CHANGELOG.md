@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.10.1 - Compile hotfix
+
+- Removed a duplicate `commonPrefixLength(String, String)` helper accidentally introduced in `ConversationManager`.
+- No runtime behavior, token usage, wiki routing, relationship logic, or group-thread affinity behavior changed from 1.7.10.
+
 ## 1.7.10 - Zero-token group thread affinity router
 
 - Replaces the 1.7.9 mostly rule/phrase-driven group candidate check with a local weighted affinity router.

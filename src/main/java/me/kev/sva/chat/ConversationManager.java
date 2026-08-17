@@ -2051,13 +2051,6 @@ public final class ConversationManager {
     return 0;
   }
 
-  private static int commonPrefixLength(String a, String b) {
-    int max = Math.min(a.length(), b.length());
-    int i = 0;
-    while (i < max && a.charAt(i) == b.charAt(i)) i++;
-    return i;
-  }
-
   private static double lcsSimilarity(String a, String b) {
     if (a.isEmpty() || b.isEmpty()) return 0.0;
     int[] previous = new int[b.length() + 1];
