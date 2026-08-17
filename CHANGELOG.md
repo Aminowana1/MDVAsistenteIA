@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.7.12 - Natural group entry + single-subject reply shaping
+
+- Fixes group **entry** being stricter than group exit/SMART continuation. Java now scores a nearby player against the aggregate Isolda thread, the last Isolda reply, and direct/SMART root lines, then still compares the result against competing side-chat.
+- Short contextual echoes such as `que cosas importantes?`, `como es eso de tension?`, `que si sientes?`, and participant-linked interjections can join without explicitly saying `Iso` when they fit the active exchange.
+- Increases the bundled pre-call candidate lookback from 6s to 12s so a player can join from a relevant line shortly **before** another player calls Isolda, as well as from lines during the normal post-trigger capture window. Only the tiny configured pre-candidate cap is promoted.
+- Retunes bundled group defaults from `join=48 / margin=12 / auto=68` to `join=44 / margin=10 / auto=64` and adds `active-anchor-join-threshold=34`. Exact untouched 1.7.11 values are migrated; custom tuning is preserved.
+- Keeps unrelated direct player-to-player requests lateral even when they mention an active participant, preventing `En3 dame piedra` from joining a romance/social thread merely because `En3` is present.
+- Adds richer optional group debug logging (`base`, `assistant_anchor`, `root_anchor`, side score and decision), all Java-local and zero-token.
+- Fixes one model thought becoming two or three public Isolda messages. Multiple `m[]` entries are now merged into one bubble unless they explicitly target different current Isolda-thread players. Independent multi-speaker replies remain possible in the same single model request.
+- Adds regression tests for natural group-entry anchors and reply-burst coalescing.
+- Config schema is now 16. No embeddings, no classifier request and no second model call were added.
+
 ## 1.7.11 - Zero-token semantic SMART trigger gate
 
 - A live SMART timer no longer makes every next message from that player open an AI request. Before triggering, Java locally checks whether the line still belongs to Isolda's exchange.

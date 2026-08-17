@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.11 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.12 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 15
+config-version: 16
 
 assistant-name: Isolda
 
@@ -119,15 +119,21 @@ global-conversation:
     # No embeddings/model/classifier request is used and unrelated chatter is excluded.
     group-threading:
       enabled: true
-      pre-candidate-lookback-ms: 6000
+      # A participant may already have reacted shortly BEFORE somebody calls Isolda.
+      # Java can promote at most max-pre-candidate-lines after affinity filtering.
+      pre-candidate-lookback-ms: 12000
       max-pre-candidate-lines: 2
       affinity:
-        # Candidate must fit Isolda's thread at least this well (0-100).
-        join-threshold: 48
+        # Broad aggregate score. Slightly permissive, but side-thread competition remains mandatory.
+        join-threshold: 44
+        # Short replies/questions can instead join through a strong exact active anchor
+        # (last Isolda reply or a direct/SMART root line), fixing natural echoes such as
+        # "que cosas importantes?" or "como es eso de tension?".
+        active-anchor-join-threshold: 34
         # If it fits a recent side-thread almost as well, keep it out of Isolda's SMART.
-        min-margin-over-side-thread: 12
+        min-margin-over-side-thread: 10
         # Strong matches at/above this score inherit SMART locally without needing f.
-        auto-follow-up-threshold: 68
+        auto-follow-up-threshold: 64
         side-thread-lookback-ms: 8000
         max-side-lines: 5
         # Testing only; logs local scores but does not spend API tokens.
@@ -215,6 +221,8 @@ provider-response:
   debug-malformed-responses: false
   # Temporary diagnostic: logs when a direct mention returns m=[] without spending another request.
   debug-empty-direct-replies: false
+  # Testing only: logs when multiple model m[] entries are collapsed into fewer chat bubbles.
+  debug-reply-shaping: false
 
 # ============================================================
 # ASSISTANT TOOLS

@@ -71,7 +71,9 @@ public final class ConfigurationManager {
     boolean relationshipContextMigrated = migrate176RelationshipContextCapacity(relationships);
     boolean archEnemyIgnoreMigrated = migrate176ArchEnemyIgnoreDefault(relationships);
     boolean relationshipMemoryBudgetMigrated = migrate179RelationshipMemoryBudget(relationships);
-    boolean mainChanged = migrated | actionSafetyMigrated | outputBudgetMigrated | multiReplyMigrated | mergeBundledDefaults(main, "config.yml");
+    boolean groupThreadDefaultsMigrated = migrate1712GroupThreadDefaults(main);
+    boolean mainChanged = migrated | actionSafetyMigrated | outputBudgetMigrated | multiReplyMigrated
+        | groupThreadDefaultsMigrated | mergeBundledDefaults(main, "config.yml");
     boolean personalityChanged = migrated | relationshipPersonalityMigrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
@@ -128,6 +130,9 @@ public final class ConfigurationManager {
     }
     if (relationshipMemoryBudgetMigrated) {
       plugin.getLogger().info("Raised relationship memory summaries from 90 to 120 chars so stored events can stay specific and self-contained.");
+    }
+    if (groupThreadDefaultsMigrated) {
+      plugin.getLogger().info("Migrated 1.7.12 group-thread defaults: wider pre-call window and more natural zero-token join affinity.");
     }
   }
 
@@ -188,6 +193,32 @@ public final class ConfigurationManager {
     }
   }
 
+
+  /**
+   * 1.7.12 fixes group entry being stricter than group exit. Existing installations
+   * using the exact 1.7.11 bundled values receive the new safe defaults; deliberate
+   * custom tuning is preserved. New keys are merged normally afterwards.
+   */
+  private boolean migrate1712GroupThreadDefaults(YamlConfiguration main) {
+    if (main.getInt("config-version", 0) > 15) return false;
+    boolean changed = false;
+    changed |= migrateExactInt(main,
+        "global-conversation.scene.group-threading.pre-candidate-lookback-ms", 6000, 12000);
+    changed |= migrateExactInt(main,
+        "global-conversation.scene.group-threading.affinity.join-threshold", 48, 44);
+    changed |= migrateExactInt(main,
+        "global-conversation.scene.group-threading.affinity.min-margin-over-side-thread", 12, 10);
+    changed |= migrateExactInt(main,
+        "global-conversation.scene.group-threading.affinity.auto-follow-up-threshold", 68, 64);
+    return changed;
+  }
+
+  private static boolean migrateExactInt(
+      YamlConfiguration config, String path, int oldValue, int newValue) {
+    if (!config.isSet(path) || config.getInt(path, oldValue) != oldValue) return false;
+    config.set(path, newValue);
+    return true;
+  }
 
   /**
    * 1.7.9 stores memories as concrete self-contained events instead of tiny labels.

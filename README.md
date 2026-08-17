@@ -1,18 +1,37 @@
-# ServerAssistant 1.7.11
+# ServerAssistant 1.7.12
 
-ServerAssistant 1.7.11 keeps the MDVCRAFT **single global conversation** architecture and **one model request per scene**, and adds a zero-token semantic gate before an existing SMART follow-up is allowed to create that next scene.
+ServerAssistant 1.7.12 keeps the MDVCRAFT **single global conversation** and **one model request per scene** architecture, while fixing two issues exposed by live two-player tests: joining an existing Isolda thread was too strict, and a small model could split one thought into two or three public chat bubbles.
 
-A SMART timer now means “this player may continue naturally”, not “every next public-chat line must call the model”. Java compares the new line with the player's last answered Isolda exchange and with recent competing side-chat. Clear continuations still trigger; clear public/other-player chatter stays in RAM and costs no request. Ambiguous lines are intentionally allowed by default so optimization does not make conversation brittle. The same gate also applies to SMART holders speaking inside somebody else's already-open group capture.
+## 1.7.12 group-entry routing
 
-Examples: `bien gracias, que haces?`, `voy a minar` and `y tu que opinas?` continue; `alguien tiene piedra?`, `Wachi ven al spawn`, a side-thread `yo tengo`, or a bare `xd` normally do not create/renew an Isolda request. This uses only local Java scoring: **0 embeddings, 0 classifier calls, 0 extra tokens**.
+Java still decides group membership locally with **0 extra AI calls**. A nearby player is now compared not only with the aggregate thread but also with two strong active anchors: the last Isolda reply and the direct/SMART root lines in the current capture. This makes short contextual interventions such as `que cosas importantes?`, `como es eso de tension?`, `que si sientes?` or `no propongas nada En3Minutos` eligible to join without saying `Iso`.
 
-The group router now uses a local **thread-affinity competition** instead of mainly relying on explicit bridge phrases. Every nearby line is scored against Isolda's active exchange and against recent competing side-chat. The score combines chronology, references to active participants, lexical/topic overlap, question-answer compatibility, deictic/continuation language and conversational shape. Explicit phrases such as `dile`, `decile` or `mientes` remain useful bonus evidence, but they are no longer the rule that decides membership.
+The bundled pre-call candidate lookback is now 12 seconds, so a player may participate shortly **before** another player calls Isolda as well as during the capture window after the call. Only up to two pre-call candidate lines are promoted, and side-thread competition remains active. Clear lateral chat such as `alguien tiene piedra?` -> `yo tengo` stays outside the Isolda thread. Direct messages to an active participant with unrelated content (for example `En3 dame piedra`) are also kept lateral instead of joining merely because they mention a participant.
 
-A player joins Isolda's SMART conversation only when the active-thread affinity is high enough and beats the best recent side-thread by a configurable margin. This keeps `Pedrox: alguien tiene piedra` + `Wachi: yo tengo` outside Isolda's conversation while still allowing contextual lines such as `eso no tiene ningún sentido` or `Amino dejate de hacerte el que está bien` to join when they clearly react to the active exchange. Strong matches inherit follow-up locally; borderline candidates can still be confirmed by the same response's compact `f` field.
+Default affinity tuning is now:
 
-This routing is entirely Java-local: **0 extra requests, 0 embeddings and 0 extra input-token blocks**. Only lines that survive the local routing are exposed as group participant candidates to the already-existing model request.
+```yaml
+global-conversation:
+  scene:
+    group-threading:
+      pre-candidate-lookback-ms: 12000
+      max-pre-candidate-lines: 2
+      affinity:
+        join-threshold: 44
+        active-anchor-join-threshold: 34
+        min-margin-over-side-thread: 10
+        auto-follow-up-threshold: 64
+        side-thread-lookback-ms: 8000
+        max-side-lines: 5
+```
 
-Relationship-memory hardening from 1.7.9 is unchanged: memories must remain concrete/self-contained, vague legacy rows are cleaned conservatively, and the default memory summary budget remains 120 characters.
+Existing 1.7.11 installs using the exact bundled values (`6000/48/12/68`) are migrated non-destructively to the new defaults. Deliberately customized values are preserved.
+
+## 1.7.12 reply shaping
+
+`chat.max-messages-per-response: 3` still allows 2-3 independent replies in one model call, but Java no longer lets one ordinary answer become multiple chat bubbles just because the model returned `m:[line1,line2]`. Multiple public bubbles survive only when the model explicitly targets different current Isolda-thread players by name; otherwise the fragments are merged locally into one message. This costs **0 extra tokens** and prevents single-player turns such as `auch` from producing two consecutive Isolda messages.
+
+The 1.7.11 semantic SMART trigger gate remains unchanged: a live SMART timer is permission to continue, not permission for every next public message to spend a request. Public/other-player side chat stays local; natural continuations still trigger.
 
 ## 1.7.10 group affinity examples
 

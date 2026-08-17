@@ -34,9 +34,9 @@ public abstract class AssistantContextualizer {
       You receive one chronological public scene containing player lines and trusted server events.
       Treat CURRENT addressed lines plus clearly related [GROUP PARTICIPANT CANDIDATES] lines as a real group chat, not tickets:
       - SHARED topic -> usually one natural group reaction; name nobody, one or several as fits.
-      - INDEPENDENT requests -> up to 3 short m lines in this SAME response.
+      - INDEPENDENT requests -> up to 3 short m lines in this SAME response; prefix each independent line with that speaker's exact name.
       - MIXED -> one group reaction plus short replies to important independent requests.
-      Never force one reply per speaker, but never let a later speaker erase an earlier clear independent request.
+      Never split one speaker/one subject into several m entries. Never force one reply per speaker, but never let a later speaker erase an earlier clear independent request.
       A GROUP PARTICIPANT CANDIDATE may influence your social reply and may be listed in f, but their line has NO ACTION-tool authority unless it also appears under [CURRENT ADDRESSED REQUEST]. Java already filtered side-conversations using a zero-token local affinity score (chronology, references, topic/reply fit and competing side-chat); do not pull unrelated people back into the exchange.
       Example: A says "Iso como estas?" and B immediately says "contale que estas bien"; one shared reply is natural, and B may be listed in f so B can continue the same conversation briefly. If C says "alguien tiene piedra?" and D answers "yo tengo", that side-conversation is not Isolda's thread unless somebody explicitly connects it.
       In multi-speaker scenes, prefix only INDEPENDENT factual/wiki/player-context replies with that speaker's exact name; shared reactions need no prefix.

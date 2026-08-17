@@ -937,15 +937,17 @@ public final class ConversationManager {
 
     String base = "global-conversation.scene.group-threading.";
     long preLookback = Math.max(plugin.getConfig().getLong(
-        base + "pre-candidate-lookback-ms", 6000L), 0L);
+        base + "pre-candidate-lookback-ms", 12000L), 0L);
     int maxPre = Math.max(plugin.getConfig().getInt(
         base + "max-pre-candidate-lines", 2), 0);
     int joinThreshold = clampInt(plugin.getConfig().getInt(
-        base + "affinity.join-threshold", 48), 0, 100);
+        base + "affinity.join-threshold", 44), 0, 100);
     int minMargin = clampInt(plugin.getConfig().getInt(
-        base + "affinity.min-margin-over-side-thread", 12), 0, 100);
+        base + "affinity.min-margin-over-side-thread", 10), 0, 100);
+    int anchorJoinThreshold = clampInt(plugin.getConfig().getInt(
+        base + "affinity.active-anchor-join-threshold", 34), 0, 100);
     int autoThreshold = clampInt(plugin.getConfig().getInt(
-        base + "affinity.auto-follow-up-threshold", 68), joinThreshold, 100);
+        base + "affinity.auto-follow-up-threshold", 64), joinThreshold, 100);
     long sideLookback = Math.max(plugin.getConfig().getLong(
         base + "affinity.side-thread-lookback-ms", 8000L), 0L);
     int maxSideLines = Math.max(plugin.getConfig().getInt(
@@ -981,6 +983,9 @@ public final class ConversationManager {
         .filter(chat -> chat.timestampMs() <= capture.endsAt())
         .sorted(Comparator.comparingLong(PublicChatRecord::timestampMs))
         .toList();
+    List<PublicChatRecord> rootLines = timeline.stream()
+        .filter(chat -> roots.contains(chat.playerId()))
+        .toList();
 
     LinkedHashSet<PublicChatRecord> candidateRecords = new LinkedHashSet<>();
     LinkedHashSet<UUID> candidateIds = new LinkedHashSet<>();
@@ -1009,17 +1014,34 @@ public final class ConversationManager {
           ? previousAssistantReply
           : previousThreadLine.content();
 
-      int isoldaAffinity;
+      int baseThreadAffinity;
+      int assistantAnchorAffinity = activeThreadLineAffinity(
+          chat.content(), previousAssistantReply, participantNames,
+          Math.abs(chat.timestampMs() - capture.triggerAt()));
+      int rootAnchorAffinity = 0;
+      PublicChatRecord bestRootAnchor = null;
+      for (PublicChatRecord rootLine : rootLines) {
+        long anchorAge = Math.abs(chat.timestampMs() - rootLine.timestampMs());
+        int anchorScore = activeThreadLineAffinity(
+            chat.content(), rootLine.content(), participantNames, anchorAge);
+        if (anchorScore > rootAnchorAffinity) {
+          rootAnchorAffinity = anchorScore;
+          bestRootAnchor = rootLine;
+        }
+      }
+
       if (assistantMention) {
-        isoldaAffinity = 100;
+        baseThreadAffinity = 100;
       } else if (alreadySmart) {
-        isoldaAffinity = 96;
+        baseThreadAffinity = 96;
       } else {
-        isoldaAffinity = localThreadAffinity(
+        baseThreadAffinity = localThreadAffinity(
             chat.content(), threadText.toString(), previousThreadText,
             participantNames, threadAge, beforeTrigger);
-        if (explicitBridge) isoldaAffinity = Math.min(100, isoldaAffinity + 50);
+        if (explicitBridge) baseThreadAffinity = Math.min(100, baseThreadAffinity + 50);
       }
+      int isoldaAffinity = Math.max(
+          baseThreadAffinity, Math.max(assistantAnchorAffinity, rootAnchorAffinity));
 
       int bestSideAffinity = 0;
       PublicChatRecord bestSideLine = null;
@@ -1036,18 +1058,39 @@ public final class ConversationManager {
 
       int requiredMargin = explicitBridge ? Math.min(minMargin, 6) : minMargin;
       boolean strongAuthority = assistantMention || alreadySmart;
-      boolean candidate = strongAuthority
-          || (isoldaAffinity >= joinThreshold
-              && isoldaAffinity - bestSideAffinity >= requiredMargin);
+      boolean anchorMatch = Math.max(assistantAnchorAffinity, rootAnchorAffinity) >= anchorJoinThreshold;
+      boolean explicitParticipantSideAddress = looksLikeExplicitOtherPlayerAddress(
+          chat.content(), participantNames)
+          && topicOverlapScore(chat.content(), threadText.toString(), participantNames) == 0
+          && topicOverlapScore(chat.content(), previousAssistantReply, participantNames) == 0
+          && (bestRootAnchor == null
+              || topicOverlapScore(chat.content(), bestRootAnchor.content(), participantNames) == 0)
+          && !explicitBridge
+          && !looksLikeSocialThreadInterjection(chat.content());
+      boolean broadPublicSide = looksLikeBroadPublicRequest(chat.content())
+          && !referencesAnyParticipantAlias(chat.content(), participantNames)
+          && !explicitBridge;
+
+      boolean candidate = shouldJoinGroupCandidate(
+          strongAuthority, explicitParticipantSideAddress, broadPublicSide,
+          isoldaAffinity, bestSideAffinity, joinThreshold,
+          Math.max(assistantAnchorAffinity, rootAnchorAffinity), anchorJoinThreshold,
+          requiredMargin);
 
       if (debugAffinity) {
         plugin.getLogger().info("Group thread affinity scene=" + capture.sceneId()
             + " player=" + chat.playerName()
+            + " base=" + baseThreadAffinity
+            + " assistant_anchor=" + assistantAnchorAffinity
+            + " root_anchor=" + rootAnchorAffinity
+            + (bestRootAnchor == null ? "" : " root_speaker=" + bestRootAnchor.playerName())
             + " isolda=" + isoldaAffinity
             + " side=" + bestSideAffinity
             + (bestSideLine == null ? "" : " side_speaker=" + bestSideLine.playerName())
             + " before_trigger=" + beforeTrigger
             + " bridge=" + explicitBridge
+            + " direct_side=" + explicitParticipantSideAddress
+            + " broad_public=" + broadPublicSide
             + " decision=" + (candidate ? "JOIN" : "SIDE"));
       }
 
@@ -1073,7 +1116,9 @@ public final class ConversationManager {
       // response confirm them through the tiny f field.
       if (assistantMention || alreadySmart || explicitBridge
           || (isoldaAffinity >= autoThreshold
-              && isoldaAffinity - bestSideAffinity >= Math.max(requiredMargin, 16))) {
+              && isoldaAffinity - bestSideAffinity >= Math.max(requiredMargin, 16))
+          || (Math.max(assistantAnchorAffinity, rootAnchorAffinity) >= anchorJoinThreshold + 14
+              && isoldaAffinity - bestSideAffinity >= Math.max(requiredMargin, 12))) {
         autoParticipants.add(chat.playerId());
       }
     }
@@ -1088,6 +1133,22 @@ public final class ConversationManager {
     return new GroupThreadSelection(
         List.copyOf(pre), Set.copyOf(candidateRecords), Set.copyOf(candidateIds),
         Set.copyOf(autoParticipants), Map.copyOf(candidateByName));
+  }
+
+  static boolean shouldJoinGroupCandidate(
+      boolean strongAuthority,
+      boolean explicitParticipantSideAddress,
+      boolean broadPublicSide,
+      int isoldaAffinity,
+      int sideAffinity,
+      int joinThreshold,
+      int anchorAffinity,
+      int anchorJoinThreshold,
+      int requiredMargin) {
+    if (strongAuthority) return true;
+    if (explicitParticipantSideAddress || broadPublicSide) return false;
+    if (isoldaAffinity - sideAffinity < requiredMargin) return false;
+    return isoldaAffinity >= joinThreshold || anchorAffinity >= anchorJoinThreshold;
   }
 
   /**
@@ -1135,6 +1196,41 @@ public final class ConversationManager {
       score -= 8;
     }
     if (beforeTrigger) score -= 8;
+    return clampInt(score, 0, 100);
+  }
+
+  /**
+   * Pairwise zero-token affinity against one strong active-thread anchor (the last
+   * Isolda reply or a direct/SMART root line). This is deliberately more sensitive
+   * to short echo questions such as "que cosas importantes?" / "que si sientes?"
+   * than the broad aggregate score, while side-thread competition still has veto power.
+   */
+  static int activeThreadLineAffinity(
+      String raw,
+      String anchorRaw,
+      Set<String> participantNames,
+      long ageMs) {
+    String text = normalizeForSearch(raw);
+    String anchor = normalizeForSearch(anchorRaw);
+    if (text.isBlank() || anchor.isBlank()) return 0;
+
+    int score = 0;
+    int topic = topicOverlapScore(raw, anchorRaw, participantNames);
+    boolean referencesParticipant = referencesAnyParticipantAlias(raw, participantNames);
+    boolean replyShape = looksLikeConversationalReplyShape(raw);
+    boolean deictic = containsDeicticReference(raw);
+    boolean question = raw != null && (raw.contains("?")
+        || text.matches("^(?:que|como|donde|cuando|quien|cual|por que)\\b.*"));
+    int words = text.split("\\s+").length;
+
+    score += topic;
+    if (referencesParticipant) score += 22;
+    if (replyShape) score += 8;
+    if (deictic) score += 10;
+    if (question && topic > 0) score += 14;
+    if (topic > 0 && words <= 7) score += 8;
+    score += recencyAffinity(ageMs);
+
     return clampInt(score, 0, 100);
   }
 
@@ -2434,6 +2530,22 @@ public final class ConversationManager {
           response.getFollowUpSpeakers(), response.shouldCloseConversation());
     }
 
+    // One conversational subject should normally produce one public chat bubble.
+    // Small models sometimes split one thought into m=[line1,line2] even for one
+    // speaker. Collapse that burst locally. Multiple bubbles survive only when they
+    // are explicitly targeted at different current Isolda-thread speakers.
+    List<String> shapedReplies = coalesceReplyBurstForScene(scene, response.getMessages());
+    if (!shapedReplies.equals(response.getMessages())) {
+      if (plugin.getConfig().getBoolean("provider-response.debug-reply-shaping", false)) {
+        plugin.getLogger().info("Reply shaping scene=" + scene.sceneId()
+            + " model_messages=" + response.getMessages().size()
+            + " public_messages=" + shapedReplies.size());
+      }
+      response = new AssistantResponse(
+          plugin, shapedReplies, response.getToolCalls(), response.getRelationshipUpdates(),
+          response.getFollowUpSpeakers(), response.shouldCloseConversation());
+    }
+
     // Direct/smart addressers are known locally. For a true group exchange the same
     // single model response may additionally mark CURRENT related speakers in `f`.
     // This tiny metadata field avoids a second classifier/API request while preventing
@@ -2520,6 +2632,83 @@ public final class ConversationManager {
     }
 
     processNextRequest();
+  }
+
+  private List<String> coalesceReplyBurstForScene(SceneRequest scene, List<String> messages) {
+    if (messages == null || messages.size() <= 1 || scene == null) {
+      return messages == null ? List.of() : List.copyOf(messages);
+    }
+
+    LinkedHashSet<String> allowedTargets = new LinkedHashSet<>();
+    for (ChatMessage message : scene.currentSceneMessages()) {
+      if (!(message instanceof PlayerChatMessage playerMessage)) continue;
+      if (scene.followUpEligiblePlayerIds().contains(playerMessage.playerId)
+          || scene.groupParticipantCandidateIds().contains(playerMessage.playerId)) {
+        allowedTargets.add(playerMessage.playerName);
+      }
+    }
+    return coalesceMessagesByExplicitTargets(messages, allowedTargets);
+  }
+
+  /**
+   * Pure reply-shaping helper used by tests too. A model may use multiple m[] entries
+   * only to address different current speakers. Generic continuations are appended to
+   * the current bubble instead of becoming extra spammy chat messages.
+   */
+  static List<String> coalesceMessagesByExplicitTargets(
+      List<String> messages,
+      Set<String> allowedTargets) {
+    if (messages == null || messages.isEmpty()) return List.of();
+    if (messages.size() == 1) return List.copyOf(messages);
+
+    LinkedHashMap<String, StringBuilder> targeted = new LinkedHashMap<>();
+    StringBuilder shared = new StringBuilder();
+    String currentTarget = null;
+
+    for (String raw : messages) {
+      String message = raw == null ? "" : raw.trim();
+      if (message.isBlank()) continue;
+
+      String explicitTarget = null;
+      if (allowedTargets != null) {
+        for (String name : allowedTargets) {
+          if (name != null && !name.isBlank() && containsWholeWordIgnoreCase(message, name)) {
+            explicitTarget = name.toLowerCase(Locale.ROOT);
+            break;
+          }
+        }
+      }
+
+      if (explicitTarget != null) {
+        currentTarget = explicitTarget;
+        appendReplyFragment(targeted.computeIfAbsent(explicitTarget, ignored -> new StringBuilder()), message);
+      } else if (currentTarget != null && targeted.containsKey(currentTarget)) {
+        appendReplyFragment(targeted.get(currentTarget), message);
+      } else {
+        appendReplyFragment(shared, message);
+      }
+    }
+
+    // No distinct explicit targets: this was one thought split across m[].
+    if (targeted.size() <= 1) {
+      StringBuilder merged = new StringBuilder();
+      appendReplyFragment(merged, shared.toString());
+      for (StringBuilder value : targeted.values()) appendReplyFragment(merged, value.toString());
+      return merged.isEmpty() ? List.of() : List.of(merged.toString());
+    }
+
+    List<String> out = new ArrayList<>();
+    if (!shared.isEmpty()) out.add(shared.toString());
+    for (StringBuilder value : targeted.values()) {
+      if (!value.isEmpty()) out.add(value.toString());
+    }
+    return List.copyOf(out);
+  }
+
+  private static void appendReplyFragment(StringBuilder out, String fragment) {
+    if (out == null || fragment == null || fragment.isBlank()) return;
+    if (!out.isEmpty()) out.append(' ');
+    out.append(fragment.trim());
   }
 
   private Set<UUID> resolveConversationParticipants(SceneRequest scene, AssistantResponse response) {
