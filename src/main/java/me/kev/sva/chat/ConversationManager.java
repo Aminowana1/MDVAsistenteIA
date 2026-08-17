@@ -1999,7 +1999,14 @@ public final class ConversationManager {
       String raw = playerMessage.content == null ? "" : playerMessage.content.trim();
       String normalized = normalizeForSearch(raw);
       if (normalized.isBlank() || isObviousSocialSmallTalk(normalized)) continue;
-      if (looksLikeWikiFollowUp(normalized) || looksLikeLikelyWikiKnowledgeRequest(normalized)) {
+      // Deictic opinion prompts such as "q opinas de eso?" are social continuity,
+      // not server-knowledge lookups. In 1.7.12 they were accidentally treated as
+      // wiki follow-ups because they contain "eso", which could create no_match
+      // blocks and later trigger bogus local factual coverage.
+      if (looksLikeDeicticOpinionSmallTalk(normalized)) continue;
+      if (looksLikeWikiFollowUp(normalized)
+          || looksLikeLikelyWikiKnowledgeRequest(normalized)
+          || looksLikeImplicitServerEntityQuestion(raw, normalized)) {
         newestBySpeaker.put(playerMessage.playerId, new WikiQuerySelection(playerMessage, raw));
         if (newestBySpeaker.size() >= Math.max(1, maxQueries)) break;
       }
@@ -2021,6 +2028,7 @@ public final class ConversationManager {
 
     return containsAnyTerm(normalized,
         "que es ", "q es ", "que son ", "q son ", "que significa ",
+        "quien es ", "quienes son ", "existe ", "existen ", "conoces a ", "te suena ",
         "para que sirve", "para que se usa", "como funciona",
         "como se craftea", "como crafteo", "como craftear", "crafteo", "craftear",
         "como se hace", "receta", "recetas",
@@ -2034,6 +2042,55 @@ public final class ConversationManager {
         "que raza tiene", "que profesion", "drops", "drop ", "dropea", "droppea",
         "que da el ", "q da el ", "que suelta", "que puede soltar",
         "cuanto cuesta", "cuanto vale");
+  }
+
+
+  /**
+   * Fallback for short natural questions that name a server entity but omit classic
+   * interrogative wording. Example: "epicardo y la espada ultracita? iso". The
+   * local wiki search is cheap and, importantly, can return result=no_match so the
+   * model is explicitly grounded instead of inventing an NPC/quest/item.
+   */
+  static boolean looksLikeImplicitServerEntityQuestion(String raw, String normalized) {
+    if (raw == null || normalized == null || normalized.isBlank()) return false;
+    if (!raw.contains("?")) return false;
+    if (isObviousSocialSmallTalk(normalized) || looksLikeDeicticOpinionSmallTalk(normalized)) {
+      return false;
+    }
+
+    Set<String> terms = new LinkedHashSet<>(meaningfulTerms(normalized));
+    terms.removeAll(Set.of("opinas", "opinion", "piensas", "parece", "crees"));
+    if (terms.isEmpty()) return false;
+
+    String q = " " + normalized + " ";
+    boolean serverEntityNoun = containsAnyTerm(q,
+        " espada ", " arma ", " armas ", " pico ", " hacha ", " azada ", " arco ",
+        " ballesta ", " baculo ", " cetro ", " tomo ", " daga ", " maza ", " lanza ",
+        " armadura ", " casco ", " coraza ", " botas ", " pantalon ", " set ",
+        " item ", " items ", " objeto ", " objetos ", " material ", " materiales ",
+        " mineral ", " minerales ", " mena ", " mob ", " mobs ", " enemigo ",
+        " criatura ", " jefe ", " boss ", " miniboss ", " npc ", " comerciante ",
+        " mercader ", " mision ", " quest ", " receta ", " drop ", " evento ",
+        " faccion ", " raza ", " profesion ", " habilidad ", " hechizo ");
+
+    // A concrete server noun plus at least one descriptive/name term is enough.
+    // This deliberately does NOT make every question mark a wiki lookup.
+    return serverEntityNoun && terms.size() >= 2;
+  }
+
+  static boolean looksLikeDeicticOpinionSmallTalk(String normalized) {
+    if (normalized == null || normalized.isBlank()) return false;
+    String q = " " + normalized + " ";
+    boolean opinionCue = q.contains(" opinas ") || q.contains(" opinion ")
+        || q.contains(" piensas ") || q.contains(" que te parece ")
+        || q.contains(" q te parece ");
+    if (!opinionCue) return false;
+
+    // "de eso/esto" has no concrete server subject to retrieve. It belongs to the
+    // surrounding social conversation and should never create WIKI no_match blocks.
+    return q.contains(" de eso ") || q.contains(" de esto ") || q.contains(" de esa ")
+        || q.contains(" de ese ") || q.contains(" sobre eso ") || q.contains(" sobre esto ")
+        || q.contains(" opinas de eso ") || q.contains(" piensas de eso ");
   }
 
   private List<WikiCandidate> rankWikiCandidates(String query, Set<String> queryTerms) {
@@ -2783,18 +2840,17 @@ public final class ConversationManager {
       if (existing + replies.size() >= maxReplies) break;
       if (currentRequestRefusedForSpeaker(relationships, speaker.playerName)) continue;
       String block = wikiBlockForSpeaker(wiki, speaker.playerName);
-      if (block.isBlank()) continue;
+      if (block.isBlank() || wikiBlockIsNoMatch(block)) continue;
+      // Local coverage is allowed only when Java actually selected trusted wiki
+      // content. A result=no_match block is an instruction to the model, not a fact
+      // and never justifies manufacturing an extra public reply.
       // CORE requires independent factual replies in multi-speaker scenes to prefix
       // the exact speaker name. A shared/group reply intentionally has no such
       // requirement and must not trigger fake per-player coverage.
       if (responseCoversSpeaker(modelReplies, speaker.playerName)) continue;
 
       String answer = extractWikiFallbackAnswer(speaker.content, block);
-      if (answer.isBlank()) {
-        answer = block.toLowerCase(Locale.ROOT).contains("result=no_match")
-            ? "no tengo ese dato concreto y no voy a inventarlo"
-            : "no tengo una respuesta clara para ese dato";
-      }
+      if (answer.isBlank()) continue;
       replies.add(speaker.playerName + ", " + answer);
     }
     return List.copyOf(replies);
@@ -2841,11 +2897,12 @@ public final class ConversationManager {
       if (currentRequestRefusedForSpeaker(relationships, speaker.playerName)) continue;
       String block = wikiBlockForSpeaker(wiki, speaker.playerName);
       if (block.isBlank()) continue;
-      String answer = extractWikiFallbackAnswer(speaker.content, block);
-      if (answer.isBlank()) {
-        answer = block.toLowerCase(Locale.ROOT).contains("result=no_match")
-            ? "no tengo ese dato concreto y no voy a inventarlo"
-            : "no tengo una respuesta clara para ese dato";
+      String answer;
+      if (wikiBlockIsNoMatch(block)) {
+        answer = "no tengo informacion fiable sobre eso y no voy a inventarla";
+      } else {
+        answer = extractWikiFallbackAnswer(speaker.content, block);
+        if (answer.isBlank()) continue;
       }
       factual.add((multi ? speaker.playerName + ", " : "") + answer);
     }
@@ -2880,6 +2937,12 @@ public final class ConversationManager {
     return next < 0 ? wiki.substring(start) : wiki.substring(start, next);
   }
 
+
+  static boolean wikiBlockIsNoMatch(String wikiBlock) {
+    return wikiBlock != null
+        && wikiBlock.toLowerCase(Locale.ROOT).contains("result=no_match");
+  }
+
   private static String relationshipTierForSpeaker(String context, String playerName) {
     if (context == null || context.isBlank() || playerName == null) return "";
     for (String line : context.split("\\R")) {
@@ -2912,6 +2975,9 @@ public final class ConversationManager {
   /** Extracts a tiny factual answer from the already trusted wiki block. */
   static String extractWikiFallbackAnswer(String rawQuestion, String wikiBlock) {
     if (rawQuestion == null || wikiBlock == null || wikiBlock.isBlank()) return "";
+    // result=no_match contains an INTERNAL instruction line, not trusted knowledge.
+    // Never let the local extractor turn that protocol text into Isolda dialogue.
+    if (wikiBlockIsNoMatch(wikiBlock)) return "";
     String query = expandWikiAliases(normalizeForSearch(rawQuestion));
     Set<String> terms = new LinkedHashSet<>(meaningfulTerms(query));
     terms.removeAll(Set.of("drops", "drop", "dropea", "droppea", "coordenadas", "miniboss"));

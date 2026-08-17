@@ -27,6 +27,25 @@ final class WikiRetrievalHeuristicsTest {
   }
 
   @Test
+  void deicticOpinionQuestionsStaySocialInsteadOfWikiNoMatch() {
+    assertTrue(ConversationManager.looksLikeDeicticOpinionSmallTalk(
+        ConversationManager.normalizeForSearch("iso q opinas de eso?")));
+    assertTrue(ConversationManager.looksLikeDeicticOpinionSmallTalk(
+        ConversationManager.normalizeForSearch("que piensas de eso iso")));
+    assertFalse(ConversationManager.looksLikeImplicitServerEntityQuestion(
+        "iso q opinas de eso?", ConversationManager.normalizeForSearch("iso q opinas de eso?")));
+  }
+
+  @Test
+  void shortUnknownServerEntityQuestionStillConsultsLocalWiki() {
+    String raw = "epicardo y la espada ultracita? iso";
+    assertTrue(ConversationManager.looksLikeImplicitServerEntityQuestion(
+        raw, ConversationManager.normalizeForSearch(raw)));
+    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
+        ConversationManager.normalizeForSearch("iso quien es epicardo?")));
+  }
+
+  @Test
   void commonMobTyposReceiveFuzzyCredit() {
     assertTrue(ConversationManager.bestFuzzyTokenScore(
         "acohilitico", Set.of("acolito", "necrotico")) > 0);
@@ -152,6 +171,17 @@ final class WikiRetrievalHeuristicsTest {
         800L,
         false);
     assertTrue(isolda >= 48);
+  }
+
+  @Test
+  void noMatchControlTextCanNeverBecomeLocalWikiAnswer() {
+    String noMatch = """
+        [WIKI REQUEST speaker=Aminowana query='epicardo y la espada ultracita' result=no_match]
+        No trusted wiki section matched this server-knowledge question; do not guess a server-specific fact.
+        """;
+    assertTrue(ConversationManager.wikiBlockIsNoMatch(noMatch));
+    assertTrue(ConversationManager.extractWikiFallbackAnswer(
+        "epicardo y la espada ultracita? iso", noMatch).isBlank());
   }
 
 }

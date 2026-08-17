@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.7.13 - Wiki no-match / group fallback hardening
+
+- Fixes deictic social questions such as `q opinas de eso?` / `que piensas de eso iso` being misclassified as wiki follow-ups merely because they contain `eso`. They now remain normal social/group conversation and do not generate `WIKI result=no_match` blocks.
+- Fixes the local multi-speaker factual-coverage safety net treating `result=no_match` as if it were trusted factual content. Local coverage now runs only when an actual trusted wiki section was selected.
+- Prevents internal wiki control text such as `No trusted wiki section matched this server-knowledge question...` from ever being extracted or broadcast as Isolda dialogue. Adds a final response-layer leak guard as defense in depth.
+- Adds a zero-token implicit server-entity wiki fallback for short natural questions such as `epicardo y la espada ultracita? iso`: plausible item/NPC/entity questions can now perform local wiki retrieval even without `que es/como consigo`. A no-match then grounds the same model request instead of leaving it free to invent server lore.
+- Adds `quien es`, `existe`, `conoces a` and `te suena` to explicit wiki knowledge intent while preserving social exceptions such as `quien es tu pareja`.
+- Empty direct replies with a wiki no-match now recover to one natural Spanish uncertainty line; they never echo protocol/control text.
+- Keeps 1.7.12 group-entry scoring, side-thread filtering, SMART behavior, one-request architecture and reply-burst coalescing unchanged. No second model call was added.
+
 ## 1.7.12 - Natural group entry + single-subject reply shaping
 
 - Fixes group **entry** being stricter than group exit/SMART continuation. Java now scores a nearby player against the aggregate Isolda thread, the last Isolda reply, and direct/SMART root lines, then still compares the result against competing side-chat.

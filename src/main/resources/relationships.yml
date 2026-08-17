@@ -1,5 +1,5 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.12 - RELATIONSHIPS / SOCIAL MEMORY
+# SERVER ASSISTANT 1.7.13 - RELATIONSHIPS / SOCIAL MEMORY
 # ============================================================
 # This file controls Isolda's persistent relationship system.
 # Relationship data itself is stored in relationships.db; this YAML contains only rules.

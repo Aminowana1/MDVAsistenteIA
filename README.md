@@ -1,8 +1,16 @@
-# ServerAssistant 1.7.12
+# ServerAssistant 1.7.13
 
-ServerAssistant 1.7.12 keeps the MDVCRAFT **single global conversation** and **one model request per scene** architecture, while fixing two issues exposed by live two-player tests: joining an existing Isolda thread was too strict, and a small model could split one thought into two or three public chat bubbles.
+ServerAssistant 1.7.13 keeps all 1.7.12 group-entry/reply-shaping behavior and hardens local wiki routing after live tests exposed a no-match fallback leak and unsupported server-lore hallucinations. The architecture remains **one global conversation** with **one model request per scene**.
 
-## 1.7.12 group-entry routing
+
+## 1.7.13 wiki/no-match hardening
+
+- Social follow-ups such as `q opinas de eso?` and `que piensas de eso iso` stay social and no longer create wiki `no_match` blocks.
+- The local multi-speaker coverage fallback only uses real selected wiki sections. `result=no_match` is never treated as factual content and never creates extra per-player chat lines.
+- Internal wiki control text is blocked at both extraction and final response normalization, so phrases such as `No trusted wiki section matched...` cannot reach public chat.
+- Short server-entity questions such as `epicardo y la espada ultracita? iso` can trigger the local RAM wiki even without classic `que es/como consigo` wording. If nothing matches, the same model request receives `result=no_match` and must answer uncertainty instead of inventing NPCs, quests, stock or item sources.
+
+## 1.7.13 group-entry routing
 
 Java still decides group membership locally with **0 extra AI calls**. A nearby player is now compared not only with the aggregate thread but also with two strong active anchors: the last Isolda reply and the direct/SMART root lines in the current capture. This makes short contextual interventions such as `que cosas importantes?`, `como es eso de tension?`, `que si sientes?` or `no propongas nada En3Minutos` eligible to join without saying `Iso`.
 
@@ -27,7 +35,7 @@ global-conversation:
 
 Existing 1.7.11 installs using the exact bundled values (`6000/48/12/68`) are migrated non-destructively to the new defaults. Deliberately customized values are preserved.
 
-## 1.7.12 reply shaping
+## 1.7.13 reply shaping
 
 `chat.max-messages-per-response: 3` still allows 2-3 independent replies in one model call, but Java no longer lets one ordinary answer become multiple chat bubbles just because the model returned `m:[line1,line2]`. Multiple public bubbles survive only when the model explicitly targets different current Isolda-thread players by name; otherwise the fragments are merged locally into one message. This costs **0 extra tokens** and prevents single-player turns such as `auch` from producing two consecutive Isolda messages.
 
@@ -63,9 +71,10 @@ global-conversation:
   scene:
     group-threading:
       affinity:
-        join-threshold: 48
-        min-margin-over-side-thread: 12
-        auto-follow-up-threshold: 68
+        join-threshold: 44
+        active-anchor-join-threshold: 34
+        min-margin-over-side-thread: 10
+        auto-follow-up-threshold: 64
         side-thread-lookback-ms: 8000
         max-side-lines: 5
         debug-log: false

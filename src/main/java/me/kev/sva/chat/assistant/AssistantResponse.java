@@ -244,6 +244,19 @@ public class AssistantResponse {
         .replace("\\\\", "\\");
   }
 
+  static boolean looksLikeInternalContextLeak(String text) {
+    if (text == null || text.isBlank()) return false;
+    String lower = text.trim().toLowerCase();
+    return lower.contains("no trusted wiki section matched this server-knowledge question")
+        || lower.contains("do not guess a server-specific fact")
+        || lower.startsWith("[wiki request ")
+        || lower.startsWith("[current addressed request")
+        || lower.startsWith("[group participant candidates")
+        || lower.startsWith("[local context]")
+        || lower.startsWith("[relationships]")
+        || lower.startsWith("[activity journal]");
+  }
+
   private static boolean looksLikeProtocolLeak(String text) {
     if (text == null || text.isBlank()) {
       return false;
@@ -410,6 +423,10 @@ public class AssistantResponse {
       }
 
       String source = rawMessage == null ? "" : rawMessage;
+      if (looksLikeInternalContextLeak(source)) {
+        plugin.getLogger().warning("Blocked internal context text from reaching public chat.");
+        continue;
+      }
       if (looksLikeProtocolLeak(source)) {
         String recovered = recoverProtocolMessage(source, 0);
         if (recovered.isBlank()) {
