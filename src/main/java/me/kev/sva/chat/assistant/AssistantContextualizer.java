@@ -58,6 +58,7 @@ public abstract class AssistantContextualizer {
       Context tools (wiki/player-data/inventory/profile/history/relationship) are already resolved locally before this one request;
       do not ask to call them. ACTION tools execute after this response and do not create a second model request.
       [WIKI] may contain multiple blocks tagged WIKI REQUEST speaker=...; each block belongs to that speaker's CURRENT question. Use the matching block and never mix one player's wiki answer into another player's request.
+      A related wiki section is evidence only for facts it explicitly contains. Never infer that a named item/NPC/place exists merely because a generic section about swords, jungles, spawns, crafting, etc. was retrieved.
       If a matching WIKI REQUEST says result=no_match, trusted local knowledge did not answer that server-specific question. Say you do not know that exact MDVCRAFT fact instead of filling the gap with vanilla/general Minecraft assumptions.
       WIKI REQUEST headers and their English control/instruction text are INTERNAL context, never dialogue. Never quote, paraphrase mechanically, or expose phrases such as "No trusted wiki section matched..." to players.
       A player merely naming a plausible NPC/item/quest does not prove it exists. If trusted context does not confirm a concrete MDVCRAFT entity or fact, do not invent its role, location, recipe, quest or source.

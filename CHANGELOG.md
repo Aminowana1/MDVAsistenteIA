@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.7.15 - Direct-first wiki subjects
+
+- Wiki retrieval now treats every self-contained factual question as a fresh direct subject, even when it uses continuation-like wording such as `como consigo`.
+- Added a tiny per-player local wiki subject anchor used only for genuinely incomplete follow-ups (`y donde sale?`, `y como se consigue?`, `sisi decime porfa`).
+- The anchor stores a compact subject instead of previous player/assistant prose, preventing topic contamination and query growth.
+- Entity verification on follow-ups uses the original trusted subject query, while current property words only influence ranking.
+- New direct factual questions replace the anchor immediately; stale anchors expire after 120 seconds and are also gated by the immediately previous wiki scene.
+- No extra OpenAI/model request is added; all routing/retrieval changes are local Java over the existing in-RAM wiki index.
+- Added regression coverage for Mango Resinoso -> Esencia del Bosque topic switching and subjectless follow-ups.
+
+## 1.7.14 - Strict named-entity wiki grounding
+
+- Fixes invented items such as `Espada de Artera`, `Arco de la Jungla` and `Espada de Nagamuta` receiving unrelated but superficially related wiki pages. Concrete named-entity questions now require the selected section to actually contain the requested entity name (with typo/compact-name tolerance) before it can count as trusted evidence.
+- Fixes a ranking bug where `donde/como consigo` gave generic `spawn-*` pages intent bonuses even when they had zero subject match; intent bonuses now only re-rank sections that already matched the actual subject.
+- Adds strong local scoring for verified concrete names, including compact wiki identifiers such as `ARCOBOSQUE`, while keeping unknown names fail-closed as `result=no_match`.
+- Adds a Java-side final no-match grounding guard: for a single factual speaker, any model hallucination after `result=no_match` is replaced locally with `no tengo informacion fiable sobre eso`; in group scenes, replies tied to an unverified speaker/entity are removed and replaced with the same honest fallback. No second AI request is used.
+- Short factual continuations such as `sisi decime porfa`, `dale decime mas` and similar now keep the previous wiki subject instead of becoming an ungrounded SMART turn. Assistant-generated text is never used as entity-verification evidence, so an earlier hallucination cannot bootstrap itself into a later fact.
+- Adds `que sabes de/del` as explicit wiki intent and strengthens CORE/default personality wording that related generic pages do not prove a named entity exists.
+- Keeps 1.7.12/1.7.13 group threading, SMART gating, reply coalescing, relationship behavior and one-request-per-scene architecture unchanged.
+
 ## 1.7.13 - Wiki no-match / group fallback hardening
 
 - Fixes deictic social questions such as `q opinas de eso?` / `que piensas de eso iso` being misclassified as wiki follow-ups merely because they contain `eso`. They now remain normal social/group conversation and do not generate `WIKI result=no_match` blocks.

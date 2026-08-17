@@ -1,6 +1,19 @@
-# ServerAssistant 1.7.13
+# ServerAssistant 1.7.15
 
-ServerAssistant 1.7.13 keeps all 1.7.12 group-entry/reply-shaping behavior and hardens local wiki routing after live tests exposed a no-match fallback leak and unsupported server-lore hallucinations. The architecture remains **one global conversation** with **one model request per scene**.
+ServerAssistant 1.7.15 keeps the 1.7.14 strict entity grounding and makes wiki follow-up routing direct-first: a complete new factual question never inherits the previous wiki topic, while genuinely incomplete follow-ups reuse one tiny local per-player subject anchor. The architecture remains **one global conversation** with **one model request per scene**.
+
+
+## 1.7.15 direct-first wiki follow-ups
+
+The local wiki router now separates a **new named subject** from an **incomplete continuation** before ranking sections. For example, after asking about `Mango Resinoso`, `como consigo Esencia del Bosque?` is searched only as `Esencia del Bosque`; it is never concatenated with the mango question. A later `y que mobs la dropean?` can reuse the compact `Esencia del Bosque` subject locally.
+
+This uses no second model/classifier call and does not add API requests. The subject anchor is Java-only, tiny, expires quickly, and never includes prior assistant prose.
+
+## 1.7.14 strict named-entity grounding
+
+Concrete server-entity questions now fail closed. A generic page about swords, jungles, spawns or crafting is not enough to prove that a requested named object exists. Java verifies that the candidate actually contains the requested entity name (with typo and compact-ID tolerance) before exposing that section as trusted wiki context. Unknown names therefore produce `result=no_match` even if related category pages score weakly.
+
+The response pipeline also has a final Java no-match guard. If a small model still tries to invent a fact after `result=no_match`, the unsupported reply is replaced locally with a short uncertainty line before it reaches chat. Short factual follow-ups such as `sisi decime porfa` keep the previous wiki subject, and only prior player wording is used for entity verification so an earlier assistant hallucination can never become evidence.
 
 
 ## 1.7.13 wiki/no-match hardening

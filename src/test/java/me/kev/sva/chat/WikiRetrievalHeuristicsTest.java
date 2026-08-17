@@ -184,4 +184,156 @@ final class WikiRetrievalHeuristicsTest {
         "epicardo y la espada ultracita? iso", noMatch).isBlank());
   }
 
+  @Test
+  void concreteNamedEntityGateRejectsGenericRelatedPages() {
+    assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(
+        "iso donde consigo la espada de artera"));
+    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso donde consigo la espada de artera",
+        "spawn-saurios",
+        "Dónde aparecen los Saurios, junglas y pantanos",
+        "Los Saurios aparecen en Jungla y Pantano."));
+
+    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso que sabes del arco de la jungla",
+        "spawn-saurios",
+        "Dónde aparecen los Saurios, junglas y pantanos",
+        "Biomas: Jungla, Pantano."));
+
+    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso donde esta la espada de nagamuta",
+        "weapons-swords-common",
+        "Espadas comunes, Espada Hoja, Espada Orco y Filo Escarchado",
+        "Espada Hoja y Espada Orco son armas comunes."));
+  }
+
+  @Test
+  void concreteNamedEntityGateKeepsRealNamedItemsAndCompactIds() {
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso donde consigo espada hoja",
+        "weapons-swords-common",
+        "Espadas comunes y Espada Hoja",
+        "Espada Hoja: espada fabricada con materiales del bosque."));
+
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso como hago el arco bosque",
+        "crafting-ranged-t1",
+        "Crafteos de arcos y ballestas",
+        "ARCOBOSQUE: 2 Nudos Vivos + 2 Mangos Resinosos."));
+
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso donde consigo la espada del duelista necrotido",
+        "weapon-necrotic-duelist-sword",
+        "Espada del Duelista Necrótido",
+        "Espada del Duelista Necrótido [Especial / Tier 2]."));
+  }
+
+  @Test
+  void factualContinuationKeepsPreviousWikiSubject() {
+    assertTrue(ConversationManager.looksLikeWikiFollowUp(
+        ConversationManager.normalizeForSearch("sisi decime porfa")));
+    assertTrue(ConversationManager.looksLikeWikiFollowUp(
+        ConversationManager.normalizeForSearch("dale decime mas")));
+  }
+
+  @Test
+  void noMatchReplySubjectDetectorCatchesInventedEntityClaims() {
+    assertTrue(ConversationManager.replyMentionsConcreteNoMatchSubject(
+        "La espada de Nagamuta está en las Ruinas de Zorok.",
+        "iso donde esta la espada de nagamuta?"));
+    assertTrue(ConversationManager.replyMentionsConcreteNoMatchSubject(
+        "El arco de la jungla se fabrica con madera y cuerdas.",
+        "iso que sabes del arco de la jungla?"));
+    assertFalse(ConversationManager.replyMentionsConcreteNoMatchSubject(
+        "no tengo información fiable sobre eso",
+        "iso donde esta la espada de nagamuta?"));
+  }
+
+  @Test
+  void completeNewKnowledgeQuestionDoesNotInheritPreviousWikiTopic() {
+    String essence = ConversationManager.normalizeForSearch(
+        "iso como consigo esencia del bosque?");
+    String mango = ConversationManager.normalizeForSearch(
+        "iso como se craftea el mango resinoso?");
+
+    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(essence));
+    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(mango));
+    assertFalse(ConversationManager.looksLikeWikiFollowUp(essence));
+    assertFalse(ConversationManager.looksLikeWikiFollowUp(mango));
+    assertTrue(ConversationManager.buildWikiSubjectAnchor(essence).contains("esencia"));
+    assertTrue(ConversationManager.buildWikiSubjectAnchor(essence).contains("bosque"));
+    assertFalse(ConversationManager.buildWikiSubjectAnchor(essence).contains("mango"));
+    assertTrue(ConversationManager.buildWikiSubjectAnchor(mango).contains("mango"));
+    assertTrue(ConversationManager.buildWikiSubjectAnchor(mango).contains("resinoso"));
+  }
+
+  @Test
+  void onlySubjectlessKnowledgeContinuationInheritsWikiTopic() {
+    String where = ConversationManager.normalizeForSearch("y donde sale?");
+    String obtain = ConversationManager.normalizeForSearch("y como se consigue?");
+    String drops = ConversationManager.normalizeForSearch("y que mobs la dropean?");
+
+    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(where));
+    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(obtain));
+    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(drops));
+    assertTrue(ConversationManager.looksLikeWikiFollowUp(where));
+    assertTrue(ConversationManager.looksLikeWikiFollowUp(obtain));
+    assertTrue(ConversationManager.looksLikeWikiFollowUp(drops));
+  }
+
+  @Test
+  void explicitSubjectAfterAndStillStaysDirect() {
+    String essence = ConversationManager.normalizeForSearch("y la esencia del bosque?");
+    String sword = ConversationManager.normalizeForSearch("y la espada hoja donde sale?");
+    String more = ConversationManager.normalizeForSearch("decime mas sobre viridita");
+
+    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(essence));
+    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(sword));
+    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(more));
+    assertFalse(ConversationManager.looksLikeWikiFollowUp(essence));
+    assertFalse(ConversationManager.looksLikeWikiFollowUp(sword));
+    assertFalse(ConversationManager.looksLikeWikiFollowUp(more));
+  }
+
+  @Test
+  void craftedNamedMaterialAlsoUsesStrictExistenceGrounding() {
+    assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(
+        "iso como se craftea el mango resinoso"));
+    assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(
+        "iso como se craftea el mango ultracita"));
+    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso como se craftea el mango ultracita",
+        "obtain-wood-crafted-materials",
+        "Mango Resinoso y Mango Arcano",
+        "Mango Resinoso: 9 Ramas Resinosas. Mango Arcano: 9 Ramas Arcanas."));
+  }
+
+  @Test
+  void propertyOnlyWikiQuestionsRemainFollowUps() {
+    for (String raw : List.of(
+        "y que porcentaje tiene?",
+        "y que probabilidad tiene?",
+        "y cuanta vida tiene?",
+        "y que rareza es?",
+        "y que habilidades tiene?")) {
+      String normalized = ConversationManager.normalizeForSearch(raw);
+      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+    }
+  }
+
+  @Test
+  void propertyOnlyWikiQuestionsRemainFollowUps() {
+    for (String raw : List.of(
+        "y que porcentaje tiene?",
+        "y que probabilidad tiene?",
+        "y cuanta vida tiene?",
+        "y que rareza es?",
+        "y que habilidades tiene?")) {
+      String normalized = ConversationManager.normalizeForSearch(raw);
+      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+    }
+  }
+
 }

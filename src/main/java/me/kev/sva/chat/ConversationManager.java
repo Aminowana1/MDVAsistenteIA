@@ -84,6 +84,16 @@ public final class ConversationManager {
    */
   private final Map<UUID, SmartFollowUpAnchor> smartFollowUpAnchorByPlayer = new HashMap<>();
 
+  /**
+   * Last self-contained wiki subject per player. This tiny local-only anchor is used
+   * only for genuinely incomplete factual follow-ups such as "y donde sale?". A new
+   * self-contained factual question replaces it immediately, so adjacent knowledge
+   * topics can never contaminate each other.
+   */
+  private final Map<UUID, WikiSubjectAnchor> wikiSubjectAnchorByPlayer = new HashMap<>();
+
+  private static final long WIKI_SUBJECT_ANCHOR_MAX_AGE_MS = 120_000L;
+
   /** Direct addressers collected while the current scene window is open. */
   private final Set<UUID> activeAddressers = new LinkedHashSet<>();
 
@@ -152,6 +162,7 @@ public final class ConversationManager {
     triggerTimes.clear();
     smartFollowUpUntilByPlayer.clear();
     smartFollowUpAnchorByPlayer.clear();
+    wikiSubjectAnchorByPlayer.clear();
     activeAddressers.clear();
     activeIdentitySnapshots.clear();
     assistantManager.shutdown();
@@ -256,6 +267,7 @@ public final class ConversationManager {
       triggerTimes.remove(playerId);
       smartFollowUpUntilByPlayer.remove(playerId);
       smartFollowUpAnchorByPlayer.remove(playerId);
+      wikiSubjectAnchorByPlayer.remove(playerId);
       activeAddressers.remove(playerId);
     }
   }
@@ -1770,6 +1782,7 @@ public final class ConversationManager {
   public void clearRelationshipRuntimeContext(UUID playerId) {
     if (playerId != null) {
       smartFollowUpUntilByPlayer.remove(playerId);
+      wikiSubjectAnchorByPlayer.remove(playerId);
       activeAddressers.remove(playerId);
     }
     // Assistant replies can mention the player without a structural UUID, so the
@@ -1786,6 +1799,7 @@ public final class ConversationManager {
         name != null && (!lower.isBlank() && name.equalsIgnoreCase(playerName))));
     triggerTimes.remove(playerId);
     smartFollowUpUntilByPlayer.remove(playerId);
+    wikiSubjectAnchorByPlayer.remove(playerId);
     activeAddressers.remove(playerId);
     sceneQueue.removeIf(scene -> scene.involvedPlayerIds().contains(playerId)
         || scene.involvedPlayerNames().stream().anyMatch(name ->
@@ -1913,8 +1927,19 @@ public final class ConversationManager {
     for (WikiQuerySelection selection : selections) {
       String rawQuery = selection.rawQuery();
       String directQuery = normalizeForSearch(rawQuery);
-      String expandedRawQuery = expandWikiFollowUpQuery(
-          rawQuery, directQuery, List.<ChatMessage>of(selection.message()));
+
+      // 1.7.15 direct-first retrieval:
+      // - complete new factual questions NEVER inherit the previous wiki topic;
+      // - only genuinely subjectless follow-ups inherit one tiny local subject anchor.
+      WikiSubjectAnchor inheritedAnchor = resolveWikiFollowUpSubject(
+          directQuery, List.<ChatMessage>of(selection.message()));
+      boolean contextExpanded = inheritedAnchor != null
+          && inheritedAnchor.subjectQuery() != null
+          && !inheritedAnchor.subjectQuery().isBlank();
+      String inheritedSubject = contextExpanded ? inheritedAnchor.subjectQuery() : null;
+      String expandedRawQuery = contextExpanded
+          ? ((rawQuery == null ? "" : rawQuery.trim()) + " " + inheritedSubject).trim()
+          : rawQuery;
       String query = expandWikiAliases(normalizeForSearch(expandedRawQuery));
       Set<String> queryTerms = meaningfulTerms(query);
       if (queryTerms.isEmpty()) {
@@ -1925,7 +1950,34 @@ public final class ConversationManager {
         continue;
       }
       List<WikiCandidate> candidates = rankWikiCandidates(query, queryTerms);
-      rankedQueries.add(new WikiRankedQuery(selection, directQuery, query, candidates));
+      // Entity existence is verified against the resolved SUBJECT only. Current
+      // follow-up property words ("mobs", "dropean", "donde") must not become
+      // identity requirements for the entity itself.
+      String verificationQuery = contextExpanded
+          ? inheritedAnchor.verificationQuery()
+          : rawQuery;
+      if (looksLikeConcreteNamedEntityQuery(verificationQuery)) {
+        candidates = candidates.stream()
+            .filter(candidate -> candidateStronglyMatchesConcreteEntity(
+                verificationQuery, candidate.key(), candidate.description(), candidate.content()))
+            .toList();
+      }
+
+      // Remember only the resolved subject. Never accumulate previous player wording
+      // or assistant replies into future retrieval queries. This costs zero AI tokens.
+      String resolvedSubject = contextExpanded
+          ? inheritedSubject
+          : buildWikiSubjectAnchor(directQuery);
+      String resolvedVerification = contextExpanded
+          ? inheritedAnchor.verificationQuery()
+          : rawQuery;
+      if (wikiQueryHasIndependentSubject(directQuery) || contextExpanded) {
+        rememberWikiSubject(
+            selection.message().playerId, resolvedSubject, resolvedVerification);
+      }
+
+      rankedQueries.add(new WikiRankedQuery(
+          selection, directQuery, query, candidates, contextExpanded));
     }
     if (rankedQueries.isEmpty()) return "";
 
@@ -1959,10 +2011,9 @@ public final class ConversationManager {
       }
 
       if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
-        String expansion = ranked.query().equals(ranked.directQuery())
-            ? "" : " expanded_from='" + ranked.directQuery() + "'";
+        String mode = ranked.contextExpanded() ? " mode=followup-context" : " mode=direct";
         plugin.getLogger().info("Wiki retrieval speaker='" + ranked.selection().message().playerName
-            + "' query='" + ranked.query() + "'" + expansion + " selected=" + selectedKeys);
+            + "' query='" + ranked.query() + "'" + mode + " selected=" + selectedKeys);
       }
 
       if (!out.isEmpty()) out.append('\n');
@@ -2028,6 +2079,7 @@ public final class ConversationManager {
 
     return containsAnyTerm(normalized,
         "que es ", "q es ", "que son ", "q son ", "que significa ",
+        "que sabes de ", "que sabes del ", "q sabes de ", "q sabes del ",
         "quien es ", "quienes son ", "existe ", "existen ", "conoces a ", "te suena ",
         "para que sirve", "para que se usa", "como funciona",
         "como se craftea", "como crafteo", "como craftear", "crafteo", "craftear",
@@ -2078,6 +2130,182 @@ public final class ConversationManager {
     return serverEntityNoun && terms.size() >= 2;
   }
 
+
+  private static final Set<String> WIKI_ENTITY_NOUNS = Set.of(
+      "arma", "espada", "sable", "filo", "daga", "maza", "lanza", "guja", "tridente",
+      "arco", "ballesta", "baculo", "cetro", "tomo", "baston", "escudo",
+      "pico", "hacha", "azada", "armadura", "casco", "coraza", "botas",
+      "pantalon", "set", "amuleto", "anillo", "collar", "item", "objeto",
+      "material", "mineral", "mena", "mob", "enemigo", "criatura", "jefe",
+      "miniboss", "boss", "npc", "comerciante", "mercader", "mision", "quest",
+      "evento", "faccion", "raza", "profesion", "habilidad", "hechizo");
+
+  private static final Set<String> WIKI_ENTITY_QUERY_NOISE = Set.of(
+      "sabes", "saber", "info", "informacion", "datos", "dato", "sobre", "acerca",
+      "quieres", "quiero", "decime", "dime", "contame", "cuentame", "explicame",
+      "porfa", "favor", "sisi", "dale", "bueno", "mas", "algo", "exactamente",
+      "hago", "hacer", "hecho", "fabrica", "fabricar", "fabricacion", "receta", "recetas",
+      "drops", "drop", "dropea", "droppea", "suelta", "cuanto", "cuesta", "vale",
+      "funciona", "usar", "usa", "aparece", "spawn", "coordenadas", "lugar", "lugares",
+      "ubicado", "ubicacion", "esta", "estan", "haber", "visto", "viste");
+
+  /**
+   * Returns true only for a question that appears to name one concrete server entity,
+   * not a broad category such as "que armas hay?". These queries are fail-closed:
+   * generic wiki pages cannot prove that the named entity exists.
+   */
+  static boolean looksLikeConcreteNamedEntityQuery(String rawOrNormalized) {
+    String normalized = normalizeForSearch(rawOrNormalized);
+    if (normalized.isBlank()) return false;
+    Set<String> meaningful = new LinkedHashSet<>(meaningfulTerms(normalized));
+    meaningful.removeAll(WIKI_ENTITY_QUERY_NOISE);
+
+    String noun = firstWikiEntityNoun(normalized);
+    if (noun != null) {
+      meaningful.remove(noun);
+      meaningful.remove(noun + "s");
+      // A category + at least one qualifier means a concrete named thing:
+      // "espada hoja", "espada de nagamuta", "arco de la jungla".
+      return !meaningful.isEmpty();
+    }
+
+    String q = " " + normalized + " ";
+    boolean identityCue = containsAnyTerm(q,
+        " quien es ", " quienes son ", " conoces a ", " te suena ",
+        " que sabes de ", " que sabes del ", " q sabes de ", " q sabes del ",
+        " existe ", " existen ");
+    if (identityCue && !meaningful.isEmpty()) return true;
+
+    boolean specificFactCue = isWikiObtainIntent(normalized)
+        || containsAnyTerm(q, " como se hace ", " como se craftea ", " como crafteo ",
+            " craftea ", " crafteo ", " craftear ", " receta ",
+            " donde esta ", " donde aparece ", " donde encuentro ",
+            " que dropea ", " que droppea ", " que suelta ");
+    return specificFactCue && meaningful.size() >= 2;
+  }
+
+  /**
+   * Strict evidence gate for named entities. A section must actually contain the
+   * requested entity name (or a close typo/compact spelling), not merely share a
+   * generic word such as "espada" or "jungla" somewhere else in the page.
+   */
+  static boolean candidateStronglyMatchesConcreteEntity(
+      String rawOrNormalizedQuery,
+      String key,
+      String description,
+      String content) {
+    String query = normalizeForSearch(rawOrNormalizedQuery);
+    if (!looksLikeConcreteNamedEntityQuery(query)) return true;
+
+    String candidate = normalizeForSearch(
+        (key == null ? "" : key.replace('-', ' ').replace('_', ' ')) + " "
+            + (description == null ? "" : description) + " "
+            + (content == null ? "" : content));
+    Set<String> candidateTokens = tokenSet(candidate);
+
+    String noun = firstWikiEntityNoun(query);
+    LinkedHashSet<String> qualifiers = new LinkedHashSet<>(meaningfulTerms(query));
+    qualifiers.removeAll(WIKI_ENTITY_QUERY_NOISE);
+    if (noun != null) {
+      qualifiers.remove(noun);
+      qualifiers.remove(noun + "s");
+    }
+    if (qualifiers.isEmpty()) return true;
+
+    // Every identity-bearing qualifier must be represented. This alone rejects
+    // "Espada de Nagamuta" against a generic page that merely lists other swords.
+    for (String qualifier : qualifiers) {
+      if (containsWholeWordIgnoreCase(candidate, qualifier)) continue;
+      if (bestFuzzyTokenScore(qualifier, candidateTokens) > 0) continue;
+      if (noun != null && containsCompactEntityToken(candidateTokens, noun, qualifier)) continue;
+      return false;
+    }
+
+    if (noun == null) {
+      return qualifiers.size() == 1 || termsOccurNearEachOther(candidate, qualifiers, 6);
+    }
+
+    // The category itself must be part of the same local mention. This prevents a
+    // Saurio spawn page containing "jungla" from validating "Arco de la Jungla".
+    if (qualifiers.size() == 1
+        && containsCompactEntityToken(candidateTokens, noun, qualifiers.iterator().next())) return true;
+    return nounOccursNearQualifiers(candidate, noun, qualifiers, 5);
+  }
+
+  private static String firstWikiEntityNoun(String normalized) {
+    if (normalized == null || normalized.isBlank()) return null;
+    for (String token : normalized.split("\\s+")) {
+      if (WIKI_ENTITY_NOUNS.contains(token)) return token;
+      String singular = singularWikiEntityNoun(token);
+      if (singular != null) return singular;
+    }
+    return null;
+  }
+
+
+  private static boolean containsCompactEntityToken(Set<String> tokens, String noun, String qualifier) {
+    if (tokens == null || noun == null || qualifier == null) return false;
+    String a = noun + qualifier;
+    String b = qualifier + noun;
+    for (String token : tokens) {
+      if (token.equals(a) || token.equals(b)) return true;
+    }
+    return false;
+  }
+
+  private static boolean nounOccursNearQualifiers(
+      String normalizedCandidate,
+      String noun,
+      Set<String> qualifiers,
+      int maxDistance) {
+    if (normalizedCandidate == null || noun == null || qualifiers == null || qualifiers.isEmpty()) return false;
+    String[] tokens = normalizedCandidate.split("\\s+");
+    for (int i = 0; i < tokens.length; i++) {
+      if (!tokens[i].equals(noun)) continue;
+      boolean allNear = true;
+      for (String qualifier : qualifiers) {
+        boolean found = false;
+        int from = Math.max(0, i - maxDistance);
+        int to = Math.min(tokens.length - 1, i + maxDistance);
+        for (int j = from; j <= to; j++) {
+          if (tokens[j].equals(qualifier)
+              || bestFuzzyTokenScore(qualifier, Set.of(tokens[j])) > 0) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          allNear = false;
+          break;
+        }
+      }
+      if (allNear) return true;
+    }
+    return false;
+  }
+
+  private static boolean termsOccurNearEachOther(
+      String normalizedCandidate,
+      Set<String> terms,
+      int maxSpan) {
+    if (normalizedCandidate == null || terms == null || terms.isEmpty()) return false;
+    String[] tokens = normalizedCandidate.split("\\s+");
+    for (int start = 0; start < tokens.length; start++) {
+      int end = Math.min(tokens.length, start + maxSpan + 1);
+      Set<String> window = new LinkedHashSet<>();
+      for (int i = start; i < end; i++) window.add(tokens[i]);
+      boolean all = true;
+      for (String term : terms) {
+        if (window.contains(term) || bestFuzzyTokenScore(term, window) > 0) continue;
+        all = false;
+        break;
+      }
+      if (all) return true;
+    }
+    return false;
+  }
+
+  /** Social opinion prompts with deictic wording stay outside static wiki retrieval. */
   static boolean looksLikeDeicticOpinionSmallTalk(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
     String q = " " + normalized + " ";
@@ -2139,17 +2367,29 @@ public final class ConversationManager {
       }
 
       String key = indexed.key().toLowerCase(Locale.ROOT);
-      if (obtainIntent) {
+      // Intent bonuses may only re-rank a section that already matched the actual
+      // subject. In 1.7.13 an obtain/location query gave every spawn-* page +3 and
+      // then +6, so invented entities such as "Espada de Artera" could select
+      // unrelated Saurio/Namurio spawn pages with score=9.
+      boolean subjectMatchedBeforeIntentBonuses = score > 0;
+      if (obtainIntent && subjectMatchedBeforeIntentBonuses) {
         if (key.startsWith("obtain-")) score += 7;
         else if (key.startsWith("ore-") || key.startsWith("spawn-")) score += 3;
       }
-      if (craftIntent && key.startsWith("crafting-")) score += 7;
-      // Never let a completely unrelated spawn page win only because the question
-      // contained "donde/coordenadas". It must already share a real subject term.
-      if (locationIntent && key.startsWith("spawn-") && score > 0) score += 6;
+      if (craftIntent && key.startsWith("crafting-") && subjectMatchedBeforeIntentBonuses) score += 7;
+      if (locationIntent && key.startsWith("spawn-") && subjectMatchedBeforeIntentBonuses) score += 6;
       if (dropIntent) {
         if (key.startsWith("mob-") || key.startsWith("mobs-")) score += 3;
         if (indexed.normalizedContent().contains("drops")) score += 3;
+      }
+
+      // Give a decisive local boost when the candidate actually contains the named
+      // entity. This also supports compact wiki spellings such as ARCOBOSQUE for a
+      // player query like "arco bosque" without relaxing unknown-entity safety.
+      if (looksLikeConcreteNamedEntityQuery(query)
+          && candidateStronglyMatchesConcreteEntity(
+              query, indexed.key(), indexed.description(), indexed.content())) {
+        score += 24;
       }
 
       if (score > 0) {
@@ -2239,50 +2479,46 @@ public final class ConversationManager {
     return (2.0 * previous[b.length()]) / (a.length() + b.length());
   }
 
-  private String expandWikiFollowUpQuery(
-      String rawQuery,
+  /**
+   * Resolves the previous trusted wiki subject only for a genuinely incomplete
+   * follow-up. The immediately previous scene must also have used wiki context and
+   * involved the same speaker, preventing a stale subject from leaking into social chat.
+   */
+  private WikiSubjectAnchor resolveWikiFollowUpSubject(
       String normalizedDirectQuery,
       List<ChatMessage> currentMessages) {
 
-    if (!looksLikeWikiFollowUp(normalizedDirectQuery) || sceneHistory.isEmpty()) {
-      return rawQuery;
-    }
+    if (!looksLikeWikiFollowUp(normalizedDirectQuery) || sceneHistory.isEmpty()) return null;
 
     SceneMemory previous = sceneHistory.peekLast();
-    if (previous == null || !previous.wikiContextUsed()) {
-      return rawQuery;
-    }
+    if (previous == null || !previous.wikiContextUsed()) return null;
 
     UUID currentSpeaker = lastPlayerId(currentMessages);
-    if (currentSpeaker == null) return rawQuery;
+    if (currentSpeaker == null) return null;
 
     boolean speakerWasPresent = previous.messages().stream().anyMatch(message ->
         message instanceof PlayerChatMessage playerMessage
             && currentSpeaker.equals(playerMessage.playerId));
-    if (!speakerWasPresent) return rawQuery;
+    if (!speakerWasPresent) return null;
 
-    StringBuilder expanded = new StringBuilder(rawQuery == null ? "" : rawQuery.trim());
-    Set<UUID> previousSpeakers = new LinkedHashSet<>();
-    for (ChatMessage message : previous.messages()) {
-      if (message instanceof PlayerChatMessage playerMessage) {
-        previousSpeakers.add(playerMessage.playerId);
-        if (currentSpeaker.equals(playerMessage.playerId)) {
-          expanded.append(' ').append(playerMessage.content);
-        }
-      }
+    WikiSubjectAnchor anchor = wikiSubjectAnchorByPlayer.get(currentSpeaker);
+    if (anchor == null) return null;
+    long age = System.currentTimeMillis() - anchor.timestampMs();
+    if (age < 0L || age > WIKI_SUBJECT_ANCHOR_MAX_AGE_MS) {
+      wikiSubjectAnchorByPlayer.remove(currentSpeaker);
+      return null;
     }
+    return anchor;
+  }
 
-    // The visible assistant reply is a useful referent seed only when that old scene
-    // had one speaker. In a multi-speaker scene the joined reply could contain another
-    // player's answer and would contaminate this speaker's follow-up retrieval.
-    String previousReply = previous.assistantReply();
-    if (previousSpeakers.size() == 1 && previousReply != null && !previousReply.isBlank()) {
-      String compactReply = previousReply.length() > 420
-          ? previousReply.substring(0, 420)
-          : previousReply;
-      expanded.append(' ').append(compactReply);
-    }
-    return expanded.toString().trim();
+  private void rememberWikiSubject(
+      UUID playerId, String subjectQuery, String verificationQuery) {
+    if (playerId == null || subjectQuery == null || subjectQuery.isBlank()) return;
+    String verification = verificationQuery == null || verificationQuery.isBlank()
+        ? subjectQuery
+        : verificationQuery.trim();
+    wikiSubjectAnchorByPlayer.put(playerId, new WikiSubjectAnchor(
+        subjectQuery.trim(), verification, System.currentTimeMillis()));
   }
 
   private static UUID lastPlayerId(List<ChatMessage> messages) {
@@ -2295,10 +2531,90 @@ public final class ConversationManager {
     return null;
   }
 
-  private static boolean looksLikeWikiFollowUp(String normalized) {
+  private static final Set<String> WIKI_FOLLOW_UP_SUBJECT_NOISE = Set.of(
+      "si", "sisi", "decime", "dime", "contame", "cuentame", "explicame",
+      "dale", "bueno", "porfa", "favor", "mas", "ver", "saber", "info",
+      "informacion", "dato", "datos", "sobre", "acerca", "cual", "cuales",
+      "dropea", "dropean", "droppea", "droppean", "dropear", "drop", "drops",
+      "suelta", "sueltan", "dar", "dan", "sale", "salen", "aparece", "aparecen",
+      "spawn", "ubicacion", "ubicado", "coordenada", "coordenadas", "lugar", "lugares",
+      "hace", "hacen", "hago", "tiene", "tienen", "lleva", "llevan", "usa", "usan",
+      "uso", "efecto", "efectos", "stats", "estadistica", "estadisticas", "dano",
+      "damage", "mana", "cooldown", "durabilidad", "receta", "recetas", "materiales",
+      "porcentaje", "probabilidad", "chance", "cantidad", "cantidades", "numero", "numeros",
+      "valor", "valores", "nivel", "niveles", "rareza", "calidad", "tier", "tiers",
+      "vida", "salud", "velocidad", "radio", "alcance", "duracion", "coste", "costo",
+      "precio", "precios", "habilidad", "habilidades");
+
+  /**
+   * Builds a compact local retrieval subject without carrying the old question's
+   * intent verbs. Example: "iso como consigo esencia del bosque" ->
+   * "esencia bosque". This keeps later follow-ups focused and cannot add AI tokens.
+   */
+  static String buildWikiSubjectAnchor(String normalized) {
+    if (normalized == null || normalized.isBlank()) return "";
+    LinkedHashSet<String> kept = new LinkedHashSet<>();
+    for (String term : meaningfulTerms(normalized)) {
+      if (WIKI_FOLLOW_UP_SUBJECT_NOISE.contains(term)) continue;
+      if (WIKI_ENTITY_QUERY_NOISE.contains(term)) continue;
+      kept.add(term);
+    }
+    return String.join(" ", kept);
+  }
+
+  /**
+   * True when the current wording itself names a subject independently of previous
+   * chat. Generic category/property words do not count.
+   */
+  static boolean wikiQueryHasIndependentSubject(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    Set<String> terms = new LinkedHashSet<>(meaningfulTerms(normalized));
+    for (String term : terms) {
+      if (WIKI_FOLLOW_UP_SUBJECT_NOISE.contains(term)) continue;
+      if (WIKI_ENTITY_QUERY_NOISE.contains(term)) continue;
+      if (isWikiEntityNounToken(term)) continue;
+      return true;
+    }
+    return false;
+  }
+
+  private static boolean isWikiEntityNounToken(String token) {
+    if (token == null || token.isBlank()) return false;
+    if (WIKI_ENTITY_NOUNS.contains(token)) return true;
+    return singularWikiEntityNoun(token) != null;
+  }
+
+  private static String singularWikiEntityNoun(String token) {
+    if (token == null || token.isBlank()) return null;
+    if (token.endsWith("es") && token.length() > 4) {
+      String singularEs = token.substring(0, token.length() - 2);
+      if (WIKI_ENTITY_NOUNS.contains(singularEs)) return singularEs;
+    }
+    if (token.endsWith("s") && token.length() > 3) {
+      String singularS = token.substring(0, token.length() - 1);
+      if (WIKI_ENTITY_NOUNS.contains(singularS)) return singularS;
+    }
+    return null;
+  }
+
+  static boolean looksLikeWikiFollowUp(String normalized) {
+    if (normalized == null || normalized.isBlank()) return false;
+
+    // Subject beats syntax: "como consigo esencia del bosque" is a NEW direct
+    // question, while "y como se consigue?" is a true continuation.
+    boolean hasIndependentSubject = wikiQueryHasIndependentSubject(normalized);
+    String q = " " + normalized + " ";
+
+    boolean conversationalContinuation = containsAnyTerm(q,
+        " sisi decime ", " si decime ", " decime porfa ", " dime porfa ",
+        " contame porfa ", " cuentame porfa ", " explicame porfa ",
+        " dale decime ", " bueno decime ", " a ver decime ", " si contame ",
+        " sisi contame ", " dime mas ", " decime mas ", " contame mas ");
+    if (conversationalContinuation) return !hasIndependentSubject;
+    if (hasIndependentSubject) return false;
+
     Set<String> terms = meaningfulTerms(normalized);
-    if (terms.size() > 2) return false;
+    if (terms.size() > 3) return false;
 
     return normalized.contains(" eso")
         || normalized.contains(" esa")
@@ -2587,6 +2903,19 @@ public final class ConversationManager {
           response.getFollowUpSpeakers(), response.shouldCloseConversation());
     }
 
+    // Fail closed for factual queries whose named entity was not verified by the
+    // local wiki. Prompt instructions are not enough here: if a small model invents
+    // lore despite result=no_match, Java replaces that affected reply with an honest
+    // uncertainty line before anything reaches public chat.
+    List<String> groundedReplies = enforceWikiNoMatchGrounding(scene, response.getMessages());
+    if (!groundedReplies.equals(response.getMessages())) {
+      plugin.getLogger().warning("Suppressed unsupported wiki claim for scene " + scene.sceneId()
+          + " because trusted local knowledge returned result=no_match.");
+      response = new AssistantResponse(
+          plugin, groundedReplies, response.getToolCalls(), response.getRelationshipUpdates(),
+          response.getFollowUpSpeakers(), response.shouldCloseConversation());
+    }
+
     // One conversational subject should normally produce one public chat bubble.
     // Small models sometimes split one thought into m=[line1,line2] even for one
     // speaker. Collapse that burst locally. Multiple bubbles survive only when they
@@ -2689,6 +3018,81 @@ public final class ConversationManager {
     }
 
     processNextRequest();
+  }
+
+
+  private List<String> enforceWikiNoMatchGrounding(SceneRequest scene, List<String> modelReplies) {
+    if (scene == null || scene.context() == null) {
+      return modelReplies == null ? List.of() : List.copyOf(modelReplies);
+    }
+    String wiki = scene.context().locallyRetrievedWiki();
+    if (wiki == null || wiki.isBlank() || !wiki.toLowerCase(Locale.ROOT).contains("result=no_match")) {
+      return modelReplies == null ? List.of() : List.copyOf(modelReplies);
+    }
+
+    int maxReplies = Math.max(plugin.getConfig().getInt("chat.max-messages-per-response", 3), 1);
+    LinkedHashMap<UUID, PlayerChatMessage> currentBySpeaker = new LinkedHashMap<>();
+    for (ChatMessage message : scene.currentSceneMessages()) {
+      if (message instanceof PlayerChatMessage playerMessage) {
+        currentBySpeaker.put(playerMessage.playerId, playerMessage);
+      }
+    }
+    if (currentBySpeaker.isEmpty()) return modelReplies == null ? List.of() : List.copyOf(modelReplies);
+
+    List<PlayerChatMessage> noMatchSpeakers = new ArrayList<>();
+    for (PlayerChatMessage speaker : currentBySpeaker.values()) {
+      String block = wikiBlockForSpeaker(wiki, speaker.playerName);
+      if (!block.isBlank() && wikiBlockIsNoMatch(block)) noMatchSpeakers.add(speaker);
+    }
+    if (noMatchSpeakers.isEmpty()) return modelReplies == null ? List.of() : List.copyOf(modelReplies);
+
+    boolean multi = currentBySpeaker.size() > 1;
+    if (!multi && noMatchSpeakers.size() == 1) {
+      return List.of("no tengo informacion fiable sobre eso");
+    }
+
+    List<String> kept = new ArrayList<>();
+    if (modelReplies != null) {
+      outer:
+      for (String reply : modelReplies) {
+        if (reply == null || reply.isBlank()) continue;
+        for (PlayerChatMessage speaker : noMatchSpeakers) {
+          if (containsWholeWordIgnoreCase(reply, speaker.playerName)
+              || replyMentionsConcreteNoMatchSubject(reply, speaker.content)) {
+            continue outer;
+          }
+        }
+        kept.add(reply.trim());
+      }
+    }
+
+    for (PlayerChatMessage speaker : noMatchSpeakers) {
+      if (kept.size() >= maxReplies) break;
+      kept.add(speaker.playerName + ", no tengo informacion fiable sobre eso");
+    }
+    return List.copyOf(kept);
+  }
+
+  static boolean replyMentionsConcreteNoMatchSubject(String reply, String rawQuery) {
+    String normalizedReply = normalizeForSearch(reply);
+    String normalizedQuery = normalizeForSearch(rawQuery);
+    if (normalizedReply.isBlank() || normalizedQuery.isBlank()) return false;
+    LinkedHashSet<String> qualifiers = new LinkedHashSet<>(meaningfulTerms(normalizedQuery));
+    qualifiers.removeAll(WIKI_ENTITY_QUERY_NOISE);
+    String noun = firstWikiEntityNoun(normalizedQuery);
+    if (noun != null) {
+      qualifiers.remove(noun);
+      qualifiers.remove(noun + "s");
+    }
+    if (qualifiers.isEmpty()) return false;
+    Set<String> replyTokens = tokenSet(normalizedReply);
+    for (String qualifier : qualifiers) {
+      if (containsWholeWordIgnoreCase(normalizedReply, qualifier)
+          || bestFuzzyTokenScore(qualifier, replyTokens) > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private List<String> coalesceReplyBurstForScene(SceneRequest scene, List<String> messages) {
@@ -3551,7 +3955,13 @@ public final class ConversationManager {
       WikiQuerySelection selection,
       String directQuery,
       String query,
-      List<WikiCandidate> candidates) { }
+      List<WikiCandidate> candidates,
+      boolean contextExpanded) { }
+
+  private record WikiSubjectAnchor(
+      String subjectQuery,
+      String verificationQuery,
+      long timestampMs) { }
 
   private record WikiCandidate(String key, String description, String content, int score) { }
   private record WikiIndexEntry(
