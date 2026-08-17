@@ -48,9 +48,12 @@ public final class RelationshipRequestPolicy {
       long sceneId,
       UUID playerId,
       String rawRequest) {
+    // Refusal percentages apply only to actual CURRENT requests.
+    // Validate request intent before the probability edge checks so that
+    // chance=1.0 means "refuse every request", not "refuse every line".
+    if (playerId == null || !looksLikeRequest(rawRequest)) return false;
     if (refusalChance <= 0.0D) return false;
     if (refusalChance >= 1.0D) return true;
-    if (playerId == null || !looksLikeRequest(rawRequest)) return false;
 
     long seed = sceneId * 0x9E3779B97F4A7C15L;
     seed ^= playerId.getMostSignificantBits();

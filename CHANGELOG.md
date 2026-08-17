@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.10.2 - Request-refusal edge hotfix
+
+- Fixed `RelationshipRequestPolicy.shouldRefuse(...)` evaluating `chance >= 1.0` before confirming that the current line was actually a request.
+- A configured 100% refusal now means **refuse every request**, not every ordinary/chat line. For example, `hola iso` remains non-request dialogue even with `arch-enemy: 1.00`.
+- Keeps the existing deterministic per-scene refusal roll, zero-token routing, wiki/tool withholding and all 1.7.10.1 group-thread behavior unchanged.
+- The existing regression `probabilityEdgesAreHardGuarantees` now matches the implementation contract.
+
 ## 1.7.10.1 - Compile hotfix
 
 - Removed a duplicate `commonPrefixLength(String, String)` helper accidentally introduced in `ConversationManager`.

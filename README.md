@@ -1,6 +1,6 @@
-# ServerAssistant 1.7.10.1
+# ServerAssistant 1.7.10.2
 
-ServerAssistant 1.7.10.1 keeps the MDVCRAFT **single global conversation** architecture and **one model request per scene**, while making group SMART routing more context-aware without embeddings or any extra AI call.
+ServerAssistant 1.7.10.2 keeps the MDVCRAFT **single global conversation** architecture and **one model request per scene**, while making group SMART routing more context-aware without embeddings or any extra AI call.
 
 The group router now uses a local **thread-affinity competition** instead of mainly relying on explicit bridge phrases. Every nearby line is scored against Isolda's active exchange and against recent competing side-chat. The score combines chronology, references to active participants, lexical/topic overlap, question-answer compatibility, deictic/continuation language and conversational shape. Explicit phrases such as `dile`, `decile` or `mientes` remain useful bonus evidence, but they are no longer the rule that decides membership.
 
