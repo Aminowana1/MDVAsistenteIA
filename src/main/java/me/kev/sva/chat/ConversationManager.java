@@ -76,6 +76,14 @@ public final class ConversationManager {
    */
   private final Map<UUID, Long> smartFollowUpUntilByPlayer = new HashMap<>();
 
+  /**
+   * Tiny zero-token anchor for semantic SMART gating. It remembers only the last
+   * answered exchange for each player while their normal SMART timer is alive.
+   * This lets Java distinguish a real follow-up from a message aimed at public
+   * chat or another player before an API request is created.
+   */
+  private final Map<UUID, SmartFollowUpAnchor> smartFollowUpAnchorByPlayer = new HashMap<>();
+
   /** Direct addressers collected while the current scene window is open. */
   private final Set<UUID> activeAddressers = new LinkedHashSet<>();
 
@@ -143,6 +151,7 @@ public final class ConversationManager {
     sceneHistory.clear();
     triggerTimes.clear();
     smartFollowUpUntilByPlayer.clear();
+    smartFollowUpAnchorByPlayer.clear();
     activeAddressers.clear();
     activeIdentitySnapshots.clear();
     assistantManager.shutdown();
@@ -189,6 +198,12 @@ public final class ConversationManager {
     boolean directMention = containsAssistantMention(content);
     boolean existingSmartFollowUp = "smart".equals(mode)
         && hasActiveSmartFollowUp(player.getUniqueId(), now);
+    // A live SMART timer is only permission to attempt a continuation. Before it can
+    // create or join a scene, Java checks whether THIS line still belongs to Isolda's
+    // thread. Clear side-chat/public-chat messages stay local and cost zero API tokens.
+    boolean semanticSmartFollowUp = existingSmartFollowUp
+        && !directMention
+        && isSemanticSmartFollowUp(player.getUniqueId(), player.getName(), content, now, true);
 
     // Hostile relationship tiers may skip a trivial direct message before any API
     // request is created. This is both more natural and cheaper than asking the model
@@ -198,7 +213,7 @@ public final class ConversationManager {
       return;
     }
 
-    boolean directedAtAssistant = directMention || existingSmartFollowUp
+    boolean directedAtAssistant = directMention || semanticSmartFollowUp
         || (activeCapture != null && activeAddressers.contains(player.getUniqueId()));
     if (plugin.getToolManager() != null) {
       plugin.getToolManager().observePlayerMessage(player, content, directedAtAssistant);
@@ -213,13 +228,13 @@ public final class ConversationManager {
       // participating even if another player's line opened this shared capture first.
       // This is the key group-continuity case: both speakers can contribute to the
       // SAME request without repeating Iso and without creating another request.
-      if (directMention || existingSmartFollowUp) {
+      if (directMention || semanticSmartFollowUp) {
         activeAddressers.add(player.getUniqueId());
       }
       return;
     }
 
-    boolean smartFollowUp = existingSmartFollowUp;
+    boolean smartFollowUp = semanticSmartFollowUp;
 
     boolean shouldTrigger = switch (mode) {
       case "always" -> true;
@@ -240,6 +255,7 @@ public final class ConversationManager {
     if (playerId != null) {
       triggerTimes.remove(playerId);
       smartFollowUpUntilByPlayer.remove(playerId);
+      smartFollowUpAnchorByPlayer.remove(playerId);
       activeAddressers.remove(playerId);
     }
   }
@@ -981,7 +997,9 @@ public final class ConversationManager {
 
       boolean beforeTrigger = chat.timestampMs() < capture.triggerAt();
       boolean assistantMention = containsAssistantMention(chat.content());
-      boolean alreadySmart = hasActiveSmartFollowUp(chat.playerId(), capture.triggerAt());
+      boolean alreadySmart = hasActiveSmartFollowUp(chat.playerId(), chat.timestampMs())
+          && isSemanticSmartFollowUp(
+              chat.playerId(), chat.playerName(), chat.content(), chat.timestampMs(), false);
       boolean explicitBridge = looksLikeExplicitGroupBridge(chat.content());
 
       long threadAge = previousThreadLine == null
@@ -2491,8 +2509,13 @@ public final class ConversationManager {
         long followUpMs = plugin.getRelationshipManager() == null
             ? baseFollowUpMs
             : plugin.getRelationshipManager().followUpMs(playerId, baseFollowUpMs);
-        if (followUpMs > 0L) smartFollowUpUntilByPlayer.put(playerId, now + followUpMs);
-        else smartFollowUpUntilByPlayer.remove(playerId);
+        if (followUpMs > 0L) {
+          smartFollowUpUntilByPlayer.put(playerId, now + followUpMs);
+          smartFollowUpAnchorByPlayer.put(playerId, buildSmartFollowUpAnchor(scene, playerId, reply, now));
+        } else {
+          smartFollowUpUntilByPlayer.remove(playerId);
+          smartFollowUpAnchorByPlayer.remove(playerId);
+        }
       }
     }
 
@@ -2767,19 +2790,285 @@ public final class ConversationManager {
     return cleaned.trim();
   }
 
+
+  /**
+   * Zero-token SMART trigger gate. A live timer no longer means every next line
+   * automatically spends an API request. The gate is intentionally conservative:
+   * clear public/side-chat is blocked, clear continuations are allowed, and ambiguous
+   * human chat is allowed by default so normal conversation does not feel brittle.
+   */
+  private boolean isSemanticSmartFollowUp(
+      UUID playerId,
+      String playerName,
+      String raw,
+      long now,
+      boolean logDecision) {
+    if (!plugin.getConfig().getBoolean(
+        "global-conversation.smart-trigger-gate.enabled", true)) {
+      return true;
+    }
+    SmartFollowUpAnchor anchor = smartFollowUpAnchorByPlayer.get(playerId);
+    if (anchor == null) {
+      // Backward/reload safety: an already-live timer without an anchor remains valid
+      // until the next answered scene creates one.
+      return true;
+    }
+
+    String base = "global-conversation.smart-trigger-gate.";
+    int continueThreshold = clampInt(plugin.getConfig().getInt(
+        base + "continuation-threshold", 28), 0, 100);
+    int sideMin = clampInt(plugin.getConfig().getInt(
+        base + "side-thread-min-affinity", 36), 0, 100);
+    int sideMargin = clampInt(plugin.getConfig().getInt(
+        base + "side-thread-margin", 8), 0, 100);
+    long sideLookback = Math.max(plugin.getConfig().getLong(
+        base + "side-thread-lookback-ms", 8000L), 0L);
+    boolean blockBroad = plugin.getConfig().getBoolean(
+        base + "block-broad-public-requests", true);
+    boolean blockOther = plugin.getConfig().getBoolean(
+        base + "block-explicit-other-player-address", true);
+    boolean blockTrivial = plugin.getConfig().getBoolean(
+        base + "block-trivial-acknowledgements", true);
+    boolean allowAmbiguous = plugin.getConfig().getBoolean(
+        base + "allow-ambiguous", true);
+    boolean debug = logDecision && plugin.getConfig().getBoolean(base + "debug-log", false);
+
+    long age = Math.max(0L, now - anchor.answeredAtMs());
+    int isoldaAffinity = smartFollowUpAffinity(
+        raw,
+        anchor.lastPlayerLine(),
+        anchor.assistantReply(),
+        anchor.participantNames(),
+        age);
+
+    int bestSideAffinity = 0;
+    PublicChatRecord bestSideLine = null;
+    long oldest = Math.max(anchor.answeredAtMs(), now - sideLookback);
+    for (PublicChatRecord prior : publicChatLog) {
+      if (prior.timestampMs() < oldest || prior.timestampMs() >= now) continue;
+      if (prior.playerId().equals(playerId)) continue;
+      long sideAge = Math.max(0L, now - prior.timestampMs());
+      int side = localLateralAffinity(raw, prior.content(), prior.playerName(), sideAge);
+      if (side > bestSideAffinity) {
+        bestSideAffinity = side;
+        bestSideLine = prior;
+      }
+    }
+
+    LinkedHashSet<String> otherNames = new LinkedHashSet<>(anchor.participantNames());
+    for (Player online : Bukkit.getOnlinePlayers()) {
+      if (!online.getUniqueId().equals(playerId)) otherNames.add(online.getName());
+    }
+    if (playerName != null) otherNames.removeIf(name -> name.equalsIgnoreCase(playerName));
+
+    boolean broadPublic = blockBroad && looksLikeBroadSmartSideRequest(raw);
+    boolean explicitOther = blockOther && looksLikeExplicitOtherPlayerAddress(raw, otherNames);
+    boolean trivial = blockTrivial && isTrivialSmartAcknowledgement(raw);
+
+    boolean sideWins = bestSideAffinity >= sideMin
+        && bestSideAffinity - isoldaAffinity >= sideMargin;
+    // Very short elliptical answers ("yo tengo", "si", "no") should follow a
+    // nearby side question even when the scores are close. This is the exact class
+    // of accidental SMART request that used to waste calls in busy public chat.
+    if (!sideWins && isVeryShortElliptical(raw)
+        && bestSideAffinity >= sideMin
+        && bestSideAffinity > isoldaAffinity + 3) {
+      sideWins = true;
+    }
+
+    boolean allow;
+    String reason;
+    if (explicitOther) {
+      allow = false;
+      reason = "other_player";
+    } else if (broadPublic) {
+      allow = false;
+      reason = "public_request";
+    } else if (trivial && isoldaAffinity < Math.max(continueThreshold + 18, 52)) {
+      allow = false;
+      reason = "trivial_ack";
+    } else if (sideWins) {
+      allow = false;
+      reason = "side_thread";
+    } else if (isoldaAffinity >= continueThreshold) {
+      allow = true;
+      reason = "continuation";
+    } else {
+      allow = allowAmbiguous;
+      reason = allow ? "ambiguous_allow" : "ambiguous_block";
+    }
+
+    if (debug) {
+      plugin.getLogger().info("SMART trigger gate player=" + playerName
+          + " isolda=" + isoldaAffinity
+          + " side=" + bestSideAffinity
+          + (bestSideLine == null ? "" : " side_speaker=" + bestSideLine.playerName())
+          + " age_ms=" + age
+          + " broad=" + broadPublic
+          + " other_player=" + explicitOther
+          + " trivial=" + trivial
+          + " decision=" + (allow ? "CONTINUE" : "LOCAL_ONLY")
+          + " reason=" + reason);
+    }
+    return allow;
+  }
+
+  private SmartFollowUpAnchor buildSmartFollowUpAnchor(
+      SceneRequest scene,
+      UUID playerId,
+      String assistantReply,
+      long answeredAtMs) {
+    String latestPlayerLine = "";
+    LinkedHashSet<String> participants = new LinkedHashSet<>();
+    if (scene != null && scene.currentSceneMessages() != null) {
+      for (ChatMessage message : scene.currentSceneMessages()) {
+        if (!(message instanceof PlayerChatMessage playerMessage)) continue;
+        participants.add(playerMessage.playerName);
+        if (playerId.equals(playerMessage.playerId)
+            && playerMessage.content != null && !playerMessage.content.isBlank()) {
+          latestPlayerLine = playerMessage.content;
+        }
+      }
+    }
+    return new SmartFollowUpAnchor(
+        answeredAtMs,
+        limitSmartAnchorText(latestPlayerLine, 260),
+        limitSmartAnchorText(assistantReply, 360),
+        Set.copyOf(participants));
+  }
+
+  private static String limitSmartAnchorText(String raw, int maxChars) {
+    if (raw == null) return "";
+    String text = raw.replaceAll("\\s+", " ").trim();
+    if (text.length() <= maxChars) return text;
+    return text.substring(0, Math.max(0, maxChars - 3)).trim() + "...";
+  }
+
+  /** Local score for whether a SMART holder's next line is actually a continuation. */
+  static int smartFollowUpAffinity(
+      String raw,
+      String previousPlayerRaw,
+      String previousAssistantRaw,
+      Set<String> participantNames,
+      long ageMs) {
+    String thread = ((previousPlayerRaw == null ? "" : previousPlayerRaw) + " "
+        + (previousAssistantRaw == null ? "" : previousAssistantRaw)).trim();
+    int score = localThreadAffinity(
+        raw, thread, previousAssistantRaw, participantNames,
+        Math.min(Math.max(ageMs, 0L), 8001L), false);
+
+    String text = normalizeForSearch(raw);
+    String assistant = normalizeForSearch(previousAssistantRaw);
+    if (text.isBlank()) return 0;
+
+    // A short answer after Isolda asked something is normally a continuation even
+    // when it shares no nouns ("bien gracias", "voy a minar"). Broad public calls
+    // are deliberately excluded from this bonus.
+    boolean previousWasQuestion = previousAssistantRaw != null
+        && (previousAssistantRaw.contains("?")
+            || assistant.matches("^(?:que|como|donde|cuando|quien|cual|por que)\\b.*")
+            || assistant.matches(".*\\b(?:y tu|y vos)$"));
+    int words = text.split("\\s+").length;
+    if (previousWasQuestion && words <= 12 && !looksLikeBroadSmartSideRequest(raw)) {
+      score += 20;
+    }
+
+    // Generic second-person follow-ups ("y tu?", "que haces?", "que opinas?")
+    // are strong evidence because the only conversational addressee represented by
+    // this SMART anchor is Isolda unless another player is explicitly addressed.
+    if (looksLikeSecondPersonFollowUp(raw)) score += 22;
+
+    // Avoid interpreting "yo tengo" as an answer to an unrelated social question.
+    // It should instead be free to attach to a nearby "alguien tiene piedra?" side thread.
+    if (text.matches("^(?:yo\\s+)?tengo(?:\\s+.*)?$")
+        && !assistant.matches(".*\\b(?:tienes|tenes|tiene|tengo|hay|llevas|llevas)\\b.*")) {
+      score -= 22;
+    }
+
+    // SMART can last longer than the 8s group lookback. Keep a tiny recency signal
+    // for the remainder of the configured relationship-based follow-up window.
+    if (ageMs > 8000L && ageMs <= 15_000L) score += 5;
+    else if (ageMs > 15_000L && ageMs <= 30_000L) score += 2;
+
+    return clampInt(score, 0, 100);
+  }
+
+  static boolean looksLikeSecondPersonFollowUp(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return containsAnyWholeWord(text, "tu", "vos", "tuyo", "tuya", "contigo")
+        || text.matches("^(?:y\\s+)?(?:que|como|donde|cuando|por que)\\s+(?:haces|estas|andas|piensas|opinas|sientes|quieres|queres|vas)\\b.*")
+        || text.matches("^(?:y\\s+)?(?:te|a ti)\\b.*");
+  }
+
+  /** Broad request clearly aimed at public chat, not merely any sentence starting "alguien". */
+  static boolean looksLikeBroadSmartSideRequest(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    boolean anyoneLead = text.matches("^(?:oye|che|ey|eh)?\\s*(?:alguien|alguno|alguna)\\b.*");
+    boolean whoLead = text.matches("^(?:oye|che|ey|eh)?\\s*quien\\b.*");
+    if (!anyoneLead && !whoLead) return false;
+    boolean crowdAction = text.matches(".*\\b(?:tiene|tienen|vende|venden|compra|compran|sabe|saben|puede|pueden|quiere|quieren|va|van|hay|presta|regala|da|dame)\\b.*");
+    // "quien es Tablos?" is a perfectly normal SMART question to Isolda;
+    // "quien tiene piedra?" is clearly addressed to the public room.
+    return crowdAction || (anyoneLead && raw != null && raw.contains("?"));
+  }
+
+  /**
+   * Conservative direct-recipient detector. Mentioning somebody as a topic does not
+   * count; the line must begin by addressing that player and then use a second-person
+   * question/request shape ("Wachi ven", "Pedro dame", "Amino que haces?").
+   */
+  static boolean looksLikeExplicitOtherPlayerAddress(String raw, Set<String> otherPlayerNames) {
+    if (raw == null || raw.isBlank() || otherPlayerNames == null || otherPlayerNames.isEmpty()) return false;
+    String text = normalizeForSearch(raw);
+    String stripped = text.replaceFirst("^(?:oye|che|ey|eh)\\s+", "");
+    for (String name : otherPlayerNames) {
+      if (name == null || name.isBlank()) continue;
+      String canonical = normalizeForSearch(name).replace(" ", "");
+      if (canonical.length() < 3) continue;
+      String[] parts = stripped.split("\\s+", 2);
+      if (parts.length < 2) continue;
+      String first = parts[0].replaceAll("[^\\p{L}\\p{N}_]", "");
+      boolean matchesName = first.equals(canonical)
+          || (canonical.length() >= 6 && first.length() >= 4 && canonical.startsWith(first));
+      if (!matchesName) continue;
+      String rest = parts[1];
+      if (rest.matches("^(?:ven|veni|vente|dame|dime|decime|anda|ve|mira|mirame|espera|esperame|ayuda|ayudame|pasame|presta|prestame|tp|tpa|vamos|callate|deja|dejame|haz|hace|haceme|tienes|tenes|puedes|podes|quieres|queres)\\b.*")
+          || rest.matches("^(?:que|como|donde|cuando|por que)\\s+(?:haces|estas|andas|piensas|opinas|vas|tienes|tenes|quieres|queres)\\b.*")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static boolean isTrivialSmartAcknowledgement(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return true;
+    return text.matches("^(?:x+d+|xd+|(?:ja){2,}|(?:je){2,}|(?:ji){2,}|lol|lmao|ok|okay|oki|dale|va|joya|nice|ah|ahh|uh|uhh|mmm|mhm)$");
+  }
+
   private boolean hasActiveSmartFollowUp(UUID playerId, long now) {
     if (playerId == null) return false;
     Long until = smartFollowUpUntilByPlayer.get(playerId);
     if (until == null) return false;
     if (until < now) {
       smartFollowUpUntilByPlayer.remove(playerId);
+      smartFollowUpAnchorByPlayer.remove(playerId);
       return false;
     }
     return true;
   }
 
   private void pruneSmartFollowUps(long now) {
-    smartFollowUpUntilByPlayer.entrySet().removeIf(entry -> entry.getValue() < now);
+    Set<UUID> expired = new HashSet<>();
+    smartFollowUpUntilByPlayer.entrySet().removeIf(entry -> {
+      boolean remove = entry.getValue() < now;
+      if (remove) expired.add(entry.getKey());
+      return remove;
+    });
+    for (UUID playerId : expired) smartFollowUpAnchorByPlayer.remove(playerId);
+    smartFollowUpAnchorByPlayer.keySet().removeIf(id -> !smartFollowUpUntilByPlayer.containsKey(id));
   }
 
   private int activeSmartFollowUps() {
@@ -2971,6 +3260,12 @@ public final class ConversationManager {
       String text,
       List<String> involvedPlayers,
       Map<String, String> playerIdentities) { }
+
+  private record SmartFollowUpAnchor(
+      long answeredAtMs,
+      String lastPlayerLine,
+      String assistantReply,
+      Set<String> participantNames) { }
 
   private record ActiveCapture(
       long sceneId,

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.11 - Zero-token semantic SMART trigger gate
+
+- A live SMART timer no longer makes every next message from that player open an AI request. Before triggering, Java locally checks whether the line still belongs to Isolda's exchange.
+- Clear public-chat requests such as `alguien tiene piedra?`, direct side-addresses such as `Wachi ven al spawn`, trivial acknowledgements such as `xd`, and replies that fit a recent competing side-thread better now remain local and cost **0 API requests / 0 model tokens**.
+- Natural continuations such as `bien gracias, que haces?`, `voy a minar`, `y tu que opinas?` and other short answers after Isolda asked a question continue normally.
+- Ambiguous human chat remains allowed by default (`allow-ambiguous: true`) so the optimization prefers a rare extra request over breaking a real conversation.
+- The same semantic SMART gate is applied when another player's 4-second group capture is already open, preventing an unrelated SMART holder from being force-promoted merely because their timer is still alive.
+- SMART expiration remains relationship-based and unchanged; a side/public message does not renew the timer, so the player naturally falls out if they keep talking elsewhere.
+- Adds `global-conversation.smart-trigger-gate.*` thresholds and optional local debug logging. Missing keys merge non-destructively; config schema is now 15.
+- No embeddings, no second classifier model, no extra provider call and no extra prompt block were added.
+
 ## 1.7.10.2 - Request-refusal edge hotfix
 
 - Fixed `RelationshipRequestPolicy.shouldRefuse(...)` evaluating `chance >= 1.0` before confirming that the current line was actually a request.

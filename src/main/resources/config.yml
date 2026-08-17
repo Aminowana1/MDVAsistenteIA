@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.10.2 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.11 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 14
+config-version: 15
 
 assistant-name: Isolda
 
@@ -70,6 +70,23 @@ global-conversation:
   # strong matches inherit continuity directly and borderline candidates may be
   # confirmed by the SAME model response. Unrelated chatter never inherits it.
   smart-follow-up-ms: 15000
+
+  # Zero-token semantic gate for an EXISTING SMART holder's next line. A live SMART
+  # timer is permission to continue, not permission for every public-chat message to
+  # spend a request. Clear side/public chat stays only in RAM; obvious continuations
+  # still open normally. Ambiguous lines are allowed by default to preserve natural chat.
+  smart-trigger-gate:
+    enabled: true
+    continuation-threshold: 28
+    side-thread-min-affinity: 36
+    side-thread-margin: 8
+    side-thread-lookback-ms: 8000
+    block-broad-public-requests: true
+    block-explicit-other-player-address: true
+    block-trivial-acknowledgements: true
+    allow-ambiguous: true
+    # Testing only: logs CONTINUE vs LOCAL_ONLY decisions. Costs zero API tokens.
+    debug-log: false
 
   # Optional spontaneous idle request from the friend branch, actually implemented
   # here. Disabled by default because each firing intentionally spends ONE AI call.
