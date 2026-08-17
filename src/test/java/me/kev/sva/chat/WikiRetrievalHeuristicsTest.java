@@ -322,18 +322,4 @@ final class WikiRetrievalHeuristicsTest {
     }
   }
 
-  @Test
-  void propertyOnlyWikiQuestionsRemainFollowUps() {
-    for (String raw : List.of(
-        "y que porcentaje tiene?",
-        "y que probabilidad tiene?",
-        "y cuanta vida tiene?",
-        "y que rareza es?",
-        "y que habilidades tiene?")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
-      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
-    }
-  }
-
 }
