@@ -1,6 +1,7 @@
 package me.kev.sva.memory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,6 +50,10 @@ final class RelationshipSignalDetectorTest {
     assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("queee :c"));
     assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("queee :3"));
     assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("xd :c"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("iso como se consigue mango resinoso?"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("iso que da el acolito necrotico"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("iso q edad tienes?"));
+    assertTrue(RelationshipSignalDetector.isBookkeepingNeutral("iso que eres?"));
   }
 
   @Test
@@ -60,6 +65,21 @@ final class RelationshipSignalDetectorTest {
   @Test
   void genericTierTextIsNotAcceptedAsMemorySummary() {
     assertTrue(RelationshipSignalDetector.isGenericMemorySummary("Confianza y afecto profundos"));
+  }
+
+  @Test
+  void vagueMemoryLabelsAreRejectedButConcreteEventsAreAccepted() {
+    assertTrue(RelationshipSignalDetector.isGenericMemorySummary("Experiencia compartida"));
+    assertTrue(RelationshipSignalDetector.isGenericMemorySummary("Propuesta inesperada"));
+    assertTrue(RelationshipSignalDetector.isGenericMemorySummary("Me gusta hablar contigo"));
+    assertFalse(RelationshipSignalDetector.isMemorySpecificEnough(
+        "Cita planeada para esta tarde.", "Aminowana"));
+    assertFalse(RelationshipSignalDetector.isMemorySpecificEnough(
+        "No puedo soportarlo, es un eterno dolor de cabeza.", "InfiniteVoid2026"));
+    assertTrue(RelationshipSignalDetector.isMemorySpecificEnough(
+        "Me dijo que me ama", "Aminowana"));
+    assertTrue(RelationshipSignalDetector.isMemorySpecificEnough(
+        "Le propuso a Isolda una cita o compromiso romantico", "En3Minutos"));
   }
 
   @Test

@@ -19,6 +19,7 @@ public class AssistantResponse {
   private final List<String> messages;
   private final List<String> toolCalls;
   private final List<RelationshipUpdate> relationshipUpdates;
+  private final List<String> followUpSpeakers;
   private final boolean closeConversation;
   private final ServerAssistantPlugin plugin;
 
@@ -28,6 +29,7 @@ public class AssistantResponse {
     List<String> parsedMessages = List.of();
     List<String> parsedToolCalls = List.of();
     List<Object> parsedRelationshipUpdates = List.of();
+    List<String> parsedFollowUpSpeakers = List.of();
     boolean parsedCloseConversation = false;
 
     String cleanedResponse = stripOuterCodeFence(response == null ? "" : response).trim();
@@ -46,6 +48,7 @@ public class AssistantResponse {
             "m", "messages", "message", "response", "text",
             "t", "tool-calls", "tool_calls", "tools",
             "r", "relationships", "relationship-updates", "relationship_updates",
+            "f", "follow-up-speakers", "follow_up_speakers", "followups",
             "c", "close-conversation", "close_conversation");
 
         if (hasKnownField) {
@@ -67,6 +70,12 @@ public class AssistantResponse {
               getObjectListFlexible(data, "relationships"),
               getObjectListFlexible(data, "relationship-updates"),
               getObjectListFlexible(data, "relationship_updates"));
+
+          parsedFollowUpSpeakers = firstNonEmpty(
+              getStringListFlexible(data, "f"),
+              getStringListFlexible(data, "follow-up-speakers"),
+              getStringListFlexible(data, "follow_up_speakers"),
+              getStringListFlexible(data, "followups"));
 
           parsedCloseConversation = getBooleanFlexible(
               data,
@@ -110,6 +119,7 @@ public class AssistantResponse {
       // is safe to recover because RelationshipManager still validates current speaker,
       // semantic signal, cooldowns and romance capacity before mutating anything.
       parsedRelationshipUpdates = recoverRelationshipUpdatesFromMalformed(cleanedResponse);
+      parsedFollowUpSpeakers = List.of();
       parsedCloseConversation = false;
 
       if (plugin.getConfig().getBoolean("provider-response.log-fallbacks", false)) {
@@ -120,8 +130,9 @@ public class AssistantResponse {
     this.messages = normalizeMessages(parsedMessages);
     this.toolCalls = normalizeToolCalls(parsedToolCalls);
     this.relationshipUpdates = normalizeRelationshipUpdates(parsedRelationshipUpdates);
+    this.followUpSpeakers = normalizeFollowUpSpeakers(parsedFollowUpSpeakers);
     this.closeConversation = parsedCloseConversation;
-    this.raw = toYaml(this.messages, this.toolCalls, this.relationshipUpdates, this.closeConversation);
+    this.raw = toYaml(this.messages, this.toolCalls, this.relationshipUpdates, this.followUpSpeakers, this.closeConversation);
   }
 
   public AssistantResponse(
@@ -130,7 +141,7 @@ public class AssistantResponse {
       List<String> toolCalls,
       boolean closeConversation) {
 
-    this(plugin, messages, toolCalls, List.of(), closeConversation);
+    this(plugin, messages, toolCalls, List.of(), List.of(), closeConversation);
   }
 
   public AssistantResponse(
@@ -140,12 +151,24 @@ public class AssistantResponse {
       List<RelationshipUpdate> relationshipUpdates,
       boolean closeConversation) {
 
+    this(plugin, messages, toolCalls, relationshipUpdates, List.of(), closeConversation);
+  }
+
+  public AssistantResponse(
+      ServerAssistantPlugin plugin,
+      List<String> messages,
+      List<String> toolCalls,
+      List<RelationshipUpdate> relationshipUpdates,
+      List<String> followUpSpeakers,
+      boolean closeConversation) {
+
     this.plugin = plugin;
     this.messages = normalizeMessages(messages);
     this.toolCalls = normalizeToolCalls(toolCalls);
     this.relationshipUpdates = relationshipUpdates == null ? List.of() : List.copyOf(relationshipUpdates);
+    this.followUpSpeakers = normalizeFollowUpSpeakers(followUpSpeakers);
     this.closeConversation = closeConversation;
-    this.raw = toYaml(this.messages, this.toolCalls, this.relationshipUpdates, this.closeConversation);
+    this.raw = toYaml(this.messages, this.toolCalls, this.relationshipUpdates, this.followUpSpeakers, this.closeConversation);
   }
 
   public List<String> getMessages() {
@@ -158,6 +181,10 @@ public class AssistantResponse {
 
   public List<RelationshipUpdate> getRelationshipUpdates() {
     return List.copyOf(relationshipUpdates);
+  }
+
+  public List<String> getFollowUpSpeakers() {
+    return List.copyOf(followUpSpeakers);
   }
 
   public boolean shouldCloseConversation() {
@@ -235,7 +262,8 @@ public class AssistantResponse {
         || lower.startsWith("\"m\":") || lower.startsWith("t:")
         || lower.startsWith("\"t\":") || lower.startsWith("c:")
         || lower.startsWith("\"c\":") || lower.startsWith("r:")
-        || lower.startsWith("\"r\":")) {
+        || lower.startsWith("\"r\":") || lower.startsWith("f:")
+        || lower.startsWith("\"f\":")) {
       return true;
     }
 
@@ -255,6 +283,7 @@ public class AssistantResponse {
     if (compact.contains(",t:") || compact.contains(",\"t\":")) signals++;
     if (compact.contains(",c:") || compact.contains(",\"c\":")) signals++;
     if (compact.contains(",r:") || compact.contains(",\"r\":")) signals++;
+    if (compact.contains(",f:") || compact.contains(",\"f\":")) signals++;
     if (lower.contains("relationship-updates") || lower.contains("relationship_updates")) signals++;
     return signals >= 2;
   }
@@ -367,7 +396,7 @@ public class AssistantResponse {
 
   private List<String> normalizeMessages(List<String> input) {
     int maxMessages = Math.max(
-        plugin.getConfig().getInt("chat.max-messages-per-response", 1),
+        plugin.getConfig().getInt("chat.max-messages-per-response", 3),
         0);
 
     int maxLength = Math.max(
@@ -438,6 +467,19 @@ public class AssistantResponse {
     return cleaned;
   }
 
+  private List<String> normalizeFollowUpSpeakers(List<String> input) {
+    if (input == null || input.isEmpty()) return List.of();
+    List<String> result = new ArrayList<>();
+    for (String raw : input) {
+      if (result.size() >= 3) break;
+      if (raw == null) continue;
+      String name = raw.trim();
+      if (!name.matches("[A-Za-z0-9_]{1,32}")) continue;
+      if (result.stream().noneMatch(existing -> existing.equalsIgnoreCase(name))) result.add(name);
+    }
+    return List.copyOf(result);
+  }
+
   /**
    * 1.6 keeps read/context tools local but allows a small explicit list of ACTION
    * calls in the same model response. ToolManager performs the real allow-list and
@@ -500,6 +542,7 @@ public class AssistantResponse {
       List<String> messages,
       List<String> toolCalls,
       List<RelationshipUpdate> relationshipUpdates,
+      List<String> followUpSpeakers,
       boolean closeConversation) {
 
     Map<String, Object> data = new LinkedHashMap<>();
@@ -508,6 +551,7 @@ public class AssistantResponse {
     data.put("relationship-updates", relationshipUpdates == null
         ? List.of()
         : relationshipUpdates.stream().map(RelationshipUpdate::toCompact).toList());
+    data.put("follow-up-speakers", followUpSpeakers == null ? List.of() : followUpSpeakers);
     data.put("close-conversation", closeConversation);
 
     DumperOptions options = new DumperOptions();

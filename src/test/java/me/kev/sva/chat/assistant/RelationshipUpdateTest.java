@@ -72,6 +72,30 @@ final class RelationshipUpdateTest {
     assertEquals("", update.romanceAction());
   }
 
+
+  @Test
+  void salvagesLabelledCompactFormatsFromSmallModels() {
+    RelationshipUpdate shortForm = RelationshipUpdate.parseCompact(
+        "InfiniteVoid2026|DELTA|-1|KIND|IMPORTANCE|No me gusta que me digas que haga eso.");
+
+    assertNotNull(shortForm);
+    assertEquals("InfiniteVoid2026", shortForm.playerName());
+    assertEquals(-1, shortForm.delta());
+    assertEquals("n", shortForm.memoryKind());
+    assertEquals(1, shortForm.importance());
+
+    RelationshipUpdate fullForm = RelationshipUpdate.parseCompact(
+        "{name==xXAaxelXx|DELTA|-1|KIND|recent|IMPORTANCE|2|MEMORY|Es mi archienemigo.|ROMANCE|-}");
+
+    assertNotNull(fullForm);
+    assertEquals("xXAaxelXx", fullForm.playerName());
+    assertEquals(-1, fullForm.delta());
+    assertEquals("r", fullForm.memoryKind());
+    assertEquals(2, fullForm.importance());
+    assertEquals("Es mi archienemigo", fullForm.memory());
+    assertEquals("", fullForm.romanceAction());
+  }
+
   @Test
   void rejectsMalformedCompactUpdate() {
     assertNull(RelationshipUpdate.parseCompact("Kroattan|1|r"));

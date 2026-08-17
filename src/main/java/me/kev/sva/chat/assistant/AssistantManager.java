@@ -297,9 +297,12 @@ public class AssistantManager {
     int maxAssistantMessageLength = Math.max(
         plugin.getConfig().getInt("chat.max-assistant-message-length", 190),
         0);
+    int maxAssistantMessages = Math.max(
+        plugin.getConfig().getInt("chat.max-messages-per-response", 3),
+        1);
     messages.add(
         "[OUTPUT] max_chars=" + maxAssistantMessageLength
-            + ", max_chat_messages=1. Java enforces both limits.");
+            + ", max_chat_messages=" + maxAssistantMessages + ". Java enforces both limits.");
 
     if (plugin.getToolManager() != null) {
       // This capability catalogue is stable across scenes. Only the per-scene ACTION

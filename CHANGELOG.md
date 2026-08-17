@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.7.10 - Zero-token group thread affinity router
+
+- Replaces the 1.7.9 mostly rule/phrase-driven group candidate check with a local weighted affinity router.
+- Every nearby public line is scored against Isolda's active thread and against recent competing side-chat before it can gain group SMART continuity.
+- Active-thread scoring combines participant-name/alias references, lexical topic overlap, conversational reply shape, deictic references, question/answer compatibility and recency.
+- Recent side-chat uses the same local evidence plus generic elliptical-answer detection, so `alguien tiene piedra?` -> `yo tengo` remains attached to the lateral conversation instead of Isolda.
+- Explicit bridges/social phrases remain high-confidence bonus signals but are no longer a whitelist or the primary source of intelligence. Unlisted contextual replies such as `eso no tiene ningun sentido` can join from structure + recency even when no hardcoded phrase matches.
+- Adds configurable `group-threading.affinity` thresholds, side-thread lookback/cap and optional zero-token debug score logging. Missing keys auto-merge non-destructively.
+- Strong affinity can grant SMART continuity locally; borderline candidates may still be confirmed through the existing `f` field in the same normal model response.
+- No embeddings, no classifier model and no additional API request were added. Side-thread routing happens over a handful of recent RAM chat lines.
+
+## 1.7.9 - Specific memories + safe group thread routing
+
+- Relationship memories are now required to be concrete and self-contained instead of vague labels such as `Experiencia compartida`, `Propuesta inesperada`, `Confianza y afecto profundos` or `Me gusta hablar contigo`.
+- Vague model memories are replaced locally, with zero extra AI requests, by a grounded summary built from the player's actual line. The player's name is always retained so future scenes cannot confuse who did or said something.
+- On first 1.7.9 load, legacy memory rows that are too vague to reconstruct safely are removed from active storage instead of continuing to influence Isolda; specific old rows are preserved and automatically prefixed with their owning player when the actor was missing.
+- The bundled relationship memory budget rises from 90 to 120 characters (only the untouched old default is migrated) so proposals, complaints, promises and other events can retain enough detail to be useful later.
+- Group SMART continuity no longer promotes every player who happened to speak during the capture window. Java now performs a small local thread check using chronology, references to current participants, conversation topic and explicit social bridges.
+- Side chat such as `Pedrox: alguien tiene piedra` + `Wachi: yo tengo` is excluded from Isolda's conversation and receives no SMART continuation merely for being nearby.
+- Social bridges such as `Pedrox: dile la verdad` and linked interventions such as `Wachi: Amino dejate de hacerte el que esta bien` can join the active Isolda thread even when they do not literally say `Iso`, then receive the normal relationship-based SMART follow-up window.
+- Only prefiltered `[GROUP PARTICIPANT CANDIDATES]` can be confirmed by the model's compact `f` bookkeeping field; ambient public chatter cannot grant itself follow-up, relationship authority or tool authority.
+- Very recent pre-trigger bridge lines can be considered when deciding whether a player is joining the still-open exchange, while normal old chatter remains context-only.
+- Fixed a stable-system-prompt contradiction that still advertised `max_chat_messages=1`; it now uses the actual configured `chat.max-messages-per-response` value, allowing the intended 1-3 short group replies in one model request.
+- No classifier/model request was added. Memory grounding, thread routing and participant filtering are Java-local.
+
+## 1.7.7 - Natural group scenes + hostility request refusal
+
+- Group scenes are no longer treated as one ticket per addressed player. The same single model request now distinguishes shared discussion, independent requests and mixed scenes; a shared conversation may receive one natural group reaction, while truly independent questions may receive 2-3 short `m` lines.
+- Java no longer auto-fills a missing social reply for every participant. The zero-call coverage fallback is now restricted to omitted independent wiki/factual questions that already had trusted context selected.
+- Independent factual replies in multi-speaker scenes are name-prefixed only for coverage verification; shared/group reactions do not need player prefixes.
+- Adds `behavior.request-refusal.by-tier` in `relationships.yml`: bundled refusal chances are arch-enemy 90%, enemy 65%, hostile 35%, disliked 15%. The decision is made once locally per scene and is stable for that scene.
+- A refused hostile request receives no wiki/read-context and no ACTION authority, reducing prompt tokens and preventing accidental compliance. The same normal model request can answer with a hostile refusal such as telling an arch-enemy to look it up themselves.
+- `current_request_policy=REFUSE/ALLOW_THIS_TIME` is injected only for hostile-tier requests with configured refusal chance. REFUSE is authoritative even for factual/wiki or harmless ACTION requests; ALLOW_THIS_TIME permits reluctant compliance without changing the stored relationship.
+- Shared conversational statements are not classified as requests, so two players arguing about the same third person can still get one natural group response instead of random refusal routing.
+- Empty direct-mention fallback keeps refusal decisions and trusted factual recovery without creating a second provider request.
+- Adds pure Java regression tests for request detection/refusal stability and multi-speaker factual coverage.
+- No extra AI request/classifier was added. Refusal routing, wiki/context withholding and coverage checks are Java-local.
+
+## 1.7.6 - Multi-speaker replies + wiki hardening + no-silence fallback
+
+- A single captured scene can now return up to three short public replies in the SAME `m` array/model request, so 2-3 players who directly address Isolda during one capture window can all receive a brief answer without extra API calls.
+- Migrates the old bundled `chat.max-messages-per-response: 1` to `3` and relationship context capacity `2` to `3`; deliberate custom values are preserved.
+- Wiki retrieval now recognizes natural obtain/drop/location wording such as `como se consigue`, `que da el` and `en que coordenadas puedo encontrar`, and can retrieve up to one targeted wiki result per addressed speaker in multi-player scenes.
+- Adds typo-tolerant entity ranking and dedicated-page preference, fixing cases such as `acohilitico necrotido` selecting generic Necrótido pages instead of `mob-hueste-acolito-necrotico`.
+- Wiki `result=no_match` is now explicit trusted context, preventing GPT from filling missing MDVCRAFT facts with vanilla/general Minecraft guesses.
+- Direct mentions that return an empty `m` with no action are recovered locally from already-selected wiki context when possible, otherwise with an honest short acknowledgement. No retry/model call is created.
+- Wiki fallback can extract simple crafting/obtain lines and mob drop blocks locally, including `9 Ramas Resinosas -> 1 Mango Resinoso` and the exact Acólito Necrótico drops.
+- Relationship context for group scenes is scoped to actual addressed request speakers. Enemy/arch-enemy state now explicitly controls social willingness as well as tone: factual answers stay accurate, but social favors/affection/praise requests are normally refused, mocked or twisted rather than obediently accepted.
+- The stable CORE now exposes addressed speakers and trigger mode, prevents invented proximity requirements for talking to Isolda, and instructs the model to keep simultaneous players' intents separate.
+- Player-data location intent now recognizes common `coors/coor` shorthand in addition to `coords/coordenadas`, fixing direct coordinate questions that previously produced an empty reply.
+- Relationship bookkeeping treats identity/server-info queries as neutral and accepts additional malformed labelled compact `r` formats seen in live GPT-4o-mini output.
+- Multi-line group replies are no longer collapsed by the legacy single-line romance/partner factual guard.
+- No additional AI request was added; wiki ranking, typo recovery, direct-message fallback and relationship safeguards are Java-local.
+
 ## 1.7.5.1 - Build test hotfix
 
 - Fixed `RelationshipSignalDetector.isBookkeepingNeutral` for tiny reactions with emoticons such as `queee :c`. Normalization removes `:`, so the previous regex saw `queee c` and incorrectly marked it non-neutral.

@@ -113,7 +113,12 @@ public final class RelationshipSignalDetector {
         "es tu enemigo", "tu enemigo", "decile algo", "dile algo",
         "que pasa si mato", "q pasa si mato", "sono como un halago", "sono como un alago",
         "no me hagas llorar", "mi ex me trataba mejor",
-        "te odio era mentira", "te odio era broma", "te odio es broma")) {
+        "te odio era mentira", "te odio era broma", "te odio es broma",
+        "que eres iso", "que eres isolda", "q eres iso", "q eres isolda",
+        "iso que eres", "isolda que eres", "iso q eres", "isolda q eres",
+        "que edad tienes", "q edad tienes", "cuantos anos tienes",
+        "eres una ia", "eres un ia", "eres un bot", "eres bot",
+        "como interactuo contigo", "como puedo interactuar contigo", "como te hablo")) {
       return true;
     }
 
@@ -122,7 +127,11 @@ public final class RelationshipSignalDetector {
     // just because the player asked for a recipe, inventory view or absence summary.
     if (containsAny(text,
         "que es ", "q es ", "como se craftea", "como crafteo", "como consigo",
-        "de donde consigo", "como se hace", "que comandos", "q comandos",
+        "como se consigue", "como conseguir", "como obtengo", "como se obtiene",
+        "de donde consigo", "donde consigo", "donde se consigue", "como se hace",
+        "que da el ", "q da el ", "drops", "dropea", "droppea", "que suelta",
+        "en que coordenadas", "coordenadas puedo", "donde encuentro", "puedo encontrar",
+        "que comandos", "q comandos",
         "inventario", "que tiene ", "que tengo ", "mi nivel", "nivel de ",
         "donde esta ", "que hizo ", "que ha hecho ", "que paso mientras",
         "mientras no estaba", "mientras no estuve", "que me perdi", "hazme un resumen",
@@ -143,9 +152,35 @@ public final class RelationshipSignalDetector {
     if (text.isBlank()) return false;
     return containsAny(text,
         "confianza y afecto profundos", "confianza y afecto profundo",
-        "confianza real y afecto", "es una persona cercana", "es un amigo cercano",
+        "confianza real y afecto", "confianza y carino entre nosotros",
+        "confianza y carino", "confianza y cercania",
+        "es una persona cercana", "es un amigo cercano",
         "me gusta burlarme de el", "me gusta burlarme de ella",
+        "me alegra poder ayudarte", "me gusta hablar contigo",
+        "me gusta la confianza", "me gusta la confianza y buena conversacion",
+        "experiencia compartida", "propuesta inesperada",
+        "te olvide por completo", "siempre estoy lista para insultarlo",
         "insufferable como siempre", "insoportable como siempre");
+  }
+
+  /**
+   * A memory row should still make sense when inspected outside the relationship
+   * context. Tiny labels such as "Experiencia compartida" are too ambiguous even
+   * when they are technically related to the scene.
+   */
+  public static boolean isMemorySpecificEnough(String rawMemory, String playerName) {
+    String text = normalize(rawMemory);
+    if (text.isBlank() || isGenericMemorySummary(rawMemory)) return false;
+    String player = normalize(playerName);
+    if (!player.isBlank() && text.contains(player)) return true;
+    int words = text.split(" ").length;
+    // Specific event/action wording is enough even before RelationshipManager prefixes
+    // the actor name for standalone DB readability.
+    return words >= 5 && containsAny(text,
+        "dijo", "conto", "pregunto", "propuso", "pidio", "prometio",
+        "insulto", "amenazo", "defendio", "ayudo", "rechazo", "acepto",
+        "invito", "confeso", "admitio", "se disculpo", "bromeo", "mato",
+        "le dijo", "me dijo", "hablamos", "planeo", "planearon");
   }
 
   public static boolean isExplicitPartnershipProposal(String rawContent) {

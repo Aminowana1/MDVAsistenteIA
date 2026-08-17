@@ -67,12 +67,17 @@ public final class ConfigurationManager {
     boolean outputBudgetMigrated = migrate171OutputBudget(main);
     boolean relationshipPersonalityMigrated = migrateRelationshipPersonalityDefault(personality);
     boolean relationshipCapacityMigrated = migrate171RelationshipUpdateCapacity(relationships);
-    boolean mainChanged = migrated | actionSafetyMigrated | outputBudgetMigrated | mergeBundledDefaults(main, "config.yml");
+    boolean multiReplyMigrated = migrate176MultiReplyDefault(main);
+    boolean relationshipContextMigrated = migrate176RelationshipContextCapacity(relationships);
+    boolean archEnemyIgnoreMigrated = migrate176ArchEnemyIgnoreDefault(relationships);
+    boolean relationshipMemoryBudgetMigrated = migrate179RelationshipMemoryBudget(relationships);
+    boolean mainChanged = migrated | actionSafetyMigrated | outputBudgetMigrated | multiReplyMigrated | mergeBundledDefaults(main, "config.yml");
     boolean personalityChanged = migrated | relationshipPersonalityMigrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
     boolean integrationsChanged = mergeBundledDefaults(integrations, INTEGRATIONS_FILE);
-    boolean relationshipsChanged = relationshipCapacityMigrated | mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
+    boolean relationshipsChanged = relationshipCapacityMigrated | relationshipContextMigrated | archEnemyIgnoreMigrated
+        | relationshipMemoryBudgetMigrated | mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
 
     mainChanged |= syncSchemaVersion(main, "config.yml");
     personalityChanged |= syncSchemaVersion(personality, PERSONALITY_FILE);
@@ -111,6 +116,18 @@ public final class ConfigurationManager {
     }
     if (relationshipCapacityMigrated) {
       plugin.getLogger().info("Raised the old relationship updates-per-scene default from 1 to 2 for group scenes.");
+    }
+    if (multiReplyMigrated) {
+      plugin.getLogger().info("Raised the old single-message chat output default to 3 short replies for multi-speaker scenes.");
+    }
+    if (relationshipContextMigrated) {
+      plugin.getLogger().info("Raised relationship context capacity from 2 to 3 current addressed players.");
+    }
+    if (archEnemyIgnoreMigrated) {
+      plugin.getLogger().info("Changed the old arch-enemy trivial-ignore default from 40% to 0% so maximum-hostility players are answered rather than silently dropped.");
+    }
+    if (relationshipMemoryBudgetMigrated) {
+      plugin.getLogger().info("Raised relationship memory summaries from 90 to 120 chars so stored events can stay specific and self-contained.");
     }
   }
 
@@ -169,6 +186,58 @@ public final class ConfigurationManager {
     if (!file.exists()) {
       plugin.saveResource(resourceName, false);
     }
+  }
+
+
+  /**
+   * 1.7.9 stores memories as concrete self-contained events instead of tiny labels.
+   * Migrate only the previous bundled 90-char value; custom budgets are preserved.
+   */
+  private boolean migrate179RelationshipMemoryBudget(YamlConfiguration relationships) {
+    if (relationships.getInt("config-version", 0) > 5) return false;
+    String path = "memories.max-summary-chars";
+    if (!relationships.isSet(path) || relationships.getInt(path, 90) != 90) return false;
+    relationships.set(path, 120);
+    return true;
+  }
+
+  /**
+   * 1.7.6 can answer up to three distinct current addressers inside the SAME model
+   * request. Migrate only the old bundled value 1; deliberate custom values survive.
+   */
+  private boolean migrate176MultiReplyDefault(YamlConfiguration main) {
+    if (main.getInt("config-version", 0) > 11) return false;
+    String path = "chat.max-messages-per-response";
+    if (!main.isSet(path) || main.getInt(path, 1) != 1) return false;
+    main.set(path, 3);
+    return true;
+  }
+
+  /**
+   * Multi-speaker scenes need the relationship tier for every addressed player.
+   * This changes only the old bundled value 2 so custom context budgets are preserved.
+   */
+  private boolean migrate176RelationshipContextCapacity(YamlConfiguration relationships) {
+    if (relationships.getInt("config-version", 0) > 3) return false;
+    String path = "context.max-players";
+    if (!relationships.isSet(path) || relationships.getInt(path, 2) != 2) return false;
+    relationships.set(path, 3);
+    return true;
+  }
+
+  /**
+   * 1.7.6 makes arch-enemy the active maximum-hostility tier. The previous bundled
+   * 40% trivial-message ignore chance made testing look like random no-response bugs.
+   * Migrate only that exact old default; deliberate custom probabilities survive.
+   */
+  private boolean migrate176ArchEnemyIgnoreDefault(YamlConfiguration relationships) {
+    if (relationships.getInt("config-version", 0) > 3) return false;
+    String path = "behavior.ignore.thresholds.-90";
+    if (!relationships.isSet(path)) return false;
+    double current = relationships.getDouble(path, 0.40);
+    if (Math.abs(current - 0.40) > 0.000001) return false;
+    relationships.set(path, 0.0);
+    return true;
   }
 
   /**

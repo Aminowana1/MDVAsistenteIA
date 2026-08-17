@@ -26,13 +26,32 @@ public record RelationshipUpdate(
 
   public static RelationshipUpdate parseCompact(String raw) {
     if (raw == null || raw.isBlank()) return null;
-    String[] parts = raw.split("\\|", -1);
+    String cleaned = raw.trim();
+    String[] parts = cleaned.split("\\|", -1);
+    if (parts.length < 2) return null;
+
+    // Compatibility salvage for small-model labelled compact output such as:
+    //   Name|DELTA|-1|KIND|recent|IMPORTANCE|2|MEMORY|...|ROMANCE|-
+    // and the shorter malformed variant seen in live logs:
+    //   Name|DELTA|-1|KIND|IMPORTANCE|No me gusta ...
+    // Java still performs the semantic/current-speaker validation later; this only
+    // prevents harmless formatting drift from throwing away an otherwise usable r.
+    if (parts.length >= 3 && "delta".equalsIgnoreCase(parts[1].trim())) {
+      return parseLabelledCompact(parts);
+    }
+
+    // Some models wrap the first labelled token as {name==Player|DELTA|...}.
+    if (looksLikeLabelledName(parts[0]) || containsLabel(parts, "DELTA")) {
+      RelationshipUpdate labelled = parseLabelledCompact(parts);
+      if (labelled != null) return labelled;
+    }
+
     // Small models sometimes omit the optional trailing ROMANCE field (or both
     // optional MEMORY/ROMANCE fields). The first four fields are enough to validate
     // the bookkeeping safely; missing optional values default to none.
     if (parts.length < 4) return null;
 
-    String player = parts[0].trim();
+    String player = cleanPlayerToken(parts[0]);
     if (player.isBlank()) return null;
 
     Integer delta = parseInt(parts[1]);
@@ -46,6 +65,108 @@ public record RelationshipUpdate(
         importance,
         parts.length >= 5 ? parts[4] : "",
         parts.length >= 6 ? parts[5] : "");
+  }
+
+  private static RelationshipUpdate parseLabelledCompact(String[] parts) {
+    if (parts == null || parts.length < 3) return null;
+    String player = cleanPlayerToken(parts[0]);
+    if (player.isBlank()) return null;
+
+    Integer delta = null;
+    String kind = "n";
+    int importance = 1;
+    String memory = "";
+    String romance = "";
+
+    for (int i = 1; i < parts.length; i++) {
+      String token = stripWrapper(parts[i]);
+      String label = token.toUpperCase(Locale.ROOT);
+      if (label.equals("DELTA") && i + 1 < parts.length) {
+        Integer parsed = parseInt(stripWrapper(parts[++i]));
+        if (parsed != null) delta = parsed;
+        continue;
+      }
+      if (label.equals("KIND") && i + 1 < parts.length) {
+        String candidate = stripWrapper(parts[i + 1]);
+        if (isMemoryKindToken(candidate)) {
+          kind = candidate;
+          i++;
+        }
+        continue;
+      }
+      if (label.equals("IMPORTANCE") && i + 1 < parts.length) {
+        Integer parsed = parseInt(stripWrapper(parts[i + 1]));
+        if (parsed != null) {
+          importance = parsed;
+          i++;
+        }
+        continue;
+      }
+      if (label.equals("MEMORY") && i + 1 < parts.length) {
+        memory = stripWrapper(parts[++i]);
+        continue;
+      }
+      if (label.equals("ROMANCE") && i + 1 < parts.length) {
+        romance = stripWrapper(parts[++i]);
+        continue;
+      }
+
+      // When a model emitted KIND|IMPORTANCE|free text, do not reinterpret the
+      // free text as an enum/number. If there is no explicit MEMORY label, keeping
+      // it as a non-persistent note is safe; normalized kind=n means it cannot be
+      // stored as a relationship memory by this parse alone.
+      if (memory.isBlank() && !token.isBlank() && !isKnownLabel(label)) {
+        memory = token;
+      }
+    }
+
+    if (delta == null) return null;
+    return normalized(player, delta, kind, importance, memory, romance);
+  }
+
+  private static boolean containsLabel(String[] parts, String wanted) {
+    if (parts == null) return false;
+    for (String part : parts) {
+      if (wanted.equalsIgnoreCase(stripWrapper(part))) return true;
+    }
+    return false;
+  }
+
+  private static boolean looksLikeLabelledName(String raw) {
+    if (raw == null) return false;
+    String lower = raw.toLowerCase(Locale.ROOT);
+    return lower.contains("name=") || lower.contains("player=");
+  }
+
+  private static String cleanPlayerToken(String raw) {
+    String token = stripWrapper(raw);
+    token = token.replaceFirst("(?i)^(?:name|player|playername|player_name)\\s*={1,2}\\s*", "");
+    return stripWrapper(token).trim();
+  }
+
+  private static String stripWrapper(String raw) {
+    if (raw == null) return "";
+    String value = raw.trim();
+    while (!value.isEmpty() && "{[(\"'".indexOf(value.charAt(0)) >= 0) {
+      value = value.substring(1).trim();
+    }
+    while (!value.isEmpty() && "}])\"',.".indexOf(value.charAt(value.length() - 1)) >= 0) {
+      value = value.substring(0, value.length() - 1).trim();
+    }
+    return value;
+  }
+
+  private static boolean isKnownLabel(String upper) {
+    return upper.equals("DELTA") || upper.equals("KIND") || upper.equals("IMPORTANCE")
+        || upper.equals("MEMORY") || upper.equals("ROMANCE");
+  }
+
+  private static boolean isMemoryKindToken(String raw) {
+    if (raw == null) return false;
+    String value = stripWrapper(raw).toLowerCase(Locale.ROOT);
+    return value.equals("n") || value.equals("r") || value.equals("p")
+        || value.equals("none") || value.equals("recent") || value.equals("persistent")
+        || value.equals("-") || value.equals("null");
   }
 
   public static RelationshipUpdate parseMap(Map<?, ?> map) {

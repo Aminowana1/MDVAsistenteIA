@@ -1,14 +1,84 @@
-# ServerAssistant 1.7.5.1
+# ServerAssistant 1.7.10
 
-ServerAssistant 1.7.5.1 keeps the MDVCRAFT **single global conversation** architecture and adds two bounded local-memory systems without creating a second AI request during normal conversation: a rolling activity journal and persistent per-player relationships/social memories.
+ServerAssistant 1.7.10 keeps the MDVCRAFT **single global conversation** architecture and **one model request per scene**, while making group SMART routing more context-aware without embeddings or any extra AI call.
 
-1.7.5.1 adds romance-continuity and group-action safeguards on top of the 1.7.4 journal/anti-drift fixes. Formal proposals are recognized in natural wording, unresolved proposals survive a short RAM-only follow-up window, the current partner roster is injected as trusted state, partner behavior changes between happy/strained/critical score bands, SMART duplicate replies are suppressed, and lightning targets are bound to the actual current requester/target. 1.7.2 scene isolation remains in place, so pre-trigger context cannot re-authorize old actions or steal wiki/inventory targets.
+The group router now uses a local **thread-affinity competition** instead of mainly relying on explicit bridge phrases. Every nearby line is scored against Isolda's active exchange and against recent competing side-chat. The score combines chronology, references to active participants, lexical/topic overlap, question-answer compatibility, deictic/continuation language and conversational shape. Explicit phrases such as `dile`, `decile` or `mientes` remain useful bonus evidence, but they are no longer the rule that decides membership.
 
-The normal chat path stays economical: the activity journal costs zero prompt tokens unless a historical question is detected, while relationship changes are proposed inside the same compact `m`/`t`/`r` response Isolda already returns and are validated by Java before being stored.
+A player joins Isolda's SMART conversation only when the active-thread affinity is high enough and beats the best recent side-thread by a configurable margin. This keeps `Pedrox: alguien tiene piedra` + `Wachi: yo tengo` outside Isolda's conversation while still allowing contextual lines such as `eso no tiene ningún sentido` or `Amino dejate de hacerte el que está bien` to join when they clearly react to the active exchange. Strong matches inherit follow-up locally; borderline candidates can still be confirmed by the same response's compact `f` field.
 
+This routing is entirely Java-local: **0 extra requests, 0 embeddings and 0 extra input-token blocks**. Only lines that survive the local routing are exposed as group participant candidates to the already-existing model request.
 
+Relationship-memory hardening from 1.7.9 is unchanged: memories must remain concrete/self-contained, vague legacy rows are cleaned conservatively, and the default memory summary budget remains 120 characters.
 
-## 1.7.5.1 activity journal + relationships
+## 1.7.10 group affinity examples
+
+```text
+Aminowana: iso como estas?
+Isolda: bien gracias, y tu?
+Pedrox: oye alguien tiene piedra
+Aminowana: bien gracias, que haces?
+Wachi: yo tengo
+
+=> "yo tengo" fits Pedrox's recent side question much better than Isolda's thread.
+=> Pedrox/Wachi stay ambient and receive no SMART continuity from Isolda.
+```
+
+```text
+Aminowana: iso como estas?
+Isolda: bien gracias, y tu?
+Pedrox: dile la verdad
+Aminowana: bien gracias, que haces?
+Wachi: Amino dejate de hacerte el que esta bien
+
+=> Pedrox bridges into the active exchange.
+=> Wachi references Aminowana + the current "estar bien" topic and strongly beats side-chat affinity.
+=> Both may inherit SMART continuity without another API request.
+```
+
+```yaml
+global-conversation:
+  scene:
+    group-threading:
+      affinity:
+        join-threshold: 48
+        min-margin-over-side-thread: 12
+        auto-follow-up-threshold: 68
+        side-thread-lookback-ms: 8000
+        max-side-lines: 5
+        debug-log: false
+```
+
+## 1.7.9 memory and group-thread examples
+
+```text
+Vague model memory:  Experiencia compartida
+Stored memory:       Aminowana dijo a Isolda: "me duele la cabeza cuando hablo contigo"
+
+Vague model memory:  Propuesta inesperada
+Stored memory:       En3Minutos le propuso a Isolda formalizar una relacion: "aceptas ser mi novia?"
+```
+
+```text
+Aminowana: iso como estas?
+Isolda: bien, gracias, y tu?
+Pedrox: oye alguien tiene piedra
+Aminowana: bien gracias, que haces?
+Wachi: yo tengo
+
+=> Pedrox/Wachi remain ambient; they do not gain SMART continuity.
+```
+
+```text
+Aminowana: iso como estas?
+Isolda: bien, gracias, y tu?
+Pedrox: dile la verdad
+Aminowana: bien gracias, que haces?
+Wachi: Amino dejate de hacerte el que esta bien
+
+=> Pedrox/Wachi are linked to Isolda's active thread and may continue briefly without saying Iso again.
+```
+
+## 1.7.7 activity journal + relationships
 
 The rolling activity journal is RAM-only and bounded by `activity-journal.retention-minutes`, `max-records`, `max-context-records` and `max-context-chars`. It records public player chat plus trusted join/quit/kick/death/advancement events, but it is inserted into the AI prompt only for recognizable historical questions. Both history scopes start `admin-only` for safe testing and can be changed at runtime:
 
@@ -197,13 +267,13 @@ When a player becomes involved in a model scene, ServerAssistant automatically a
 
 `pom.xml` is the single source of truth for the version. Maven filters it into `plugin.yml`, and GitHub Actions reads the same Maven coordinates to upload the correct JAR automatically.
 
-For 1.7.5.1 the Maven version is:
+For 1.7.7 the Maven version is:
 
 ```xml
-<version>1.7.5.1</version>
+<version>1.7.7</version>
 ```
 
-The workflow automatically expects and uploads `target/ServerAssistant-1.7.5.1.jar`.
+The workflow automatically expects and uploads `target/ServerAssistant-1.7.7.jar`.
 
 
 ### Reused GitHub repositories

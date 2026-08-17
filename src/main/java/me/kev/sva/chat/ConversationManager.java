@@ -209,7 +209,11 @@ public final class ConversationManager {
     // remembered as an addresser so they may continue briefly after the reply.
     if (activeCapture != null) {
       rememberActiveIdentity(player);
-      if (directMention) {
+      // A player who already owns a valid SMART follow-up window is still directly
+      // participating even if another player's line opened this shared capture first.
+      // This is the key group-continuity case: both speakers can contribute to the
+      // SAME request without repeating Iso and without creating another request.
+      if (directMention || existingSmartFollowUp) {
         activeAddressers.add(player.getUniqueId());
       }
       return;
@@ -356,6 +360,9 @@ public final class ConversationManager {
         Set.of(),
         Set.of(),
         Set.of(),
+        Set.of(),
+        Set.of(),
+        Map.of(),
         AssistantRequestContext.scene(
             sceneId,
             "none",
@@ -590,14 +597,20 @@ public final class ConversationManager {
       }
     }
 
+    // Keep CURRENT capture-window chat locally so Java can thread the conversation,
+    // but do NOT immediately mark every speaker as involved. 1.7.8 promoted all
+    // capture-window chatter and a side conversation such as "alguien tiene piedra?"
+    // / "yo tengo" could accidentally inherit SMART continuity. 1.7.10 routes
+    // nearby lines by local thread affinity versus competing side-chat, with zero AI calls.
+    for (PublicChatRecord chat : chatCandidates) {
+      if (chat.timestampMs() < capture.triggerAt()) continue;
+      includedChats.add(chat);
+    }
+
     List<PublicChatRecord> selectedChats = limitChatRecords(
         new ArrayList<>(includedChats), capture.triggerAt());
     List<ServerEventRecord> selectedEvents = limitEventRecords(
         new ArrayList<>(includedEvents), capture.triggerAt());
-
-    Map<String, String> sceneIdentities = resolveSceneIdentities(
-        involvedNames, selectedEvents, activeIdentities);
-    String identityContext = formatIdentityContext(involvedNames, sceneIdentities);
 
     // Only a player whose direct/smart CURRENT line actually survived the
     // relevance/cap filter receives follow-up eligibility. Pre-lookback lines are
@@ -610,6 +623,18 @@ public final class ConversationManager {
         }
       }
     }
+
+    GroupThreadSelection groupThread = selectGroupThreadCandidates(
+        selectedChats, chatCandidates, capture, eligibleAddressers);
+    for (Map.Entry<String, UUID> entry : groupThread.candidateByName().entrySet()) {
+      involvedIds.add(entry.getValue());
+      Player online = Bukkit.getPlayer(entry.getValue());
+      involvedNames.add(online == null ? entry.getKey() : online.getName());
+    }
+
+    Map<String, String> sceneIdentities = resolveSceneIdentities(
+        involvedNames, selectedEvents, activeIdentities);
+    String identityContext = formatIdentityContext(involvedNames, sceneIdentities);
 
     List<SceneAtom> atoms = new ArrayList<>();
     for (PublicChatRecord chat : selectedChats) {
@@ -626,6 +651,7 @@ public final class ConversationManager {
     // Feeding it through currentMessages made a smart follow-up like "xd" re-answer
     // an older question and also polluted wiki/inventory target detection.
     List<ChatMessage> preContextMessages = new ArrayList<>();
+    List<ChatMessage> promotedPreGroupMessages = new ArrayList<>();
     List<ChatMessage> currentMessages = new ArrayList<>();
     for (SceneAtom atom : atoms) {
       ChatMessage rendered;
@@ -651,10 +677,25 @@ public final class ConversationManager {
       }
 
       if (atom.timestampMs() < capture.triggerAt()) {
-        preContextMessages.add(rendered);
+        if (atom.chat() != null && groupThread.candidateRecords().contains(atom.chat())) {
+          promotedPreGroupMessages.add(rendered);
+        } else {
+          preContextMessages.add(rendered);
+        }
       } else {
         currentMessages.add(rendered);
       }
+    }
+
+    // A very recent bridge may have happened before the line that opened this capture
+    // and therefore may not be part of the normal relation graph. Promote at most the
+    // configured tiny number of such lines into social context without granting tools.
+    for (PublicChatRecord chat : groupThread.preCandidates()) {
+      if (selectedChats.contains(chat)) continue;
+      promotedPreGroupMessages.add(new PlayerChatMessage(
+          plugin, chat.playerId(), chat.playerName(), chat.displayName(), chat.admin(),
+          sceneIdentities.getOrDefault(chat.playerName().toLowerCase(Locale.ROOT), ""),
+          chat.content()));
     }
 
     // Resolve the actual addressed request BEFORE building the model transcript.
@@ -670,11 +711,34 @@ public final class ConversationManager {
         ? List.copyOf(currentMessages)
         : List.copyOf(resolvedRequestMessages);
     List<ChatMessage> related = new ArrayList<>();
+    int ignoredAmbientCurrentLines = 0;
     for (ChatMessage message : currentMessages) {
-      if (!requestMessages.contains(message)) related.add(message);
+      if (requestMessages.contains(message)) continue;
+      if (message instanceof PlayerChatMessage playerMessage) {
+        if (groupThread.candidateIds().contains(playerMessage.playerId)) related.add(message);
+        else ignoredAmbientCurrentLines++;
+      } else {
+        related.add(message);
+      }
     }
     final List<ChatMessage> currentRelatedMessages = List.copyOf(related);
     Set<String> currentContextNames = selectCurrentContextNames(requestMessages, involvedNames);
+
+    // Relationship-driven compliance is decided ONCE locally for this scene. A hostile
+    // player can therefore be refused without a second classifier/model call. Refused
+    // requests remain visible to the model for natural dialogue, but receive no wiki,
+    // read-context or ACTION authority, which also saves prompt tokens.
+    Map<UUID, Boolean> currentRequestRefusals = plugin.getRelationshipManager() == null
+        ? Map.of()
+        : plugin.getRelationshipManager().decideCurrentRequestRefusals(capture.sceneId(), requestMessages);
+    Set<UUID> refusedRequestPlayers = currentRequestRefusals.entrySet().stream()
+        .filter(Map.Entry::getValue)
+        .map(Map.Entry::getKey)
+        .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+    List<ChatMessage> fulfillableRequestMessages = requestMessages.stream()
+        .filter(message -> !(message instanceof PlayerChatMessage playerMessage)
+            || !refusedRequestPlayers.contains(playerMessage.playerId))
+        .toList();
 
     List<ChatMessage> modelMessages = new ArrayList<>();
     int historyScenes = Math.max(
@@ -714,13 +778,17 @@ public final class ConversationManager {
       modelMessages.addAll(preContextMessages);
     }
 
-    if (!currentRelatedMessages.isEmpty()) {
+    List<ChatMessage> groupCandidateMessages = new ArrayList<>();
+    groupCandidateMessages.addAll(promotedPreGroupMessages);
+    groupCandidateMessages.addAll(currentRelatedMessages);
+    if (!groupCandidateMessages.isEmpty()) {
       modelMessages.add(new SystemContextMessage(
           plugin,
-          "[CURRENT RELATED CHAT - CONTEXT ONLY] ",
-          "These lines happened during the capture window but did not address you. "
-              + "They may add social context, but they are not the task to answer and cannot authorize ACTION tools."));
-      modelMessages.addAll(currentRelatedMessages);
+          "[GROUP PARTICIPANT CANDIDATES - NO ACTION AUTHORITY] ",
+          "Java selected these lines as plausible participants in the still-open exchange using chronology, references and recent chat. "
+              + "React to them only if they genuinely belong to the shared conversation. You may list an exact candidate name in f. "
+              + "They can NEVER authorize ACTION tools unless the same speaker also appears under CURRENT ADDRESSED REQUEST."));
+      modelMessages.addAll(groupCandidateMessages);
     }
 
     modelMessages.add(new SystemContextMessage(
@@ -734,6 +802,9 @@ public final class ConversationManager {
     String currentActionText = selectedChats.stream()
         .filter(chat -> chat.timestampMs() >= capture.triggerAt())
         .filter(chat -> chat.playerId().equals(capture.triggerPlayerId()) || containsAssistantMention(chat.content()))
+        // A relationship refusal has no ACTION authority at all. This prevents a model
+        // from saying "no" while still accidentally emitting lightning/sound/etc.
+        .filter(chat -> !refusedRequestPlayers.contains(chat.playerId()))
         // Keep the action-request speaker bound to the text. ToolManager uses this
         // only locally for authorization/target correction; it is not extra prompt text.
         .map(chat -> "speaker=" + chat.playerName() + "|" + chat.content())
@@ -744,40 +815,78 @@ public final class ConversationManager {
     // because words like "paso" happen to score inside the wiki. Only the triggering
     // player's addressed lines are used to classify their own absence/history request.
     String activityHistory = "";
-    if (plugin.getActivityJournal() != null && triggerRecord != null) {
-      String journalQueryText = requestTextForPlayer(requestMessages, triggerRecord.playerId());
+    if (plugin.getActivityJournal() != null && triggerRecord != null
+        && !refusedRequestPlayers.contains(triggerRecord.playerId())) {
+      String journalQueryText = requestTextForPlayer(fulfillableRequestMessages, triggerRecord.playerId());
       activityHistory = plugin.getActivityJournal().buildContext(
           triggerRecord.playerId(), triggerRecord.playerName(), triggerRecord.admin(), journalQueryText);
     }
 
-    // CONTEXT tools and wiki retrieval are driven only by the addressed request.
-    // When the journal recognized a history query it becomes the sole factual source
-    // for that historical question: no wiki/player-data/recent-event contamination.
+    // CONTEXT tools and wiki retrieval are driven only by requests Isolda decided to
+    // entertain this scene. A refused arch-enemy request gets no expensive wiki chunk
+    // or player-context payload; the SAME model call only receives the compact refusal
+    // policy and can answer with personality/hostility.
     boolean journalIntent = activityHistory != null && !activityHistory.isBlank();
-    String wiki = journalIntent ? "" : retrieveLocalWiki(requestMessages);
-    String localTools = journalIntent || plugin.getToolManager() == null
+    boolean nothingToFulfill = fulfillableRequestMessages.isEmpty();
+    String wiki = journalIntent || nothingToFulfill ? "" : retrieveLocalWiki(fulfillableRequestMessages);
+    String localTools = journalIntent || nothingToFulfill || plugin.getToolManager() == null
         ? ""
-        : plugin.getToolManager().buildLocalContext(requestMessages, currentContextNames);
-    String recentEvents = journalIntent ? "" : retrieveRecentEventContext(requestMessages);
+        : plugin.getToolManager().buildLocalContext(fulfillableRequestMessages, currentContextNames);
+    String recentEvents = journalIntent || nothingToFulfill ? "" : retrieveRecentEventContext(fulfillableRequestMessages);
+    // Relationship context prioritizes actual addressed speakers/targets first, then
+    // adds the other CURRENT group speakers. This keeps the existing max-player/token
+    // cap while still giving the model enough state for group loyalty decisions.
+    List<ChatMessage> relationshipMessages = new ArrayList<>(requestMessages);
+    for (ChatMessage message : groupCandidateMessages) {
+      if (message instanceof PlayerChatMessage && !relationshipMessages.contains(message)) {
+        relationshipMessages.add(message);
+      }
+    }
     String relationshipContext = plugin.getRelationshipManager() == null
         ? ""
-        : plugin.getRelationshipManager().buildContext(currentMessages, currentContextNames);
+        : plugin.getRelationshipManager().buildContext(
+            relationshipMessages, currentContextNames, currentRequestRefusals);
 
+    String addressedSpeakers = requestMessages.stream()
+        .filter(message -> message instanceof PlayerChatMessage)
+        .map(message -> ((PlayerChatMessage) message).playerName)
+        .distinct()
+        .collect(java.util.stream.Collectors.joining(","));
+    String assistantMentions = configuredAssistantMentions().stream()
+        .map(value -> value.startsWith("@") ? value.substring(1) : value)
+        .distinct()
+        .limit(4)
+        .collect(java.util.stream.Collectors.joining("|"));
     String meta = "window_ms=" + Math.max(0L, capture.endsAt() - capture.triggerAt())
+        + ", assistant_trigger_mode=" + configuredTriggerMode()
+        + ", assistant_mentions=" + assistantMentions
         + ", current_chat_lines=" + currentMessages.stream().filter(m -> m instanceof PlayerChatMessage).count()
         + ", request_lines=" + requestMessages.stream().filter(m -> m instanceof PlayerChatMessage).count()
-        + ", related_context_lines=" + currentRelatedMessages.size()
+        + ", addressed_speakers=" + (addressedSpeakers.isBlank() ? "none" : addressedSpeakers)
+        + ", group_candidate_lines=" + groupCandidateMessages.stream().filter(m -> m instanceof PlayerChatMessage).count()
+        + ", ambient_ignored_lines=" + ignoredAmbientCurrentLines
         + ", pre_context_lines=" + preContextMessages.size()
         + ", events=" + selectedEvents.size()
         + ", trigger=" + (capture.directMention() ? "direct_mention" : "smart_followup");
 
+    List<ChatMessage> currentSocialMessages = new ArrayList<>(promotedPreGroupMessages);
+    for (ChatMessage message : currentMessages) {
+      if (!(message instanceof PlayerChatMessage playerMessage)
+          || requestMessages.contains(message)
+          || groupThread.candidateIds().contains(playerMessage.playerId)) {
+        currentSocialMessages.add(message);
+      }
+    }
     return new SceneRequest(
         capture.sceneId(),
         List.copyOf(modelMessages),
-        List.copyOf(currentMessages),
+        List.copyOf(currentSocialMessages),
         Set.copyOf(involvedIds),
         Set.copyOf(involvedNames),
         Set.copyOf(eligibleAddressers),
+        Set.copyOf(groupThread.candidateIds()),
+        Set.copyOf(groupThread.autoParticipantIds()),
+        Map.copyOf(groupThread.candidateByName()),
         AssistantRequestContext.scene(
             capture.sceneId(), involved, meta, identityContext, wiki, localTools, recentEvents,
             activityHistory, relationshipContext, currentActionText),
@@ -798,6 +907,396 @@ public final class ConversationManager {
       }
     }
     return out.toString().trim();
+  }
+
+  private GroupThreadSelection selectGroupThreadCandidates(
+      List<PublicChatRecord> selectedChats,
+      List<PublicChatRecord> allCandidates,
+      ActiveCapture capture,
+      Set<UUID> eligibleAddressers) {
+    if (!plugin.getConfig().getBoolean("global-conversation.scene.group-threading.enabled", true)
+        || allCandidates == null || allCandidates.isEmpty()) {
+      return GroupThreadSelection.empty();
+    }
+
+    String base = "global-conversation.scene.group-threading.";
+    long preLookback = Math.max(plugin.getConfig().getLong(
+        base + "pre-candidate-lookback-ms", 6000L), 0L);
+    int maxPre = Math.max(plugin.getConfig().getInt(
+        base + "max-pre-candidate-lines", 2), 0);
+    int joinThreshold = clampInt(plugin.getConfig().getInt(
+        base + "affinity.join-threshold", 48), 0, 100);
+    int minMargin = clampInt(plugin.getConfig().getInt(
+        base + "affinity.min-margin-over-side-thread", 12), 0, 100);
+    int autoThreshold = clampInt(plugin.getConfig().getInt(
+        base + "affinity.auto-follow-up-threshold", 68), joinThreshold, 100);
+    long sideLookback = Math.max(plugin.getConfig().getLong(
+        base + "affinity.side-thread-lookback-ms", 8000L), 0L);
+    int maxSideLines = Math.max(plugin.getConfig().getInt(
+        base + "affinity.max-side-lines", 5), 1);
+    boolean debugAffinity = plugin.getConfig().getBoolean(
+        base + "affinity.debug-log", false);
+
+    LinkedHashSet<UUID> roots = new LinkedHashSet<>();
+    roots.add(capture.triggerPlayerId());
+    if (eligibleAddressers != null) roots.addAll(eligibleAddressers);
+
+    LinkedHashSet<String> participantNames = new LinkedHashSet<>();
+    StringBuilder threadText = new StringBuilder();
+    String previousAssistantReply = "";
+    if (!sceneHistory.isEmpty()) {
+      SceneMemory previous = sceneHistory.peekLast();
+      if (previous != null && previous.assistantReply() != null) {
+        previousAssistantReply = previous.assistantReply();
+        threadText.append(previousAssistantReply).append(' ');
+      }
+    }
+    for (PublicChatRecord chat : allCandidates) {
+      if (roots.contains(chat.playerId())) {
+        participantNames.add(chat.playerName());
+        if (chat.timestampMs() >= capture.triggerAt()) {
+          threadText.append(chat.content()).append(' ');
+        }
+      }
+    }
+
+    List<PublicChatRecord> timeline = allCandidates.stream()
+        .filter(chat -> chat.timestampMs() >= capture.triggerAt() - preLookback)
+        .filter(chat -> chat.timestampMs() <= capture.endsAt())
+        .sorted(Comparator.comparingLong(PublicChatRecord::timestampMs))
+        .toList();
+
+    LinkedHashSet<PublicChatRecord> candidateRecords = new LinkedHashSet<>();
+    LinkedHashSet<UUID> candidateIds = new LinkedHashSet<>();
+    LinkedHashSet<UUID> autoParticipants = new LinkedHashSet<>();
+    LinkedHashMap<String, UUID> candidateByName = new LinkedHashMap<>();
+    Deque<PublicChatRecord> sideLines = new ArrayDeque<>();
+    PublicChatRecord previousThreadLine = null;
+
+    for (PublicChatRecord chat : timeline) {
+      if (roots.contains(chat.playerId())) {
+        previousThreadLine = chat;
+        continue;
+      }
+
+      boolean beforeTrigger = chat.timestampMs() < capture.triggerAt();
+      boolean assistantMention = containsAssistantMention(chat.content());
+      boolean alreadySmart = hasActiveSmartFollowUp(chat.playerId(), capture.triggerAt());
+      boolean explicitBridge = looksLikeExplicitGroupBridge(chat.content());
+
+      long threadAge = previousThreadLine == null
+          ? Math.abs(capture.triggerAt() - chat.timestampMs())
+          : Math.max(0L, chat.timestampMs() - previousThreadLine.timestampMs());
+      String previousThreadText = previousThreadLine == null
+          ? previousAssistantReply
+          : previousThreadLine.content();
+
+      int isoldaAffinity;
+      if (assistantMention) {
+        isoldaAffinity = 100;
+      } else if (alreadySmart) {
+        isoldaAffinity = 96;
+      } else {
+        isoldaAffinity = localThreadAffinity(
+            chat.content(), threadText.toString(), previousThreadText,
+            participantNames, threadAge, beforeTrigger);
+        if (explicitBridge) isoldaAffinity = Math.min(100, isoldaAffinity + 50);
+      }
+
+      int bestSideAffinity = 0;
+      PublicChatRecord bestSideLine = null;
+      for (PublicChatRecord side : sideLines) {
+        long age = Math.max(0L, chat.timestampMs() - side.timestampMs());
+        if (age > sideLookback) continue;
+        int score = localLateralAffinity(
+            chat.content(), side.content(), side.playerName(), age);
+        if (score > bestSideAffinity) {
+          bestSideAffinity = score;
+          bestSideLine = side;
+        }
+      }
+
+      int requiredMargin = explicitBridge ? Math.min(minMargin, 6) : minMargin;
+      boolean strongAuthority = assistantMention || alreadySmart;
+      boolean candidate = strongAuthority
+          || (isoldaAffinity >= joinThreshold
+              && isoldaAffinity - bestSideAffinity >= requiredMargin);
+
+      if (debugAffinity) {
+        plugin.getLogger().info("Group thread affinity scene=" + capture.sceneId()
+            + " player=" + chat.playerName()
+            + " isolda=" + isoldaAffinity
+            + " side=" + bestSideAffinity
+            + (bestSideLine == null ? "" : " side_speaker=" + bestSideLine.playerName())
+            + " before_trigger=" + beforeTrigger
+            + " bridge=" + explicitBridge
+            + " decision=" + (candidate ? "JOIN" : "SIDE"));
+      }
+
+      if (!candidate) {
+        sideLines.addLast(chat);
+        while (sideLines.size() > maxSideLines) sideLines.removeFirst();
+        while (!sideLines.isEmpty()
+            && chat.timestampMs() - sideLines.peekFirst().timestampMs() > sideLookback) {
+          sideLines.removeFirst();
+        }
+        continue;
+      }
+
+      candidateRecords.add(chat);
+      candidateIds.add(chat.playerId());
+      candidateByName.putIfAbsent(chat.playerName().toLowerCase(Locale.ROOT), chat.playerId());
+      participantNames.add(chat.playerName());
+      threadText.append(chat.content()).append(' ');
+      previousThreadLine = chat;
+
+      // Strong local evidence grants continuity without spending completion tokens on f.
+      // Borderline-but-plausible lines remain candidates and let the SAME normal model
+      // response confirm them through the tiny f field.
+      if (assistantMention || alreadySmart || explicitBridge
+          || (isoldaAffinity >= autoThreshold
+              && isoldaAffinity - bestSideAffinity >= Math.max(requiredMargin, 16))) {
+        autoParticipants.add(chat.playerId());
+      }
+    }
+
+    List<PublicChatRecord> pre = candidateRecords.stream()
+        .filter(chat -> chat.timestampMs() < capture.triggerAt())
+        .sorted(Comparator.comparingLong(PublicChatRecord::timestampMs))
+        .toList();
+    if (pre.size() > maxPre) pre = pre.subList(pre.size() - maxPre, pre.size());
+    if (maxPre == 0) pre = List.of();
+
+    return new GroupThreadSelection(
+        List.copyOf(pre), Set.copyOf(candidateRecords), Set.copyOf(candidateIds),
+        Set.copyOf(autoParticipants), Map.copyOf(candidateByName));
+  }
+
+  /**
+   * Zero-token local affinity between one public line and Isolda's active thread.
+   * This intentionally combines several weak signals instead of relying on a phrase
+   * whitelist: participant references, lexical topic overlap, reply shape, deictic
+   * language, question/answer compatibility and recency all contribute.
+   */
+  static int localThreadAffinity(
+      String raw,
+      String threadText,
+      String previousThreadRaw,
+      Set<String> participantNames,
+      long ageMs,
+      boolean beforeTrigger) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return 0;
+
+    int score = 0;
+    boolean referencesParticipant = referencesAnyParticipantAlias(raw, participantNames);
+    int topic = topicOverlapScore(raw, threadText, participantNames);
+
+    if (referencesParticipant) score += 28;
+    score += topic;
+    if (looksLikeSocialThreadInterjection(raw)) score += 18;
+    boolean replyShape = looksLikeConversationalReplyShape(raw);
+    boolean deictic = containsDeicticReference(raw);
+    if (replyShape) score += 8;
+    if (deictic) score += 12;
+    // A deictic/continuation-shaped sentence arriving immediately after the active
+    // exchange is often a reply even when it repeats no nouns ("eso no tiene sentido").
+    // This is intentionally generic, not a phrase whitelist; side-thread competition
+    // below still wins when the same short reply fits another nearby conversation better.
+    if (replyShape || deictic) {
+      if (ageMs <= 1500L) score += 14;
+      else if (ageMs <= 3000L) score += 8;
+      else if (ageMs <= 5000L) score += 4;
+    }
+    score += questionAnswerCompatibility(raw, previousThreadRaw);
+    score += recencyAffinity(ageMs);
+
+    if (looksLikeBroadPublicRequest(raw) && !referencesParticipant) score -= 22;
+    if (isVeryShortElliptical(raw) && !referencesParticipant && topic == 0
+        && questionAnswerCompatibility(raw, previousThreadRaw) == 0) {
+      score -= 8;
+    }
+    if (beforeTrigger) score -= 8;
+    return clampInt(score, 0, 100);
+  }
+
+  /**
+   * Competing affinity with one recent side-chat line. A candidate joins Isolda only
+   * when her thread beats this lateral score by a configurable margin.
+   */
+  static int localLateralAffinity(
+      String raw,
+      String priorRaw,
+      String priorSpeaker,
+      long ageMs) {
+    String text = normalizeForSearch(raw);
+    String prior = normalizeForSearch(priorRaw);
+    if (text.isBlank() || prior.isBlank()) return 0;
+
+    int score = 0;
+    if (priorSpeaker != null && !priorSpeaker.isBlank()
+        && referencesAnyParticipantAlias(raw, Set.of(priorSpeaker))) {
+      score += 34;
+    }
+    score += Math.min(30, topicOverlapScore(raw, priorRaw, Set.of()));
+    score += questionAnswerCompatibility(raw, priorRaw);
+    if (looksLikeConversationalReplyShape(raw)) score += 8;
+    if (containsDeicticReference(raw)) score += 6;
+    if (isVeryShortElliptical(raw)) score += 5;
+    score += lateralRecencyAffinity(ageMs);
+    return clampInt(score, 0, 100);
+  }
+
+  static int topicOverlapScore(String a, String b, Set<String> participantNames) {
+    Set<String> left = new LinkedHashSet<>(meaningfulTerms(normalizeForSearch(a)));
+    Set<String> right = new LinkedHashSet<>(meaningfulTerms(normalizeForSearch(b)));
+    if (participantNames != null) {
+      for (String name : participantNames) {
+        String normalizedName = normalizeForSearch(name);
+        if (normalizedName.isBlank()) continue;
+        left.remove(normalizedName);
+        right.remove(normalizedName);
+      }
+    }
+    left.remove("iso"); left.remove("isolda");
+    right.remove("iso"); right.remove("isolda");
+
+    int score = 0;
+    for (String l : left) {
+      for (String r : right) {
+        if (l.equals(r)) {
+          score += 12;
+          break;
+        }
+        if (l.length() >= 5 && r.length() >= 5
+            && commonPrefixLength(l, r) >= Math.min(5, Math.min(l.length(), r.length()))) {
+          score += 7;
+          break;
+        }
+      }
+      if (score >= 30) return 30;
+    }
+    return Math.min(score, 30);
+  }
+
+  static boolean looksLikeConversationalReplyShape(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return text.matches("^(?:si|no|nah|pero|porque|pues|igual|tambien|entonces|exacto|claro|obvio|literal|eso|esa|ese|yo|tu|vos|el|ella|ellos|ellas|ustedes)(?:\\s+.*)?$");
+  }
+
+  static boolean containsDeicticReference(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return containsAnyWholeWord(text,
+        "eso", "esa", "ese", "esto", "aquello", "ahi", "alla", "tambien",
+        "igual", "entonces", "el", "ella", "ellos", "ellas", "ustedes");
+  }
+
+  static int questionAnswerCompatibility(String replyRaw, String priorRaw) {
+    String reply = normalizeForSearch(replyRaw);
+    String prior = normalizeForSearch(priorRaw);
+    if (reply.isBlank() || prior.isBlank()) return 0;
+
+    boolean priorQuestion = (priorRaw != null && priorRaw.contains("?"))
+        || prior.matches("^(?:oye|che|ey|eh)?\\s*(?:que|como|donde|cuando|quien|cual|por que|tienes|tenes|hay|puedes|podes)\\b.*")
+        || prior.matches("^(?:oye|che|ey|eh)?\\s*(?:alguien|alguno|alguna|quien)\\b.*\\b(?:tiene|tienen|tenga|hay)\\b.*");
+    if (!priorQuestion) return 0;
+
+    int score = 0;
+    if (reply.matches("^(?:si|no|nah|claro|obvio|exacto|yo|yo si|yo no)(?:\\s+.*)?$")) score += 18;
+    if (prior.matches(".*\\b(?:alguien|quien|alguno|alguna)\\b.*\\b(?:tiene|tienen|tenga|hay)\\b.*")
+        && reply.matches("^(?:yo|yo tengo|tengo|aca|aqui|yo si)(?:\\s+.*)?$")) {
+      score += 22;
+    }
+    int topic = topicOverlapScore(replyRaw, priorRaw, Set.of());
+    score += Math.min(12, topic);
+    return Math.min(score, 34);
+  }
+
+  static boolean looksLikeBroadPublicRequest(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return text.matches("^(?:oye|che|ey|eh)?\\s*(?:alguien|alguno|alguna|quien)\\b.*")
+        || text.matches("^(?:alguien|alguno|alguna|quien)\\b.*");
+  }
+
+  static boolean isVeryShortElliptical(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return true;
+    return text.split("\\s+").length <= 3;
+  }
+
+  private static int recencyAffinity(long ageMs) {
+    if (ageMs <= 1200L) return 14;
+    if (ageMs <= 3000L) return 11;
+    if (ageMs <= 5000L) return 7;
+    if (ageMs <= 8000L) return 3;
+    return 0;
+  }
+
+  private static int lateralRecencyAffinity(long ageMs) {
+    if (ageMs <= 1200L) return 15;
+    if (ageMs <= 3000L) return 12;
+    if (ageMs <= 5000L) return 8;
+    if (ageMs <= 8000L) return 4;
+    return 0;
+  }
+
+  private static int commonPrefixLength(String a, String b) {
+    int max = Math.min(a.length(), b.length());
+    int i = 0;
+    while (i < max && a.charAt(i) == b.charAt(i)) i++;
+    return i;
+  }
+
+  private static int clampInt(int value, int min, int max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  private static boolean containsAnyWholeWord(String text, String... words) {
+    for (String word : words) {
+      if (containsWholeWordIgnoreCase(text, word)) return true;
+    }
+    return false;
+  }
+
+  static boolean looksLikeGroupContinuation(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return looksLikeConversationalReplyShape(raw)
+        && !text.matches("^(?:yo tengo|tengo|yo|aca|aqui)$");
+  }
+
+  static boolean looksLikeSocialThreadInterjection(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return containsAnyTerm(text,
+        "mientes", "mentira", "no es cierto", "dejate", "deja de", "exagera",
+        "calmate", "tranquilo", "te creo", "no te creo", "tiene razon",
+        "no tiene razon", "estoy de acuerdo", "no estoy de acuerdo", "eso es verdad",
+        "que dices", "haces que estas bien", "hacerte el que esta bien");
+  }
+
+  static boolean referencesAnyParticipantAlias(String raw, Set<String> participantNames) {
+    if (raw == null || raw.isBlank() || participantNames == null || participantNames.isEmpty()) return false;
+    String normalized = normalizeForSearch(raw);
+    for (String name : participantNames) {
+      if (name == null || name.isBlank()) continue;
+      if (ContextTargetResolver.mentionsName(normalized, name)) return true;
+      String canonical = normalizeForSearch(name).replace(" ", "");
+      if (canonical.length() < 6) continue;
+      for (String token : normalized.split("\\s+")) {
+        // Human group-chat nicknames such as Aminowana -> "Amino" are safe here
+        // because the candidate set is already limited to the tiny active thread.
+        if (token.length() >= 5 && canonical.startsWith(token)) return true;
+      }
+    }
+    return false;
+  }
+
+  static boolean sharesConversationTopic(String a, String b, Set<String> participantNames) {
+    return topicOverlapScore(a, b, participantNames) > 0;
   }
 
   private List<ChatMessage> selectRequestMessages(
@@ -1137,6 +1636,9 @@ public final class ConversationManager {
         Set.of(),
         Set.copyOf(names),
         Set.of(),
+        Set.of(),
+        Set.of(),
+        Map.of(),
         AssistantRequestContext.scene(
             sceneId,
             names.isEmpty() ? "none" : String.join(",", names),
@@ -1267,137 +1769,133 @@ public final class ConversationManager {
     if (!plugin.getWikiConfig().getBoolean("lazy-mode", true)) {
       return fullWikiContext();
     }
-    if (!plugin.getWikiConfig().getBoolean("local-retrieval.enabled", true)) {
+    if (!plugin.getWikiConfig().getBoolean("local-retrieval.enabled", true) || wikiIndex.isEmpty()) {
       return "";
     }
 
-    if (wikiIndex.isEmpty()) {
-      return "";
-    }
-
-    // Pick ONE addressed knowledge request instead of concatenating every speaker in
-    // a group scene. Social lines such as "yo muy bien" + "por que eres mala conmigo"
-    // must never combine into a fake wiki query. The newest actual wiki-style request
-    // wins because Isolda can publish only one short line anyway.
-    WikiQuerySelection selection = selectWikiQuery(currentMessages);
-    if (selection == null || selection.rawQuery().isBlank()) {
+    int maxQueries = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.max-queries-per-scene", 3), 1);
+    List<WikiQuerySelection> selections = selectWikiQueries(currentMessages, maxQueries);
+    if (selections.isEmpty()) {
       if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
         plugin.getLogger().info("Wiki retrieval skipped=no-knowledge-intent");
       }
       return "";
     }
 
-    String rawQuery = selection.rawQuery();
-    String directQuery = normalizeForSearch(rawQuery);
-
-    // A SMART follow-up such as "y de donde consigo eso?" or "como se craftea?"
-    // contains no useful noun on its own. Reuse only the immediately previous
-    // SAME-SPEAKER wiki scene as a local retrieval seed. This costs zero model
-    // calls/tokens and avoids leaking another player's topic into the query.
-    String expandedRawQuery = expandWikiFollowUpQuery(
-        rawQuery, directQuery, List.<ChatMessage>of(selection.message()));
-    String query = normalizeForSearch(expandedRawQuery);
-    Set<String> queryTerms = meaningfulTerms(query);
-    if (queryTerms.isEmpty()) {
-      if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
-        plugin.getLogger().info("Wiki retrieval skipped=no-meaningful-terms query='" + directQuery + "'");
-      }
-      return "";
-    }
-    String meaningfulPhrase = String.join(" ", queryTerms);
-
-    List<WikiCandidate> candidates = new ArrayList<>();
-    for (WikiIndexEntry indexed : wikiIndex) {
-      int score = 0;
-      if (!indexed.normalizedKey().isBlank() && query.contains(indexed.normalizedKey())) {
-        score += 8;
-      }
-      // Item/recipe names are usually multi-word phrases. Rewarding the compact
-      // meaningful phrase makes "como se craftea el garrote del pantano" beat a
-      // generic section that happens to share one common word.
-      if (queryTerms.size() >= 2 && meaningfulPhrase.length() >= 7) {
-        if (indexed.normalizedKey().contains(meaningfulPhrase)) score += 14;
-        if (indexed.normalizedDescription().contains(meaningfulPhrase)) score += 10;
-        if (indexed.normalizedContent().contains(meaningfulPhrase)) score += 10;
-
-        // Stop-words such as "del" are removed from the query phrase, so exact
-        // substring matching alone would miss "garrote del pantano". Give a
-        // strong bonus when ALL meaningful terms occur in the same section.
-        if (containsAllTerms(indexed.normalizedKey(), queryTerms)) score += 12;
-        else if (containsAllTerms(indexed.normalizedDescription(), queryTerms)) score += 9;
-        else if (containsAllTerms(indexed.normalizedContent(), queryTerms)) score += 9;
-      }
-      for (String term : queryTerms) {
-        if (containsWholeWordIgnoreCase(indexed.normalizedKey(), term)) score += 4;
-        if (containsWholeWordIgnoreCase(indexed.normalizedDescription(), term)) score += 3;
-        // Curated wiki content is trusted knowledge too. A single meaningful exact
-        // content hit should meet the default min-score=2 (e.g. "hay misiones?").
-        if (containsWholeWordIgnoreCase(indexed.normalizedContent(), term)) score += 2;
-      }
-      if (score > 0) {
-        candidates.add(new WikiCandidate(
-            indexed.key(),
-            indexed.description(),
-            indexed.content(),
-            score));
-      }
-    }
-
     int minScore = Math.max(plugin.getWikiConfig().getInt(
         "local-retrieval.min-score", 2), 1);
-    int maxSections = Math.max(plugin.getWikiConfig().getInt(
+    int maxSectionsPerQuery = Math.max(plugin.getWikiConfig().getInt(
         "local-retrieval.max-sections", 2), 0);
-    int maxChars = Math.max(plugin.getWikiConfig().getInt(
-        "local-retrieval.max-section-chars", 4500), 200);
-    if (maxSections == 0) {
-      return "";
-    }
+    int maxTotalSections = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.max-total-sections", 4), 1);
+    int maxSectionChars = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.max-section-chars", 3500), 200);
+    int maxTotalChars = Math.max(plugin.getWikiConfig().getInt(
+        "local-retrieval.max-total-chars", 5200), 500);
+    if (maxSectionsPerQuery == 0) return "";
 
-    candidates.sort(Comparator.comparingInt(WikiCandidate::score).reversed());
-    StringBuilder out = new StringBuilder();
-    List<String> selectedKeys = new ArrayList<>();
-    int used = 0;
-    for (WikiCandidate candidate : candidates) {
-      if (candidate.score() < minScore || used >= maxSections) {
-        break;
-      }
-      String content = candidate.content().trim();
-      if (content.length() > maxChars) {
-        content = content.substring(0, maxChars).trim();
-      }
-      if (content.isBlank()) {
+    List<WikiRankedQuery> rankedQueries = new ArrayList<>();
+    for (WikiQuerySelection selection : selections) {
+      String rawQuery = selection.rawQuery();
+      String directQuery = normalizeForSearch(rawQuery);
+      String expandedRawQuery = expandWikiFollowUpQuery(
+          rawQuery, directQuery, List.<ChatMessage>of(selection.message()));
+      String query = expandWikiAliases(normalizeForSearch(expandedRawQuery));
+      Set<String> queryTerms = meaningfulTerms(query);
+      if (queryTerms.isEmpty()) {
+        if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
+          plugin.getLogger().info("Wiki retrieval skipped=no-meaningful-terms speaker='"
+              + selection.message().playerName + "' query='" + directQuery + "'");
+        }
         continue;
       }
-      if (!out.isEmpty()) {
-        out.append('\n');
+      List<WikiCandidate> candidates = rankWikiCandidates(query, queryTerms);
+      rankedQueries.add(new WikiRankedQuery(selection, directQuery, query, candidates));
+    }
+    if (rankedQueries.isEmpty()) return "";
+
+    boolean multiQueryScene = rankedQueries.size() > 1;
+    int perQueryCap = multiQueryScene ? 1 : maxSectionsPerQuery;
+    StringBuilder out = new StringBuilder();
+    int totalSections = 0;
+
+    for (WikiRankedQuery ranked : rankedQueries) {
+      List<String> selectedKeys = new ArrayList<>();
+      StringBuilder block = new StringBuilder();
+      int usedForQuery = 0;
+      for (WikiCandidate candidate : ranked.candidates()) {
+        if (candidate.score() < minScore || usedForQuery >= perQueryCap
+            || totalSections >= maxTotalSections) break;
+        String content = candidate.content().trim();
+        if (content.isBlank()) continue;
+        if (content.length() > maxSectionChars) {
+          content = content.substring(0, maxSectionChars).trim();
+        }
+        String rendered = "[" + candidate.key() + "] " + content;
+        int headerReserve = 120;
+        int remaining = maxTotalChars - out.length() - block.length() - headerReserve;
+        if (remaining < 120) break;
+        if (rendered.length() > remaining) rendered = rendered.substring(0, remaining).trim();
+        if (!block.isEmpty()) block.append('\n');
+        block.append(rendered);
+        selectedKeys.add(candidate.key() + ":" + candidate.score());
+        usedForQuery++;
+        totalSections++;
       }
-      out.append('[').append(candidate.key()).append("] ").append(content);
-      selectedKeys.add(candidate.key() + ":" + candidate.score());
-      used++;
+
+      if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
+        String expansion = ranked.query().equals(ranked.directQuery())
+            ? "" : " expanded_from='" + ranked.directQuery() + "'";
+        plugin.getLogger().info("Wiki retrieval speaker='" + ranked.selection().message().playerName
+            + "' query='" + ranked.query() + "'" + expansion + " selected=" + selectedKeys);
+      }
+
+      if (!out.isEmpty()) out.append('\n');
+      out.append("[WIKI REQUEST speaker=")
+          .append(ranked.selection().message().playerName)
+          .append(" query='").append(ranked.directQuery()).append("'");
+      if (block.isEmpty()) {
+        // Explicitly tell the same model request that local trusted knowledge had no
+        // answer. Without this marker small models may fill the gap with vanilla or
+        // generic Minecraft assumptions, which is unsafe for MDVCRAFT-specific facts.
+        out.append(" result=no_match]\n")
+            .append("No trusted wiki section matched this server-knowledge question; do not guess a server-specific fact.");
+        continue;
+      }
+      out.append("]\n").append(block);
+      if (out.length() >= maxTotalChars || totalSections >= maxTotalSections) break;
     }
-    if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
-      String expansion = query.equals(directQuery) ? "" : " expanded_from='" + directQuery + "'";
-      plugin.getLogger().info("Wiki retrieval query='" + query + "'" + expansion + " selected=" + selectedKeys);
-    }
-    return out.toString();
+    return out.length() > maxTotalChars ? out.substring(0, maxTotalChars).trim() : out.toString();
   }
 
-  private WikiQuerySelection selectWikiQuery(List<ChatMessage> currentMessages) {
-    if (currentMessages == null || currentMessages.isEmpty()) return null;
+  /**
+   * Select at most one knowledge question per CURRENT addressed speaker. The newest
+   * question from each speaker wins, then results are restored to chronological order.
+   * This lets one model request answer 2-3 people without one player's wiki query
+   * stealing the entire scene.
+   */
+  private List<WikiQuerySelection> selectWikiQueries(List<ChatMessage> currentMessages, int maxQueries) {
+    if (currentMessages == null || currentMessages.isEmpty()) return List.of();
+    LinkedHashMap<UUID, WikiQuerySelection> newestBySpeaker = new LinkedHashMap<>();
     for (int i = currentMessages.size() - 1; i >= 0; i--) {
       ChatMessage message = currentMessages.get(i);
       if (!(message instanceof PlayerChatMessage playerMessage)) continue;
+      if (newestBySpeaker.containsKey(playerMessage.playerId)) continue;
       String raw = playerMessage.content == null ? "" : playerMessage.content.trim();
       String normalized = normalizeForSearch(raw);
       if (normalized.isBlank() || isObviousSocialSmallTalk(normalized)) continue;
       if (looksLikeWikiFollowUp(normalized) || looksLikeLikelyWikiKnowledgeRequest(normalized)) {
-        return new WikiQuerySelection(playerMessage, raw);
+        newestBySpeaker.put(playerMessage.playerId, new WikiQuerySelection(playerMessage, raw));
+        if (newestBySpeaker.size() >= Math.max(1, maxQueries)) break;
       }
     }
-    return null;
+    List<WikiQuerySelection> selected = new ArrayList<>(newestBySpeaker.values());
+    java.util.Collections.reverse(selected);
+    return List.copyOf(selected);
   }
 
-  private static boolean looksLikeLikelyWikiKnowledgeRequest(String normalized) {
+  static boolean looksLikeLikelyWikiKnowledgeRequest(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
 
     // Direct observation belongs to local context tools, not the static wiki.
@@ -1412,12 +1910,169 @@ public final class ConversationManager {
         "para que sirve", "para que se usa", "como funciona",
         "como se craftea", "como crafteo", "como craftear", "crafteo", "craftear",
         "como se hace", "receta", "recetas",
-        "como consigo", "como obtengo", "de donde consigo", "donde consigo",
-        "donde se consigue", "donde se obtiene", "como obtener",
+        "como consigo", "como se consigue", "como obtengo", "como se obtiene",
+        "de donde consigo", "de donde sale", "donde consigo", "donde se consigue",
+        "donde se obtiene", "como obtener", "como conseguir", "como encontrar",
+        "donde encuentro", "donde encontrar", "puedo encontrar", "encontrar un ",
+        "en que coordenadas", "coordenadas puedo", "coordenadas de",
         "como hago para", "que comandos", "q comandos", "comandos hay",
         "que minerales", "q minerales", "que armas", "que armaduras", "que sets",
-        "que raza tiene", "que profesion", "drops", "dropea", "droppea",
+        "que raza tiene", "que profesion", "drops", "drop ", "dropea", "droppea",
+        "que da el ", "q da el ", "que suelta", "que puede soltar",
         "cuanto cuesta", "cuanto vale");
+  }
+
+  private List<WikiCandidate> rankWikiCandidates(String query, Set<String> queryTerms) {
+    String meaningfulPhrase = String.join(" ", queryTerms);
+    boolean obtainIntent = isWikiObtainIntent(query);
+    boolean craftIntent = containsAnyTerm(query, "craftea", "crafteo", "craftear", "receta", "como se hace");
+    boolean dropIntent = containsAnyTerm(query, "drops", "drop ", "dropea", "droppea", "que da ", "q da ", "suelta");
+    boolean locationIntent = containsAnyTerm(query, "donde", "coordenadas", "encontrar", "encuentro", "aparece", "spawn");
+
+    List<WikiCandidate> candidates = new ArrayList<>();
+    for (WikiIndexEntry indexed : wikiIndex) {
+      int score = 0;
+      if (!indexed.normalizedKey().isBlank() && query.contains(indexed.normalizedKey())) score += 8;
+
+      if (queryTerms.size() >= 2 && meaningfulPhrase.length() >= 7) {
+        if (indexed.normalizedKey().contains(meaningfulPhrase)) score += 14;
+        if (indexed.normalizedDescription().contains(meaningfulPhrase)) score += 10;
+        if (indexed.normalizedContent().contains(meaningfulPhrase)) score += 10;
+        if (containsAllTerms(indexed.normalizedKey(), queryTerms)) score += 12;
+        else if (containsAllTerms(indexed.normalizedDescription(), queryTerms)) score += 9;
+        else if (containsAllTerms(indexed.normalizedContent(), queryTerms)) score += 9;
+      }
+
+      Set<String> keyTokens = tokenSet(indexed.normalizedKey());
+      Set<String> keyDescriptionTokens = tokenSet(indexed.normalizedKey() + " " + indexed.normalizedDescription());
+      for (String term : queryTerms) {
+        boolean exactKey = containsWholeWordIgnoreCase(indexed.normalizedKey(), term);
+        boolean exactDescription = containsWholeWordIgnoreCase(indexed.normalizedDescription(), term);
+        boolean exactContent = containsWholeWordIgnoreCase(indexed.normalizedContent(), term);
+        if (exactKey) score += 4;
+        if (exactDescription) score += 3;
+        if (exactContent) score += 2;
+        if (!exactKey && !exactDescription) {
+          int fuzzy = bestFuzzyTokenScore(term, keyDescriptionTokens);
+          if (fuzzy > 0) score += fuzzy;
+        }
+      }
+
+      // Strongly prefer a page whose KEY itself matches the requested entity, even
+      // when the player misspells it (e.g. acohilitico necrotido -> acolito necrotico).
+      // Generic overview pages may mention the same creature in their description,
+      // but should not outrank its dedicated page just because they contain "drops".
+      Set<String> entityTerms = wikiEntityTerms(queryTerms);
+      if (entityTerms.size() >= 2 && allTermsMatchKey(entityTerms, indexed.normalizedKey(), keyTokens)) {
+        score += 18;
+      }
+
+      String key = indexed.key().toLowerCase(Locale.ROOT);
+      if (obtainIntent) {
+        if (key.startsWith("obtain-")) score += 7;
+        else if (key.startsWith("ore-") || key.startsWith("spawn-")) score += 3;
+      }
+      if (craftIntent && key.startsWith("crafting-")) score += 7;
+      // Never let a completely unrelated spawn page win only because the question
+      // contained "donde/coordenadas". It must already share a real subject term.
+      if (locationIntent && key.startsWith("spawn-") && score > 0) score += 6;
+      if (dropIntent) {
+        if (key.startsWith("mob-") || key.startsWith("mobs-")) score += 3;
+        if (indexed.normalizedContent().contains("drops")) score += 3;
+      }
+
+      if (score > 0) {
+        candidates.add(new WikiCandidate(indexed.key(), indexed.description(), indexed.content(), score));
+      }
+    }
+    candidates.sort(Comparator.comparingInt(WikiCandidate::score).reversed());
+    return List.copyOf(candidates);
+  }
+
+  private static Set<String> wikiEntityTerms(Set<String> queryTerms) {
+    LinkedHashSet<String> entity = new LinkedHashSet<>();
+    if (queryTerms == null) return entity;
+    Set<String> intentNoise = Set.of(
+        "drops", "drop", "dropea", "droppea", "suelta", "coordenadas", "coordenada",
+        "puedo", "puede", "pueden", "miniboss", "boss", "jefe", "raros", "raro");
+    for (String term : queryTerms) {
+      if (!intentNoise.contains(term)) entity.add(term);
+    }
+    return entity;
+  }
+
+  static boolean allTermsMatchKey(Set<String> terms, String normalizedKey, Set<String> keyTokens) {
+    if (terms == null || terms.isEmpty()) return false;
+    for (String term : terms) {
+      if (containsWholeWordIgnoreCase(normalizedKey, term)) continue;
+      if (bestFuzzyTokenScore(term, keyTokens) > 0) continue;
+      return false;
+    }
+    return true;
+  }
+
+  private static boolean isWikiObtainIntent(String query) {
+    return containsAnyTerm(query,
+        "como consigo", "como se consigue", "como obtengo", "como se obtiene",
+        "de donde consigo", "de donde sale", "donde consigo", "donde se consigue",
+        "donde se obtiene", "como obtener", "como conseguir", "como encontrar");
+  }
+
+  private static String expandWikiAliases(String query) {
+    if (query == null || query.isBlank()) return "";
+    return query
+        .replace("mini jefe", "miniboss")
+        .replace("mini-jefe", "miniboss")
+        .replace("mini boss", "miniboss")
+        .replace("necrodito", "necrotido");
+  }
+
+  private static Set<String> tokenSet(String text) {
+    LinkedHashSet<String> tokens = new LinkedHashSet<>();
+    if (text == null) return tokens;
+    for (String token : text.split("\\s+")) {
+      if (token.length() >= 3) tokens.add(token);
+    }
+    return tokens;
+  }
+
+  static int bestFuzzyTokenScore(String queryTerm, Set<String> candidateTokens) {
+    if (queryTerm == null || queryTerm.length() < 6 || candidateTokens == null) return 0;
+    double best = 0.0;
+    for (String token : candidateTokens) {
+      if (token == null || token.length() < 5) continue;
+      if (queryTerm.charAt(0) != token.charAt(0)) continue;
+      if (commonPrefixLength(queryTerm, token) < 2) continue;
+      if (Math.abs(queryTerm.length() - token.length()) > 4) continue;
+      best = Math.max(best, lcsSimilarity(queryTerm, token));
+    }
+    if (best >= 0.86) return 5;
+    if (best >= 0.74) return 4;
+    return 0;
+  }
+
+  private static int commonPrefixLength(String a, String b) {
+    int max = Math.min(a.length(), b.length());
+    int i = 0;
+    while (i < max && a.charAt(i) == b.charAt(i)) i++;
+    return i;
+  }
+
+  private static double lcsSimilarity(String a, String b) {
+    if (a.isEmpty() || b.isEmpty()) return 0.0;
+    int[] previous = new int[b.length() + 1];
+    int[] current = new int[b.length() + 1];
+    for (int i = 1; i <= a.length(); i++) {
+      java.util.Arrays.fill(current, 0);
+      for (int j = 1; j <= b.length(); j++) {
+        if (a.charAt(i - 1) == b.charAt(j - 1)) current[j] = previous[j - 1] + 1;
+        else current[j] = Math.max(previous[j], current[j - 1]);
+      }
+      int[] swap = previous;
+      previous = current;
+      current = swap;
+    }
+    return (2.0 * previous[b.length()]) / (a.length() + b.length());
   }
 
   private String expandWikiFollowUpQuery(
@@ -1435,23 +2090,29 @@ public final class ConversationManager {
     }
 
     UUID currentSpeaker = lastPlayerId(currentMessages);
-    UUID previousSpeaker = lastPlayerId(previous.messages());
-    if (currentSpeaker == null || previousSpeaker == null || !currentSpeaker.equals(previousSpeaker)) {
-      return rawQuery;
-    }
+    if (currentSpeaker == null) return rawQuery;
+
+    boolean speakerWasPresent = previous.messages().stream().anyMatch(message ->
+        message instanceof PlayerChatMessage playerMessage
+            && currentSpeaker.equals(playerMessage.playerId));
+    if (!speakerWasPresent) return rawQuery;
 
     StringBuilder expanded = new StringBuilder(rawQuery == null ? "" : rawQuery.trim());
+    Set<UUID> previousSpeakers = new LinkedHashSet<>();
     for (ChatMessage message : previous.messages()) {
-      if (message instanceof PlayerChatMessage playerMessage
-          && currentSpeaker.equals(playerMessage.playerId)) {
-        expanded.append(' ').append(playerMessage.content);
+      if (message instanceof PlayerChatMessage playerMessage) {
+        previousSpeakers.add(playerMessage.playerId);
+        if (currentSpeaker.equals(playerMessage.playerId)) {
+          expanded.append(' ').append(playerMessage.content);
+        }
       }
     }
 
+    // The visible assistant reply is a useful referent seed only when that old scene
+    // had one speaker. In a multi-speaker scene the joined reply could contain another
+    // player's answer and would contaminate this speaker's follow-up retrieval.
     String previousReply = previous.assistantReply();
-    if (previousReply != null && !previousReply.isBlank()) {
-      // Retrieval-only seed: keep it compact and never send this string itself as
-      // extra prompt text. The selected wiki sections are what reach the model.
+    if (previousSpeakers.size() == 1 && previousReply != null && !previousReply.isBlank()) {
       String compactReply = previousReply.length() > 420
           ? previousReply.substring(0, 420)
           : previousReply;
@@ -1503,6 +2164,13 @@ public final class ConversationManager {
         || q.contains(" que tal iso ")
         || q.contains(" que tal isolda ")
         || q.contains(" que opinas de mi ")
+        || q.contains(" que opinas de ")
+        || q.contains(" que es ") && q.contains(" de ti ")
+        || q.contains(" como te cae ")
+        || q.contains(" como te llevas con ")
+        || q.contains(" que sientes por ")
+        || q.contains(" quien es tu pareja ")
+        || q.contains(" tienes pareja ")
         || q.contains(" por que me tratas ")
         || q.contains(" porque me tratas ")
         || q.contains(" pq me tratas ")
@@ -1574,7 +2242,14 @@ public final class ConversationManager {
     return plugin.getWikiConfig().getConfigurationSection("wiki");
   }
 
-  private static String normalizeForSearch(String input) {
+  static boolean looksLikeExplicitGroupBridge(String raw) {
+    String text = normalizeForSearch(raw);
+    if (text.isBlank()) return false;
+    return text.matches("^(?:contale|cuentale|decile|dile|preguntale|respond(?:e|ele)|avisale|explicale|mostrale|muestrale)(?:\\s+.*)?$")
+        || text.matches("^(?:si|no|exacto|tal cual|eso mismo)\\s+(?:iso|isolda)(?:\\s+.*)?$");
+  }
+
+  static String normalizeForSearch(String input) {
     String normalized = Normalizer.normalize(input == null ? "" : input, Normalizer.Form.NFD)
         .replaceAll("\\p{M}+", "")
         .toLowerCase(Locale.ROOT)
@@ -1597,8 +2272,8 @@ public final class ConversationManager {
         "que", "como", "donde", "cuando", "quien", "para", "por", "con", "una", "uno", "unos",
         "unas", "del", "las", "los", "eso", "esta", "este", "esto", "soy", "eres", "hay", "iso",
         "isolda", "se", "un", "de", "en", "mi", "mis", "su", "sus", "es", "son", "quiero",
-        "craftea", "craftear", "crafteo", "craft", "consigo", "conseguir", "obtengo", "obtener",
-        "encuentro", "encontrar", "sirve", "sirven", "the", "and", "what", "where", "how", "when",
+        "craftea", "craftear", "crafteo", "craft", "consigo", "consigue", "conseguir",
+        "obtengo", "obtiene", "obtener", "encuentro", "encontrar", "sirve", "sirven", "the", "and", "what", "where", "how", "when",
         "you", "your");
     Set<String> result = new LinkedHashSet<>();
     for (String token : text.split("\\s+")) {
@@ -1718,24 +2393,67 @@ public final class ConversationManager {
       response = new AssistantResponse(plugin, List.of(), List.of(), false);
     }
 
+    // A direct mention must never disappear because a small model returned m=[].
+    // Recover locally from already-selected trusted wiki context when possible; otherwise
+    // emit one honest generic acknowledgement. This costs ZERO additional API requests.
+    if (response.historyText().isBlank() && response.getToolCalls().isEmpty() && isDirectMentionScene(scene)) {
+      List<String> guaranteed = buildGuaranteedDirectReplies(scene);
+      if (!guaranteed.isEmpty()) {
+        plugin.getLogger().warning("Recovered empty direct-mention response locally for scene " + scene.sceneId()
+            + " (replies=" + guaranteed.size() + ").");
+        response = new AssistantResponse(
+            plugin, guaranteed, response.getToolCalls(), response.getRelationshipUpdates(),
+            response.getFollowUpSpeakers(), response.shouldCloseConversation());
+      }
+    }
+
+    // Group chat is semantic, not one-ticket-per-player. Java therefore does NOT
+    // force a reply for every addressed speaker. It only protects a clearly independent
+    // factual/wiki request that already had trusted context selected but was omitted by
+    // the model. Shared discussions remain one natural group reply. No retry/second call.
+    List<String> factualCoverage = buildMissingIndependentKnowledgeReplies(scene, response.getMessages());
+    if (!factualCoverage.isEmpty()) {
+      List<String> merged = new ArrayList<>(response.getMessages());
+      merged.addAll(factualCoverage);
+      plugin.getLogger().warning("Completed omitted independent factual reply locally for scene "
+          + scene.sceneId() + " (model_replies=" + response.getMessages().size()
+          + ", added=" + factualCoverage.size() + ").");
+      response = new AssistantResponse(
+          plugin, merged, response.getToolCalls(), response.getRelationshipUpdates(),
+          response.getFollowUpSpeakers(), response.shouldCloseConversation());
+    }
+
+    // Direct/smart addressers are known locally. For a true group exchange the same
+    // single model response may additionally mark CURRENT related speakers in `f`.
+    // This tiny metadata field avoids a second classifier/API request while preventing
+    // unrelated public chatter from inheriting a SMART follow-up window.
+    Set<UUID> conversationParticipants = resolveConversationParticipants(scene, response);
+
     if (plugin.getRelationshipManager() != null) {
       plugin.getRelationshipManager().applySceneUpdates(
           response.getRelationshipUpdates(),
           scene.currentSceneMessages(),
-          scene.followUpEligiblePlayerIds(),
+          conversationParticipants,
           response.historyText());
 
-      String guardedReply = plugin.getRelationshipManager().guardRomanceReply(
-          response.historyText(), scene.currentSceneMessages(), scene.followUpEligiblePlayerIds()).trim();
-      guardedReply = plugin.getRelationshipManager().guardPartnerFactReply(
-          guardedReply, scene.currentSceneMessages(), scene.followUpEligiblePlayerIds()).trim();
-      if (!guardedReply.equals(response.historyText().trim())) {
-        response = new AssistantResponse(
-            plugin,
-            guardedReply.isBlank() ? List.of() : List.of(guardedReply),
-            response.getToolCalls(),
-            response.getRelationshipUpdates(),
-            response.shouldCloseConversation());
+      // Legacy zero-token dialogue guards return one replacement string. Applying
+      // them to a 2-3 message group reply would collapse the other speakers' answers.
+      // The model already receives authoritative romance_global/relationship state;
+      // keep these last-resort replacements only for single-line scenes.
+      if (response.getMessages().size() <= 1) {
+        String guardedReply = plugin.getRelationshipManager().guardRomanceReply(
+            response.historyText(), scene.currentSceneMessages(), conversationParticipants).trim();
+        guardedReply = plugin.getRelationshipManager().guardPartnerFactReply(
+            guardedReply, scene.currentSceneMessages(), conversationParticipants).trim();
+        if (!guardedReply.equals(response.historyText().trim())) {
+          response = new AssistantResponse(
+              plugin,
+              guardedReply.isBlank() ? List.of() : List.of(guardedReply),
+              response.getToolCalls(),
+              response.getRelationshipUpdates(),
+              response.getFollowUpSpeakers(),
+              response.shouldCloseConversation());
+        }
       }
     }
 
@@ -1776,7 +2494,7 @@ public final class ConversationManager {
     long now = System.currentTimeMillis();
     pruneSmartFollowUps(now);
     if (!reply.isBlank()) {
-      for (UUID playerId : scene.followUpEligiblePlayerIds()) {
+      for (UUID playerId : conversationParticipants) {
         long followUpMs = plugin.getRelationshipManager() == null
             ? baseFollowUpMs
             : plugin.getRelationshipManager().followUpMs(playerId, baseFollowUpMs);
@@ -1786,6 +2504,274 @@ public final class ConversationManager {
     }
 
     processNextRequest();
+  }
+
+  private Set<UUID> resolveConversationParticipants(SceneRequest scene, AssistantResponse response) {
+    if (scene == null) return Set.of();
+    LinkedHashSet<UUID> participants = new LinkedHashSet<>(scene.followUpEligiblePlayerIds());
+    if (response == null) return Set.copyOf(participants);
+
+    // Strong local threading evidence (explicit bridge, reference+shared topic, etc.)
+    // can grant continuity without spending completion tokens on f. Crucially, only
+    // locally classified candidates are eligible; random capture-window speakers are not.
+    if (!response.historyText().isBlank()) {
+      participants.addAll(scene.autoGroupParticipantIds());
+    }
+
+    Map<String, UUID> allowedCandidates = scene.groupParticipantCandidatesByName();
+    for (String name : response.getFollowUpSpeakers()) {
+      if (name == null || name.isBlank()) continue;
+      UUID id = allowedCandidates.get(name.toLowerCase(Locale.ROOT));
+      if (id != null) participants.add(id);
+    }
+
+    Map<String, UUID> currentSpeakers = new LinkedHashMap<>();
+    for (ChatMessage message : scene.currentSceneMessages()) {
+      if (message instanceof PlayerChatMessage playerMessage) {
+        currentSpeakers.putIfAbsent(playerMessage.playerName.toLowerCase(Locale.ROOT), playerMessage.playerId);
+      }
+    }
+
+    // Explicit bridge fallback remains zero-token, but is now gated by Java's thread
+    // candidate set. "dile la verdad" can join; "yo tengo" from a stone trade cannot.
+    for (ChatMessage message : scene.currentSceneMessages()) {
+      if (message instanceof PlayerChatMessage playerMessage
+          && scene.groupParticipantCandidateIds().contains(playerMessage.playerId)
+          && looksLikeExplicitGroupBridge(playerMessage.content)) {
+        participants.add(playerMessage.playerId);
+      }
+    }
+
+    // Relationship bookkeeping is additional evidence only for already-classified
+    // group candidates (or direct addressers). It can no longer promote ambient chat.
+    for (var update : response.getRelationshipUpdates()) {
+      if (update == null || update.playerName() == null) continue;
+      UUID id = currentSpeakers.get(update.playerName().toLowerCase(Locale.ROOT));
+      if (id != null && (scene.groupParticipantCandidateIds().contains(id)
+          || scene.followUpEligiblePlayerIds().contains(id))) {
+        participants.add(id);
+      }
+    }
+    return Set.copyOf(participants);
+  }
+
+  private boolean isDirectMentionScene(SceneRequest scene) {
+    return scene != null && scene.context() != null && scene.context().sceneMeta() != null
+        && scene.context().sceneMeta().contains("trigger=direct_mention");
+  }
+
+  private List<String> buildMissingIndependentKnowledgeReplies(
+      SceneRequest scene,
+      List<String> modelReplies) {
+    if (scene == null) return List.of();
+    int maxReplies = Math.max(plugin.getConfig().getInt("chat.max-messages-per-response", 3), 1);
+    List<PlayerChatMessage> addressed = currentAddressedSpeakers(scene, maxReplies);
+    if (addressed.size() <= 1) return List.of();
+
+    String wiki = scene.context() == null ? "" : scene.context().locallyRetrievedWiki();
+    String relationships = scene.context() == null ? "" : scene.context().relationshipContext();
+    if (wiki.isBlank()) return List.of();
+
+    List<String> replies = new ArrayList<>();
+    int existing = modelReplies == null ? 0 : modelReplies.size();
+    for (PlayerChatMessage speaker : addressed) {
+      if (existing + replies.size() >= maxReplies) break;
+      if (currentRequestRefusedForSpeaker(relationships, speaker.playerName)) continue;
+      String block = wikiBlockForSpeaker(wiki, speaker.playerName);
+      if (block.isBlank()) continue;
+      // CORE requires independent factual replies in multi-speaker scenes to prefix
+      // the exact speaker name. A shared/group reply intentionally has no such
+      // requirement and must not trigger fake per-player coverage.
+      if (responseCoversSpeaker(modelReplies, speaker.playerName)) continue;
+
+      String answer = extractWikiFallbackAnswer(speaker.content, block);
+      if (answer.isBlank()) {
+        answer = block.toLowerCase(Locale.ROOT).contains("result=no_match")
+            ? "no tengo ese dato concreto y no voy a inventarlo"
+            : "no tengo una respuesta clara para ese dato";
+      }
+      replies.add(speaker.playerName + ", " + answer);
+    }
+    return List.copyOf(replies);
+  }
+
+  static boolean responseCoversSpeaker(List<String> replies, String playerName) {
+    if (replies == null || replies.isEmpty() || playerName == null || playerName.isBlank()) return false;
+    for (String reply : replies) {
+      if (reply != null && containsWholeWordIgnoreCase(reply, playerName)) return true;
+    }
+    return false;
+  }
+
+  private List<PlayerChatMessage> currentAddressedSpeakers(SceneRequest scene, int maxReplies) {
+    if (scene == null || scene.currentSceneMessages() == null) return List.of();
+    LinkedHashMap<UUID, PlayerChatMessage> latestBySpeaker = new LinkedHashMap<>();
+    for (ChatMessage message : scene.currentSceneMessages()) {
+      if (!(message instanceof PlayerChatMessage playerMessage)) continue;
+      if (!scene.followUpEligiblePlayerIds().contains(playerMessage.playerId)) continue;
+      // Keep insertion order by first addressed appearance, but refresh the content to
+      // the newest line from that same speaker inside this capture window.
+      latestBySpeaker.put(playerMessage.playerId, playerMessage);
+    }
+    List<PlayerChatMessage> addressed = new ArrayList<>(latestBySpeaker.values());
+    if (addressed.size() > maxReplies) addressed = addressed.subList(0, maxReplies);
+    return List.copyOf(addressed);
+  }
+
+  private List<String> buildGuaranteedDirectReplies(SceneRequest scene) {
+    if (scene == null) return List.of();
+    int maxReplies = Math.max(plugin.getConfig().getInt("chat.max-messages-per-response", 3), 1);
+    List<PlayerChatMessage> addressed = currentAddressedSpeakers(scene, maxReplies);
+    if (addressed.isEmpty()) return List.of();
+
+    String wiki = scene.context() == null ? "" : scene.context().locallyRetrievedWiki();
+    String relationships = scene.context() == null ? "" : scene.context().relationshipContext();
+    boolean multi = addressed.size() > 1;
+
+    // First rescue only independent trusted knowledge requests. This preserves the
+    // natural one-line shape of shared group discussions even when the model went empty.
+    List<String> factual = new ArrayList<>();
+    for (PlayerChatMessage speaker : addressed) {
+      if (factual.size() >= maxReplies) break;
+      if (currentRequestRefusedForSpeaker(relationships, speaker.playerName)) continue;
+      String block = wikiBlockForSpeaker(wiki, speaker.playerName);
+      if (block.isBlank()) continue;
+      String answer = extractWikiFallbackAnswer(speaker.content, block);
+      if (answer.isBlank()) {
+        answer = block.toLowerCase(Locale.ROOT).contains("result=no_match")
+            ? "no tengo ese dato concreto y no voy a inventarlo"
+            : "no tengo una respuesta clara para ese dato";
+      }
+      factual.add((multi ? speaker.playerName + ", " : "") + answer);
+    }
+    if (!factual.isEmpty()) return List.copyOf(factual);
+
+    // If a hostile request was deterministically refused, preserve that decision even
+    // when the provider returned m=[]. Otherwise use one single social acknowledgement,
+    // never one mechanical fallback per participant.
+    for (int i = addressed.size() - 1; i >= 0; i--) {
+      PlayerChatMessage speaker = addressed.get(i);
+      if (!currentRequestRefusedForSpeaker(relationships, speaker.playerName)) continue;
+      String tier = relationshipTierForSpeaker(relationships, speaker.playerName);
+      String answer = tier.equals("arch-enemy")
+          ? "búscatelo tú, pedazo de mierda"
+          : tier.equals("enemy")
+              ? "arréglatelas tú, no me da la gana ayudarte"
+              : "no me da la gana hacerte ese favor";
+      return List.of((multi ? speaker.playerName + ", " : "") + answer);
+    }
+
+    PlayerChatMessage last = addressed.get(addressed.size() - 1);
+    return List.of((multi ? last.playerName + ", " : "") + "te leí; no me quedo muda, pero no tengo mucho que añadir");
+  }
+
+  private static String wikiBlockForSpeaker(String wiki, String playerName) {
+    if (wiki == null || wiki.isBlank() || playerName == null || playerName.isBlank()) return "";
+    String lower = wiki.toLowerCase(Locale.ROOT);
+    String marker = "[wiki request speaker=" + playerName.toLowerCase(Locale.ROOT) + " ";
+    int start = lower.indexOf(marker);
+    if (start < 0) return "";
+    int next = lower.indexOf("\n[wiki request speaker=", start + marker.length());
+    return next < 0 ? wiki.substring(start) : wiki.substring(start, next);
+  }
+
+  private static String relationshipTierForSpeaker(String context, String playerName) {
+    if (context == null || context.isBlank() || playerName == null) return "";
+    for (String line : context.split("\\R")) {
+      String lower = line.toLowerCase(Locale.ROOT);
+      if (!lower.startsWith("player=" + playerName.toLowerCase(Locale.ROOT) + " ")) continue;
+      int at = lower.indexOf(" tier=");
+      if (at < 0) return "";
+      int from = at + 6;
+      int to = lower.indexOf(' ', from);
+      return (to < 0 ? lower.substring(from) : lower.substring(from, to)).trim();
+    }
+    return "";
+  }
+
+  private static boolean currentRequestRefusedForSpeaker(String context, String playerName) {
+    if (context == null || context.isBlank() || playerName == null || playerName.isBlank()) return false;
+    boolean inTarget = false;
+    String target = "player=" + playerName.toLowerCase(Locale.ROOT) + " ";
+    for (String rawLine : context.split("\\R")) {
+      String line = rawLine.trim().toLowerCase(Locale.ROOT);
+      if (line.startsWith("player=")) {
+        inTarget = line.startsWith(target);
+        continue;
+      }
+      if (inTarget && line.equals("current_request_policy=refuse")) return true;
+    }
+    return false;
+  }
+
+  /** Extracts a tiny factual answer from the already trusted wiki block. */
+  static String extractWikiFallbackAnswer(String rawQuestion, String wikiBlock) {
+    if (rawQuestion == null || wikiBlock == null || wikiBlock.isBlank()) return "";
+    String query = expandWikiAliases(normalizeForSearch(rawQuestion));
+    Set<String> terms = new LinkedHashSet<>(meaningfulTerms(query));
+    terms.removeAll(Set.of("drops", "drop", "dropea", "droppea", "coordenadas", "miniboss"));
+    if (terms.isEmpty()) return "";
+
+    String[] lines = wikiBlock.split("\\R");
+    int bestIndex = -1;
+    int bestHits = 0;
+    for (int i = 0; i < lines.length; i++) {
+      String normalized = normalizeForSearch(lines[i]);
+      int hits = 0;
+      for (String term : terms) {
+        if (containsWholeWordIgnoreCase(normalized, term)
+            || bestFuzzyTokenScore(term, tokenSet(normalized)) > 0) hits++;
+      }
+      if (hits > bestHits) {
+        bestHits = hits;
+        bestIndex = i;
+      }
+    }
+    if (bestIndex < 0 || bestHits == 0) return "";
+
+    boolean wantsDrops = containsAnyTerm(query, "drops", "drop ", "dropea", "droppea", "que da ", "q da ", "suelta");
+    List<String> chosen = new ArrayList<>();
+    if (wantsDrops) {
+      int dropsAt = -1;
+      for (int i = bestIndex; i < Math.min(lines.length, bestIndex + 45); i++) {
+        if (normalizeForSearch(lines[i]).equals("drops")) {
+          dropsAt = i;
+          break;
+        }
+      }
+      if (dropsAt >= 0) {
+        for (int i = dropsAt + 1; i < Math.min(lines.length, dropsAt + 5); i++) {
+          String line = cleanWikiFallbackLine(lines[i]);
+          if (line.isBlank()) break;
+          if (!line.startsWith("[") && !line.endsWith(":")) chosen.add(line);
+        }
+      }
+    }
+
+    if (chosen.isEmpty()) {
+      for (int i = bestIndex; i < Math.min(lines.length, bestIndex + 4); i++) {
+        String line = cleanWikiFallbackLine(lines[i]);
+        if (line.isBlank()) {
+          if (!chosen.isEmpty()) break;
+          continue;
+        }
+        if (line.toLowerCase(Locale.ROOT).startsWith("[wiki request")) continue;
+        chosen.add(line);
+      }
+    }
+    String answer = String.join(" ", chosen)
+        .replaceAll("\\s{2,}", " ")
+        .trim();
+    if (answer.length() > 185) answer = answer.substring(0, 182).trim() + "...";
+    return answer;
+  }
+
+  private static String cleanWikiFallbackLine(String line) {
+    if (line == null) return "";
+    String cleaned = line.trim();
+    cleaned = cleaned.replaceFirst("^\\[[^\\]]+\\]\\s*", "");
+    cleaned = cleaned.replaceFirst("^-\\s*", "");
+    return cleaned.trim();
   }
 
   private boolean hasActiveSmartFollowUp(UUID playerId, long now) {
@@ -2018,6 +3004,12 @@ public final class ConversationManager {
 
   private record WikiQuerySelection(PlayerChatMessage message, String rawQuery) { }
 
+  private record WikiRankedQuery(
+      WikiQuerySelection selection,
+      String directQuery,
+      String query,
+      List<WikiCandidate> candidates) { }
+
   private record WikiCandidate(String key, String description, String content, int score) { }
   private record WikiIndexEntry(
       String key,
@@ -2027,6 +3019,17 @@ public final class ConversationManager {
       String normalizedDescription,
       String normalizedContent) { }
 
+  private record GroupThreadSelection(
+      List<PublicChatRecord> preCandidates,
+      Set<PublicChatRecord> candidateRecords,
+      Set<UUID> candidateIds,
+      Set<UUID> autoParticipantIds,
+      Map<String, UUID> candidateByName) {
+    static GroupThreadSelection empty() {
+      return new GroupThreadSelection(List.of(), Set.of(), Set.of(), Set.of(), Map.of());
+    }
+  }
+
   private record SceneRequest(
       long sceneId,
       List<ChatMessage> messages,
@@ -2034,6 +3037,9 @@ public final class ConversationManager {
       Set<UUID> involvedPlayerIds,
       Set<String> involvedPlayerNames,
       Set<UUID> followUpEligiblePlayerIds,
+      Set<UUID> groupParticipantCandidateIds,
+      Set<UUID> autoGroupParticipantIds,
+      Map<String, UUID> groupParticipantCandidatesByName,
       AssistantRequestContext context,
       String currentActionText,
       int providerIndex,
@@ -2042,13 +3048,15 @@ public final class ConversationManager {
     SceneRequest withProvider(int newProvider) {
       return new SceneRequest(
           sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
-          followUpEligiblePlayerIds, context, currentActionText, newProvider, 0);
+          followUpEligiblePlayerIds, groupParticipantCandidateIds, autoGroupParticipantIds,
+          groupParticipantCandidatesByName, context, currentActionText, newProvider, 0);
     }
 
     SceneRequest withRetry(int newRetryCount) {
       return new SceneRequest(
           sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
-          followUpEligiblePlayerIds, context, currentActionText, providerIndex, newRetryCount);
+          followUpEligiblePlayerIds, groupParticipantCandidateIds, autoGroupParticipantIds,
+          groupParticipantCandidatesByName, context, currentActionText, providerIndex, newRetryCount);
     }
   }
 }

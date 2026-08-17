@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.5.1 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.10 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 11
+config-version: 14
 
 assistant-name: Isolda
 
@@ -54,8 +54,8 @@ global-conversation:
 
   # always   = every public message may open a scene (expensive)
   # mention  = only Iso/Isolda opens a scene
-  # smart    = mention opens it; only players who directly addressed Isolda
-  #            may continue briefly without mentioning her again
+  # smart    = mention opens it; direct addressers and genuine CURRENT group
+  #            participants selected in the same reply may continue briefly
   # disabled = only log chat/events; never call AI
   trigger-mode: smart
 
@@ -65,7 +65,10 @@ global-conversation:
   - Iso
   - '@Iso'
 
-  # Per-player, never global. Context-only participants do not receive this timer.
+  # Per-player, never global. Direct addressers receive it automatically. Nearby
+  # group chat is routed locally by active-thread affinity versus competing side-chat;
+  # strong matches inherit continuity directly and borderline candidates may be
+  # confirmed by the SAME model response. Unrelated chatter never inherits it.
   smart-follow-up-ms: 15000
 
   # Optional spontaneous idle request from the friend branch, actually implemented
@@ -91,6 +94,27 @@ global-conversation:
 
     # Lets "Iso viste eso?" see a very recent event even without typing names.
     recent-pre-event-window-ms: 8000
+
+    # Local zero-request threading for group SMART continuity. Java scores each nearby
+    # message against Isolda's active thread AND recent competing side-chat. It combines
+    # chronology, participant references, topic overlap, reply/question compatibility,
+    # deictic language and conversational shape; phrase bridges are only bonus signals.
+    # No embeddings/model/classifier request is used and unrelated chatter is excluded.
+    group-threading:
+      enabled: true
+      pre-candidate-lookback-ms: 6000
+      max-pre-candidate-lines: 2
+      affinity:
+        # Candidate must fit Isolda's thread at least this well (0-100).
+        join-threshold: 48
+        # If it fits a recent side-thread almost as well, keep it out of Isolda's SMART.
+        min-margin-over-side-thread: 12
+        # Strong matches at/above this score inherit SMART locally without needing f.
+        auto-follow-up-threshold: 68
+        side-thread-lookback-ms: 8000
+        max-side-lines: 5
+        # Testing only; logs local scores but does not spend API tokens.
+        debug-log: false
 
     # No slots and no busy reply. Oldest unsent scene is silently dropped on abuse.
     max-pending-scenes: 2
@@ -321,7 +345,7 @@ tools:
 # ============================================================
 chat:
   assistant-format: '&8[&5Cronista&8] &e%assistant_name%&7» &f%message%'
-  max-messages-per-response: 1
+  max-messages-per-response: 3
   assistant-chained-messages-delay: 750
   max-assistant-message-length: 189
   max-player-message-length: 250

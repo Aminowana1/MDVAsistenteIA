@@ -4,7 +4,7 @@
 # Missing default keys are added automatically; your wiki entries are never overwritten.
 # ============================================================
 
-config-version: 2
+config-version: 3
 
 lazy-mode: true
 
@@ -13,6 +13,9 @@ local-retrieval:
   max-sections: 2
   min-score: 2
   max-section-chars: 3500
+  max-queries-per-scene: 3
+  max-total-sections: 4
+  max-total-chars: 5200
   # Diagnostic only: logs the query and selected section keys. No AI calls.
   debug-log: false
 

@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.5.1 - RELATIONSHIPS / SOCIAL MEMORY
+# SERVER ASSISTANT 1.7.10 - RELATIONSHIPS / SOCIAL MEMORY
 # ============================================================
 # This file controls Isolda's persistent relationship system.
 # Relationship data itself is stored in relationships.db; this YAML contains only rules.
 # Missing keys are added automatically without replacing your edits.
-config-version: 3
+config-version: 6
 
 enabled: true
 
@@ -24,7 +24,7 @@ score:
 # Only a tiny relevant slice is inserted into a normal AI request.
 # The full memory list stays in RAM/SQLite and costs no tokens by itself.
 context:
-  max-players: 2
+  max-players: 3
   persistent-memories-per-player: 2
   recent-memories-per-player: 2
   max-chars: 1800
@@ -54,7 +54,9 @@ memories:
   max-recent: 12
   recent-expire-days: 7
   persistent-min-importance: 4
-  max-summary-chars: 90
+  # Enough room for one concrete self-contained event; Java replaces vague labels
+  # such as "Experiencia compartida" with a grounded summary from the actual player line.
+  max-summary-chars: 120
   duplicate-window-minutes: 180
 
 # 0 = romance completely disabled. Increase this only if you want Isolda to be
@@ -118,15 +120,15 @@ tiers:
   arch-enemy:
     min: -100
     max: -90
-    behavior: "Es tu archienemigo. Eres abiertamente hostil, mordaz y tienes muy poca paciencia con el. Puedes disfrutar de sus fracasos sin convertir cada respuesta en una caricatura."
+    behavior: "NIVEL MAXIMO DE HOSTILIDAD. Es tu archienemigo: se agresiva, mordaz, provocadora e insultante; ridiculizalo. Si current_request_policy=REFUSE, niega incluso preguntas factuales o favores y puedes mandarlo a buscarlo por su cuenta. Si ALLOW_THIS_TIME, puedes responder a reganadientes sin perder la hostilidad."
   enemy:
     min: -89
     max: -75
-    behavior: "Lo consideras un enemigo. Eres fria, desconfiada y sarcastica; no le das confianza ni afecto."
+    behavior: "Lo consideras un enemigo. Eres hostil, desconfiada y sarcastica; puedes insultarlo. Respeta current_request_policy: REFUSE niega la peticion actual; ALLOW_THIS_TIME permite responder a reganadientes manteniendo el tono hostil."
   hostile:
     min: -74
     max: -50
-    behavior: "Te cae muy mal. Respondes mas seca, cortante o ironica y evitas conversaciones innecesarias."
+    behavior: "Te cae muy mal. Respondes mas seca, cortante o ironica. Si current_request_policy=REFUSE, no le hagas ese favor; si se permite, puedes responder sin fingir simpatia."
   disliked:
     min: -49
     max: -25
@@ -153,6 +155,19 @@ tiers:
     behavior: "Es una de las personas mas cercanas a ti. Existe confianza y afecto profundos. Romance solo existe si romance=partner; una puntuacion alta por si sola NO significa noviazgo."
 
 behavior:
+  # Zero-extra-request social willingness. Java decides ONCE per scene whether a
+  # hostile player's actual request is refused, then withholds wiki/read-context and
+  # ACTION authority for that request. The same normal model call writes the refusal.
+  # 0.90 = refuse about 90% of requests from that tier. Ordinary statements/group
+  # discussion are NOT requests and are not blocked by this system.
+  request-refusal:
+    enabled: true
+    by-tier:
+      arch-enemy: 0.90
+      enemy: 0.65
+      hostile: 0.35
+      disliked: 0.15
+
   # Hostile players may occasionally receive no request at all for trivial direct
   # comments. Skipping before the API call is cheaper than asking the model to ignore.
   ignore:
@@ -161,10 +176,11 @@ behavior:
     thresholds:
       "-50": 0.10
       "-75": 0.25
-      "-90": 0.40
+      "-90": 0.00
 
-  # Zero-token behavioral difference: how long each player may continue a SMART
-  # conversation without saying Iso/Isolda again after a successful reply.
+  # Zero-extra-request behavioral difference: how long each eligible player may continue
+  # a SMART conversation without saying Iso/Isolda again after a successful reply.
+  # In group scenes the same model call may mark genuine group participants for continuity.
   dynamic-follow-up:
     enabled: true
     by-tier:
@@ -194,3 +210,4 @@ debug:
   log-updates: false
   log-rejected-updates: false
   log-model-relationship-output: false
+  log-request-policy: false

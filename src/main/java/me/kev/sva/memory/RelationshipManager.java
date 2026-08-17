@@ -105,8 +105,66 @@ public final class RelationshipManager {
     }
   }
 
+  /**
+   * Decides once per scene whether a hostile player's CURRENT request is refused.
+   *
+   * <p>The map contains only players whose tier has a configured non-zero refusal
+   * chance and whose latest addressed line is actually a request. true=REFUSE,
+   * false=ALLOW_THIS_TIME. The decision is local/deterministic and costs no model
+   * request or tokens.</p>
+   */
+  public Map<UUID, Boolean> decideCurrentRequestRefusals(
+      long sceneId,
+      List<ChatMessage> currentMessages) {
+    if (!enabled()
+        || !config().getBoolean("behavior.request-refusal.enabled", true)
+        || currentMessages == null
+        || currentMessages.isEmpty()) {
+      return Map.of();
+    }
+
+    LinkedHashMap<UUID, PlayerChatMessage> latestBySpeaker = new LinkedHashMap<>();
+    for (ChatMessage message : currentMessages) {
+      if (message instanceof PlayerChatMessage playerMessage) {
+        latestBySpeaker.put(playerMessage.playerId, playerMessage);
+      }
+    }
+
+    LinkedHashMap<UUID, Boolean> decisions = new LinkedHashMap<>();
+    for (PlayerChatMessage playerMessage : latestBySpeaker.values()) {
+      if (!RelationshipRequestPolicy.looksLikeRequest(playerMessage.content)) continue;
+      Profile profile = profile(playerMessage.playerId, playerMessage.playerName);
+      Tier tier = tierFor(profile.score);
+      double chance = Math.max(0.0D, Math.min(1.0D,
+          config().getDouble("behavior.request-refusal.by-tier." + tier.id, 0.0D)));
+      if (chance <= 0.0D) continue;
+      boolean refuse = RelationshipRequestPolicy.shouldRefuse(
+          chance, sceneId, playerMessage.playerId, playerMessage.content);
+      decisions.put(playerMessage.playerId, refuse);
+      if (config().getBoolean("debug.log-request-policy", false)) {
+        plugin.getLogger().info("Relationship request policy scene=" + sceneId
+            + " player=" + playerMessage.playerName
+            + " tier=" + tier.id
+            + " refusal_chance=" + String.format(Locale.ROOT, "%.2f", chance)
+            + " decision=" + (refuse ? "REFUSE" : "ALLOW_THIS_TIME"));
+      }
+    }
+    return decisions.isEmpty() ? Map.of() : Map.copyOf(decisions);
+  }
+
   /** Builds only the small relevant subset used by the current scene. */
   public String buildContext(List<ChatMessage> currentMessages, Set<String> involvedNames) {
+    return buildContext(currentMessages, involvedNames, Map.of());
+  }
+
+  /**
+   * Same compact relationship context plus the already-decided CURRENT request
+   * disposition for hostile speakers. The model never rolls this probability itself.
+   */
+  public String buildContext(
+      List<ChatMessage> currentMessages,
+      Set<String> involvedNames,
+      Map<UUID, Boolean> currentRequestRefusals) {
     if (!enabled()) return "";
 
     LinkedHashMap<UUID, String> relevant = new LinkedHashMap<>();
@@ -125,7 +183,7 @@ public final class RelationshipManager {
       }
     }
 
-    int maxPlayers = Math.max(config().getInt("context.max-players", 2), 1);
+    int maxPlayers = Math.max(config().getInt("context.max-players", 3), 1);
     int persistentLimit = Math.max(config().getInt("context.persistent-memories-per-player", 2), 0);
     int recentLimit = Math.max(config().getInt("context.recent-memories-per-player", 2), 0);
     int maxChars = Math.max(config().getInt("context.max-chars", 1800), 400);
@@ -161,7 +219,26 @@ public final class RelationshipManager {
           .append(" partners=").append(romance.currentPartners).append('/').append(romance.maxPartners)
           .append('\n');
       if (!tier.behavior.isBlank()) {
-        out.append("behavior=").append(compact(tier.behavior, 220)).append('\n');
+        out.append("behavior=").append(compact(tier.behavior, 300)).append('\n');
+      }
+
+      Boolean refuseCurrentRequest = currentRequestRefusals == null
+          ? null
+          : currentRequestRefusals.get(profile.uuid);
+      if (refuseCurrentRequest != null) {
+        out.append("current_request_policy=")
+            .append(refuseCurrentRequest ? "REFUSE" : "ALLOW_THIS_TIME")
+            .append('\n');
+      }
+
+      if ("arch-enemy".equals(tier.id)) {
+        out.append("stance_rule=MAXIMUM_HOSTILITY; be openly insulting/mocking when natural; "
+            + "CURRENT request compliance is controlled only by current_request_policy when present.\n");
+      } else if ("enemy".equals(tier.id)) {
+        out.append("stance_rule=ENEMY; hostile, distrustful and sarcastic; "
+            + "CURRENT request compliance is controlled only by current_request_policy when present.\n");
+      } else if ("hostile".equals(tier.id)) {
+        out.append("stance_rule=HOSTILE; cold/irritable; CURRENT request compliance is controlled by current_request_policy when present.\n");
       }
       if (profile.romantic) {
         String romanceState = romanceState(profile.score);
@@ -449,10 +526,17 @@ public final class RelationshipManager {
     }
 
     String memoryText = bookkeepingNeutral ? "" : sanitizeMemory(requested.memory());
-    if (RelationshipSignalDetector.isGenericMemorySummary(memoryText)) {
+    if (!memoryText.isBlank()
+        && !RelationshipSignalDetector.isMemorySpecificEnough(memoryText, profile.lastName)) {
+      String original = memoryText;
+      memoryText = buildGroundedMemoryFallback(profile.lastName, speaker.content, requested.romanceAction());
       if (logRejected) plugin.getLogger().info(
-          "Rejected generic relationship memory for " + profile.lastName + ": '" + compact(memoryText, 90) + "'");
-      memoryText = "";
+          "Replaced vague relationship memory for " + profile.lastName + ": '"
+              + compact(original, 90) + "' -> '" + compact(memoryText, 120) + "'");
+    }
+    if (!memoryText.isBlank()) {
+      memoryText = ensureMemoryNamesActor(profile.lastName, memoryText);
+      memoryText = sanitizeMemory(memoryText);
     }
     MemoryKind memoryKind = parseMemoryKind(requested.memoryKind());
     int importance = Math.max(1, Math.min(5, requested.importance()));
@@ -621,7 +705,7 @@ public final class RelationshipManager {
     LinkedHashMap<String, UUID> names = new LinkedHashMap<>();
     for (Player actor : actors) if (actor != null) names.put(actor.getName(), actor.getUniqueId());
     StringBuilder out = new StringBuilder();
-    int max = Math.max(config().getInt("context.max-players", 2), 1);
+    int max = Math.max(config().getInt("context.max-players", 3), 1);
     int count = 0;
     for (Map.Entry<String, UUID> entry : names.entrySet()) {
       if (count++ >= max) break;
@@ -859,6 +943,8 @@ public final class RelationshipManager {
         }
       }
 
+      List<Long> vagueLegacyMemoryIds = new ArrayList<>();
+      Map<Long, String> upgradedLegacyMemories = new LinkedHashMap<>();
       try (Statement statement = connection.createStatement();
            ResultSet rs = statement.executeQuery(
                "SELECT id,player_uuid,kind,summary,importance,created_at,expires_at FROM relationship_memories ORDER BY created_at ASC")) {
@@ -869,13 +955,59 @@ public final class RelationshipManager {
           } catch (IllegalArgumentException ex) {
             continue;
           }
+          long memoryId = rs.getLong("id");
+          String summary = rs.getString("summary");
+          Profile owner = profiles.get(uuid);
+          String actor = owner == null ? "" : owner.lastName;
+
+          // Old versions allowed attitude labels such as "Experiencia compartida" or
+          // "Propuesta inesperada". The missing event cannot be reconstructed safely,
+          // so do not let those rows keep influencing future conversations. Specific
+          // legacy memories are preserved and upgraded with their actor name when needed.
+          if (!RelationshipSignalDetector.isMemorySpecificEnough(summary, actor)) {
+            vagueLegacyMemoryIds.add(memoryId);
+            continue;
+          }
+          String upgradedSummary = actor.isBlank() ? summary : ensureMemoryNamesActor(actor, summary);
+          upgradedSummary = sanitizeMemory(upgradedSummary);
+          if (!upgradedSummary.equals(summary)) {
+            upgradedLegacyMemories.put(memoryId, upgradedSummary);
+          }
+
           MemoryKind kind = "PERSISTENT".equalsIgnoreCase(rs.getString("kind"))
               ? MemoryKind.PERSISTENT : MemoryKind.RECENT;
           Memory memory = new Memory(
-              rs.getLong("id"), uuid, kind, rs.getString("summary"), rs.getInt("importance"),
+              memoryId, uuid, kind, upgradedSummary, rs.getInt("importance"),
               rs.getLong("created_at"), rs.getLong("expires_at"));
           memories.computeIfAbsent(uuid, ignored -> new ArrayList<>()).add(memory);
         }
+      }
+
+      if (!vagueLegacyMemoryIds.isEmpty()) {
+        try (PreparedStatement delete = connection.prepareStatement(
+            "DELETE FROM relationship_memories WHERE id=?")) {
+          for (long id : vagueLegacyMemoryIds) {
+            delete.setLong(1, id);
+            delete.addBatch();
+          }
+          delete.executeBatch();
+        }
+      }
+      if (!upgradedLegacyMemories.isEmpty()) {
+        try (PreparedStatement update = connection.prepareStatement(
+            "UPDATE relationship_memories SET summary=? WHERE id=?")) {
+          for (Map.Entry<Long, String> entry : upgradedLegacyMemories.entrySet()) {
+            update.setString(1, entry.getValue());
+            update.setLong(2, entry.getKey());
+            update.addBatch();
+          }
+          update.executeBatch();
+        }
+      }
+      if (!vagueLegacyMemoryIds.isEmpty() || !upgradedLegacyMemories.isEmpty()) {
+        plugin.getLogger().info("Relationship legacy-memory cleanup: removed "
+            + vagueLegacyMemoryIds.size() + " vague rows, upgraded "
+            + upgradedLegacyMemories.size() + " actor-qualified rows.");
       }
     }
   }
@@ -1286,10 +1418,49 @@ public final class RelationshipManager {
     return Math.max(min, Math.min(max, score));
   }
 
+
+  static String buildGroundedMemoryFallback(String playerName, String rawPlayerMessage, String romanceAction) {
+    String actor = safeName(playerName);
+    String message = rawPlayerMessage == null ? "" : rawPlayerMessage
+        .replace('|', '/')
+        .replaceAll("[\\r\\n]+", " ")
+        .replaceAll("\\s{2,}", " ")
+        .trim();
+    if (message.isBlank()) return "";
+    String normalizedRomance = romanceAction == null ? "" : romanceAction.trim().toLowerCase(Locale.ROOT);
+    if (RelationshipSignalDetector.isExplicitPartnershipProposal(message)) {
+      return actor + " le propuso a Isolda formalizar una relacion: \"" + compact(message, 64) + "\"";
+    }
+    String normalized = Normalizer.normalize(message, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}+", "")
+        .toLowerCase(Locale.ROOT);
+    if (normalized.contains("cita") || normalized.contains("sal conmigo") || normalized.contains("picnic")) {
+      return actor + " le propuso a Isolda una cita: \"" + compact(message, 72) + "\"";
+    }
+    if ("start".equals(normalizedRomance)) {
+      return actor + " e Isolda acordaron iniciar una relacion romantica";
+    }
+    if ("end".equals(normalizedRomance)) {
+      return actor + " e Isolda terminaron su relacion romantica";
+    }
+    return actor + " dijo a Isolda: \"" + compact(message, 86) + "\"";
+  }
+
+  static String ensureMemoryNamesActor(String playerName, String memory) {
+    if (memory == null || memory.isBlank()) return "";
+    String actor = safeName(playerName);
+    String normalizedMemory = Normalizer.normalize(memory, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}+", "").toLowerCase(Locale.ROOT);
+    String normalizedActor = Normalizer.normalize(actor, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}+", "").toLowerCase(Locale.ROOT);
+    if (!normalizedActor.isBlank() && normalizedMemory.contains(normalizedActor)) return memory.trim();
+    return actor + ": " + memory.trim();
+  }
+
   private String sanitizeMemory(String value) {
     if (value == null || value.isBlank() || value.equals("-")) return "";
     String cleaned = value.replace('|', '/').replaceAll("[\\r\\n]+", " ").replaceAll("\\s{2,}", " ").trim();
-    int max = Math.max(config().getInt("memories.max-summary-chars", 90), 20);
+    int max = Math.max(config().getInt("memories.max-summary-chars", 120), 20);
     return cleaned.length() <= max ? cleaned : cleaned.substring(0, max).trim();
   }
 

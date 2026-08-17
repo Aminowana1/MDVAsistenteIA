@@ -17,7 +17,7 @@ import me.kev.sva.chat.tools.ToolManager;
 /** Local trusted online-player location/status context. */
 public final class PlayerDataTool extends Tool {
   private static final List<String> LOCATION_TERMS = List.of(
-      "donde", "ubicacion", "coordenad", "coords", "position", "location",
+      "donde", "ubicacion", "coordenad", "coords", "coors", "coor", "position", "location",
       "zona", "region", "bioma", "biome");
   private static final List<String> STATUS_TERMS = List.of(
       "vida", "health", "hambre", "food",
@@ -161,7 +161,7 @@ public final class PlayerDataTool extends Tool {
   private boolean matchesLocationIntent(String text, String speakerName, List<ChatMessage> sceneMessages) {
     if (!containsAny(text, LOCATION_TERMS)) return false;
     // "coords?" is a common shorthand for the speaker's current coordinates.
-    if (containsAny(text, List.of("coords", "mis coords", "mis coordenadas"))) return true;
+    if (containsAny(text, List.of("coords", "coors", "coor", "mis coords", "mis coors", "mis coordenadas"))) return true;
     return matchesPersonalReference(text, speakerName, sceneMessages)
         || containsAny(text, LOCATION_DEICTIC_TERMS);
   }
