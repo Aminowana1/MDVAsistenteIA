@@ -1,6 +1,18 @@
-# ServerAssistant 1.7.16
+# ServerAssistant 1.7.17
 
-ServerAssistant 1.7.16 hardens the local wiki router after live regression testing: property-only follow-ups stay attached to the verified subject, fact evidence is scoped to the correct entity entry, reverse drop questions are validated separately, and unsupported facts fail closed. The architecture remains **one global conversation** with **one model request per scene**; no classifier/model request was added.
+ServerAssistant 1.7.17 hardens natural-language wiki routing after live server tests. Conversational wrappers, broad category questions, use/function questions, commerce, deictic travel, and short subject swaps are all resolved locally before the normal model request. The architecture remains **one global conversation** with **one model request per scene**; no classifier/model request, embedding call, retry, or external wiki lookup was added.
+
+## 1.7.17 natural wiki routing
+
+- Natural wrappers such as `me dices`, `me podes decir`, `me podrias explicar`, `sabrias decirme`, `tenes idea de` and `me ayudas a saber` no longer become part of an item/entity name.
+- `para q me sirve X?`, `que puedo hacer con X?`, `en que se usa X?`, `donde comercio?` and similar factual language now routes to the local wiki.
+- `y que nodos hay?`, `y que otros minerales hay?`, `y que pociones hay?` and other broad category listings are direct category queries, not accidental continuations of one previous entity.
+- Verified broad categories can anchor a later subjectless fact query (`que pociones?` -> `dame los crafteos`) without storing assistant prose.
+- `y los nudos vivos` can replace the prior subject while inheriting the prior obtain/craft/drop intent.
+- `que es Gamura?` -> `como llego hasta alli?` keeps only the verified place subject, allowing the wiki to answer with the documented `/lobby` route.
+- Unknown direct entities do not poison the next follow-up anchor. Known entities remain valid subjects even when one requested property is undocumented.
+- A factual continuation with no trusted subject fails closed instead of leaving GPT free to invent server-specific information.
+- All changes are Java/RAM-only and preserve the configured wiki section/token caps.
 
 ## 1.7.16 wiki retrieval audit and hardening
 

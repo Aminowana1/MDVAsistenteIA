@@ -35,7 +35,7 @@ import me.kev.sva.chat.tools.ContextTargetResolver;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 
 /**
- * ServerAssistant 1.7.16: one public global conversation with local context/tools.
+ * ServerAssistant 1.7.17: one public global conversation with local context/tools.
  *
  * <p>There are no player/group slots. A direct call (or a short smart follow-up)
  * opens one configurable scene window. Java reads a small amount of public chat
@@ -1928,30 +1928,45 @@ public final class ConversationManager {
       String rawQuery = selection.rawQuery();
       String directQuery = normalizeForSearch(rawQuery);
 
-      // 1.7.16 direct-first retrieval:
+      // 1.7.17 direct-first retrieval:
       // - complete new factual questions NEVER inherit the previous wiki topic;
       // - only genuinely subjectless follow-ups inherit one tiny local subject anchor;
       // - a subjectless follow-up with no valid anchor is NOT allowed to search generic
       //   property words such as "vida", "drops" or "rareza" across the whole wiki.
       boolean subjectlessFollowUp = looksLikeWikiFollowUp(directQuery);
-      WikiSubjectAnchor inheritedAnchor = subjectlessFollowUp
-          ? resolveWikiFollowUpSubject(directQuery, List.<ChatMessage>of(selection.message()))
+      WikiSubjectAnchor inheritedAnchor = (subjectlessFollowUp
+          || looksLikeEllipticalWikiSubjectSwap(directQuery))
+          ? resolveWikiFollowUpSubjectFlexible(directQuery, List.<ChatMessage>of(selection.message()))
           : null;
+      boolean subjectSwap = inheritedAnchor != null && looksLikeEllipticalWikiSubjectSwap(directQuery);
       if (subjectlessFollowUp && inheritedAnchor == null) {
         if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
-          plugin.getLogger().info("Wiki retrieval skipped=no-followup-subject speaker='"
+          plugin.getLogger().info("Wiki retrieval no_match=no-followup-subject speaker='"
               + selection.message().playerName + "' query='" + directQuery + "'");
         }
+        // Keep this turn fail-closed inside the SAME model request. Previously an
+        // unanchored factual continuation such as "dame los crafteos" returned no
+        // wiki block at all, leaving the model free to invent server facts.
+        rankedQueries.add(new WikiRankedQuery(
+            selection, directQuery, directQuery, List.of(), false));
         continue;
       }
       boolean contextExpanded = inheritedAnchor != null
           && inheritedAnchor.subjectQuery() != null
           && !inheritedAnchor.subjectQuery().isBlank();
       String inheritedSubject = contextExpanded ? inheritedAnchor.subjectQuery() : null;
-      String expandedRawQuery = contextExpanded
-          ? ((rawQuery == null ? "" : rawQuery.trim()) + " " + inheritedSubject).trim()
-          : rawQuery;
-      String query = expandWikiAliases(normalizeForSearch(expandedRawQuery));
+      String currentSubject = subjectSwap ? buildWikiSubjectAnchor(directQuery) : inheritedSubject;
+      boolean metaRetry = contextExpanded && looksLikeWikiMetaRetry(directQuery);
+      String effectiveFactQuery = (subjectSwap || metaRetry)
+          ? applyWikiIntentToSubject(inheritedAnchor.intentKind(),
+              subjectSwap ? currentSubject : inheritedSubject)
+          : directQuery;
+      String expandedRawQuery = subjectSwap || metaRetry
+          ? effectiveFactQuery
+          : contextExpanded
+              ? ((rawQuery == null ? "" : rawQuery.trim()) + " " + inheritedSubject).trim()
+              : rawQuery;
+      String query = expandWikiAliases(canonicalWikiRoutingQuery(expandedRawQuery));
       Set<String> queryTerms = meaningfulTerms(query);
       if (queryTerms.isEmpty()) {
         if (plugin.getWikiConfig().getBoolean("local-retrieval.debug-log", false)) {
@@ -1964,15 +1979,21 @@ public final class ConversationManager {
       // Entity existence is verified against the resolved SUBJECT only. Current
       // follow-up property words ("mobs", "dropean", "donde") must not become
       // identity requirements for the entity itself.
-      String verificationQuery = contextExpanded
-          ? inheritedAnchor.verificationQuery()
-          : rawQuery;
+      String verificationQuery = subjectSwap
+          ? effectiveFactQuery
+          : contextExpanded
+              ? inheritedAnchor.verificationQuery()
+              : rawQuery;
       if (looksLikeConcreteNamedEntityQuery(verificationQuery)) {
         candidates = candidates.stream()
             .filter(candidate -> candidateStronglyMatchesConcreteEntity(
                 verificationQuery, candidate.key(), candidate.description(), candidate.content()))
             .toList();
       }
+      // Distinguish subject existence/category evidence from support for the exact
+      // property being asked. A known entity may lack a documented stat and still be
+      // a valid anchor; a made-up entity must never replace the previous trusted one.
+      boolean subjectVerified = candidates.stream().anyMatch(candidate -> candidate.score() >= minScore);
 
       // Existence is not enough to answer a requested FACT. A page can prove that
       // Galumrog exists without containing his drops, exact life, weapon or price.
@@ -1980,21 +2001,28 @@ public final class ConversationManager {
       // being tempted to fill a missing property from generic fantasy knowledge.
       candidates = candidates.stream()
           .filter(candidate -> candidateSupportsWikiFactIntent(
-              directQuery, verificationQuery,
+              effectiveFactQuery, verificationQuery,
               candidate.key(), candidate.description(), candidate.content()))
           .toList();
 
       // Remember only the resolved subject. Never accumulate previous player wording
       // or assistant replies into future retrieval queries. This costs zero AI tokens.
-      String resolvedSubject = contextExpanded
-          ? inheritedSubject
-          : buildWikiSubjectAnchor(directQuery);
-      String resolvedVerification = contextExpanded
-          ? inheritedAnchor.verificationQuery()
-          : rawQuery;
-      if (wikiQueryHasIndependentSubject(directQuery) || contextExpanded) {
+      String resolvedSubject = subjectSwap
+          ? currentSubject
+          : contextExpanded ? inheritedSubject : buildWikiSubjectAnchor(directQuery);
+      String resolvedVerification = subjectSwap
+          ? effectiveFactQuery
+          : contextExpanded ? inheritedAnchor.verificationQuery() : rawQuery;
+      boolean explicitNewSubject = wikiQueryHasIndependentSubject(directQuery)
+          || looksLikeBroadWikiCategoryQuery(directQuery) || subjectSwap;
+      if (subjectVerified && (explicitNewSubject || contextExpanded)) {
         rememberWikiSubject(
-            selection.message().playerId, resolvedSubject, resolvedVerification);
+            selection.message().playerId, resolvedSubject, resolvedVerification,
+            subjectSwap ? inheritedAnchor.intentKind() : wikiIntentKind(effectiveFactQuery));
+      } else if (explicitNewSubject && !subjectVerified) {
+        // A new unknown subject invalidates the old anchor. Otherwise a later
+        // "y donde sale?" could incorrectly jump back to an unrelated earlier item.
+        wikiSubjectAnchorByPlayer.remove(selection.message().playerId);
       }
 
       rankedQueries.add(new WikiRankedQuery(
@@ -2076,9 +2104,13 @@ public final class ConversationManager {
       // wiki follow-ups because they contain "eso", which could create no_match
       // blocks and later trigger bogus local factual coverage.
       if (looksLikeDeicticOpinionSmallTalk(normalized)) continue;
+      boolean recentWikiAnchor = hasRecentWikiSubjectAnchor(playerMessage.playerId);
       if (looksLikeWikiFollowUp(normalized)
           || looksLikeLikelyWikiKnowledgeRequest(normalized)
-          || looksLikeImplicitServerEntityQuestion(raw, normalized)) {
+          || looksLikeImplicitServerEntityQuestion(raw, normalized)
+          || looksLikeWikiMetaRetry(normalized)
+          || (recentWikiAnchor && looksLikeEllipticalWikiSubjectSwap(normalized))
+          || looksLikeKnownWikiTopicFallback(raw, normalized, recentWikiAnchor)) {
         newestBySpeaker.put(playerMessage.playerId, new WikiQuerySelection(playerMessage, raw));
         if (newestBySpeaker.size() >= Math.max(1, maxQueries)) break;
       }
@@ -2088,8 +2120,62 @@ public final class ConversationManager {
     return List.copyOf(selected);
   }
 
+  private boolean hasRecentWikiSubjectAnchor(UUID playerId) {
+    if (playerId == null) return false;
+    WikiSubjectAnchor anchor = wikiSubjectAnchorByPlayer.get(playerId);
+    if (anchor == null) return false;
+    long age = System.currentTimeMillis() - anchor.timestampMs();
+    if (age < 0L || age > WIKI_SUBJECT_ANCHOR_MAX_AGE_MS) {
+      wikiSubjectAnchorByPlayer.remove(playerId);
+      return false;
+    }
+    return true;
+  }
+
+  private boolean looksLikeKnownWikiTopicFallback(
+      String raw, String normalized, boolean recentWikiAnchor) {
+    if (normalized == null || normalized.isBlank() || isObviousSocialSmallTalk(normalized)
+        || looksLikeDeicticOpinionSmallTalk(normalized)) return false;
+    String routed = canonicalWikiRoutingQuery(normalized);
+    boolean questionShape = raw != null && raw.contains("?")
+        || routed.matches("^(?:que|como|donde|quien|quienes|cual|cuales|cuanto|cuanta|para)\\b.*")
+        || routed.startsWith("dime ") || routed.startsWith("decime ")
+        || routed.startsWith("contame ") || routed.startsWith("cuentame ")
+        || routed.startsWith("hablame ") || routed.startsWith("explicame ")
+        || routed.startsWith("mostrame ") || routed.startsWith("muestrame ");
+    boolean elliptical = recentWikiAnchor && routed.startsWith("y ");
+    if (!questionShape && !elliptical) return false;
+
+    Set<String> terms = new LinkedHashSet<>(meaningfulTerms(routed));
+    terms.removeAll(WIKI_ENTITY_QUERY_NOISE);
+    if (terms.isEmpty()) return false;
+    for (WikiIndexEntry indexed : wikiIndex) {
+      Set<String> tokens = tokenSet(indexed.normalizedKey() + " " + indexed.normalizedDescription());
+      for (String term : terms) {
+        if (term.length() < 4) continue;
+        if (containsWholeWordIgnoreCase(indexed.normalizedKey(), term)
+            || containsWholeWordIgnoreCase(indexed.normalizedDescription(), term)
+            || bestFuzzyTokenScore(term, tokens) > 0) return true;
+      }
+    }
+    return false;
+  }
+
+  static boolean looksLikeEllipticalWikiSubjectSwap(String normalized) {
+    normalized = canonicalWikiRoutingQuery(normalized);
+    if (normalized.isBlank() || !normalized.startsWith("y ")) return false;
+    if (looksLikeBroadWikiCategoryQuery(normalized)) return false;
+    if (!wikiQueryHasIndependentSubject(normalized)) return false;
+    if (isWikiCraftIntent(normalized) || isWikiObtainIntent(normalized) || isWikiDropIntent(normalized)
+        || isWikiLocationIntent(normalized) || isWikiTravelIntent(normalized)
+        || isWikiFunctionIntent(normalized) || hasWikiPropertyFactCue(normalized)
+        || isWikiRecommendationIntent(normalized)) return false;
+    return normalized.split("\\s+").length <= 8;
+  }
+
   static boolean looksLikeLikelyWikiKnowledgeRequest(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
 
     // Direct observation belongs to local context tools, not the static wiki.
     if (containsAnyTerm(normalized,
@@ -2098,12 +2184,28 @@ public final class ConversationManager {
       return false;
     }
 
+    if (looksLikeBroadWikiCategoryQuery(normalized)
+        || isWikiRecommendationIntent(normalized)
+        || isWikiTravelIntent(normalized)
+        || isWikiCommerceIntent(normalized)
+        || isWikiCraftIntent(normalized)
+        || isWikiObtainIntent(normalized)
+        || isWikiDropIntent(normalized)
+        || isWikiLocationIntent(normalized)
+        || isWikiFunctionIntent(normalized)
+        || looksLikeWikiMetaRetry(normalized)) {
+      return true;
+    }
+
     if (containsAnyTerm(normalized,
-        "que es ", "q es ", "que son ", "q son ", "que significa ",
-        "que sabes de ", "que sabes del ", "q sabes de ", "q sabes del ",
-        "quien es ", "quienes son ", "existe ", "existen ", "conoces a ", "te suena ",
-        "para que sirve", "para que se usa", "como funciona",
-        "como se craftea", "como crafteo", "como craftear", "crafteo", "craftear",
+        "que es ", "que son ", "que significa ",
+        "que sabes de ", "que sabes del ", "quien es ", "quienes son ",
+        "existe ", "existen ", "conoces a ", "te suena ", "hablame de ",
+        "contame de ", "cuentame de ", "que me puedes decir de ",
+        "para que sirve", "para que me sirve", "para que sirven", "para que se usa",
+        "que utilidad tiene", "sirve de algo", "que puedo hacer con", "que se puede hacer con",
+        "en que se usa", "en que se usan", "como funciona",
+        "como se craftea", "como crafteo", "como craftear", "crafteo", "crafteos", "craftear",
         "como se fabrica", "como fabrico", "fabricar", "como se hace", "receta", "recetas",
         "como consigo", "como se consigue", "como obtengo", "como se obtiene",
         "de donde consigo", "de donde sale", "donde sale", "donde salen",
@@ -2112,22 +2214,25 @@ public final class ConversationManager {
         "como saco", "donde saco", "de donde saco", "como obtener", "como conseguir",
         "como encontrar", "donde encuentro", "donde encontrar", "puedo encontrar", "encontrar un ",
         "en que coordenadas", "coordenadas puedo", "coordenadas de",
-        "como hago para", "que comandos", "q comandos", "comandos hay",
-        "que minerales", "q minerales", "que armas", "que armaduras", "que sets",
+        "como hago para", "que comandos", "comandos hay",
+        "que minerales", "que armas", "que armaduras", "que sets", "que herramientas",
+        "que nodos", "que nudos", "que pociones", "que consumibles", "que razas",
+        "que facciones", "que eventos", "que mobs", "que criaturas",
         "que raza tiene", "que profesion", "drops", "drop ", "dropea", "droppea",
-        "que da el ", "q da el ", "que suelta", "que puede soltar", "que deja", "que tira",
+        "que da el ", "que suelta", "que puede soltar", "que deja", "que tira",
         "cuanto cuesta", "cuanto vale")) {
       return true;
     }
 
     // Direct stat/property questions are wiki-worthy only when the current wording
-    // names its own subject. The same wording without a subject ("y cuanta vida
-    // tiene?") is a follow-up and must inherit a validated per-player wiki anchor.
+    // names its own subject. Subjectless property wording is handled by the per-player
+    // follow-up anchor instead.
     return hasWikiPropertyFactCue(normalized) && wikiQueryHasIndependentSubject(normalized);
   }
 
   private static boolean hasWikiPropertyFactCue(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
     String q = " " + normalized + " ";
     return containsAnyTerm(q,
         " cuanta vida ", " cuanto vida ", " cuantos corazones ", " cuantas vidas ",
@@ -2151,15 +2256,20 @@ public final class ConversationManager {
 
   private static boolean isWikiCraftIntent(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
     String q = " " + normalized + " ";
     return containsAnyTerm(q,
         " como se craftea ", " como crafteo ", " como craftear ", " craftea ",
-        " crafteo ", " craftear ", " como se fabrica ", " como fabrico ", " fabricar ",
-        " receta ", " recetas ", " como se hace ", " como lo crafteo ", " como lo fabrico ");
+        " crafteo ", " crafteos ", " craftear ", " como se fabrica ", " como fabrico ", " fabricar ",
+        " receta ", " recetas ", " dame los crafteos ", " dame crafteos ",
+        " que necesito para craftear ", " que necesito para fabricar ", " materiales para craftear ",
+        " se puede craftear ", " se puede fabricar ",
+        " como se hace ", " como lo crafteo ", " como lo fabrico ");
   }
 
   private static boolean isWikiDropIntent(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
     String q = " " + normalized + " ";
     return containsAnyTerm(q,
         " drops ", " drop ", " dropea ", " dropean ", " droppea ", " droppean ",
@@ -2170,21 +2280,50 @@ public final class ConversationManager {
 
   private static boolean isWikiLocationIntent(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
     String q = " " + normalized + " ";
     return containsAnyTerm(q,
         " donde esta ", " donde estan ", " donde sale ", " donde salen ",
         " donde aparece ", " donde aparecen ", " donde vive ", " donde viven ",
         " donde habita ", " donde habitan ", " donde encuentro ", " donde encontrar ",
         " donde lo encuentro ", " donde la encuentro ", " donde hallo ", " donde lo hallo ",
+        " donde comercio ", " donde puedo comerciar ", " donde compro ", " donde vendo ",
         " coordenada ", " coordenadas ", " ubicacion ", " ubicado ", " ubicada ", " spawn ");
   }
 
   private static boolean isWikiFunctionIntent(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
     String q = " " + normalized + " ";
     return containsAnyTerm(q,
-        " para que sirve ", " para que se usa ", " como funciona ", " que hace ",
-        " q hace ", " que puede hacer ", " que efecto ", " que efectos ");
+        " para que sirve ", " para que me sirve ", " para que te sirve ",
+        " para que sirven ", " para que se usa ", " para que se usan ",
+        " de que sirve ", " sirve de algo ", " que utilidad ", " utilidad tiene ",
+        " que uso tiene ", " que usos tiene ", " como se usa ", " como uso ",
+        " en que se usa ", " en que se usan ", " que puedo hacer con ",
+        " que se puede hacer con ", " que hago con ", " para que lo uso ",
+        " para que la uso ", " como funciona ", " que hace ", " que puede hacer ",
+        " que efecto ", " que efectos ");
+  }
+
+  private static boolean isWikiTravelIntent(String normalized) {
+    if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
+    String q = " " + normalized + " ";
+    return containsAnyTerm(q,
+        " como llego ", " como llegar ", " como voy ", " como ir ", " como entro ",
+        " como entro a ", " como vuelvo ", " como viajo ", " como viajar ",
+        " que comando uso para ir ", " comando para ir ", " ir hasta alli ", " llegar hasta alli ");
+  }
+
+  private static boolean isWikiCommerceIntent(String normalized) {
+    if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
+    String q = " " + normalized + " ";
+    return containsAnyTerm(q,
+        " donde comercio ", " donde puedo comerciar ", " donde compro ", " donde puedo comprar ",
+        " donde vendo ", " donde puedo vender ", " como comercio ", " como comerciar ",
+        " como intercambio ", " como intercambiar ", " con quien comercio ");
   }
 
   /**
@@ -2200,11 +2339,139 @@ public final class ConversationManager {
         || isWikiObtainIntent(normalized)
         || isWikiDropIntent(normalized)
         || isWikiLocationIntent(normalized)
+        || isWikiTravelIntent(normalized)
+        || isWikiCommerceIntent(normalized)
         || isWikiFunctionIntent(normalized)
-        || containsAnyTerm(q, " q efectos ", " como lo hago ", " como la hago ");
+        || looksLikeWikiMetaRetry(normalized)
+        || containsAnyTerm(q, " que efectos ", " como lo hago ", " como la hago ");
   }
 
 
+
+  private static final Set<String> WIKI_BROAD_CATEGORY_NOUNS = Set.of(
+      "comando", "comandos", "mineral", "minerales", "arma", "armas",
+      "armadura", "armaduras", "set", "sets", "herramienta", "herramientas",
+      "material", "materiales", "pocion", "pociones", "consumible", "consumibles",
+      "nodo", "nodos", "nudo", "nudos", "raza", "razas", "profesion", "profesiones",
+      "faccion", "facciones", "evento", "eventos", "mob", "mobs", "criatura", "criaturas",
+      "enemigo", "enemigos", "mision", "misiones", "quest", "quests");
+
+  static String canonicalWikiRoutingQuery(String rawOrNormalized) {
+    String n = normalizeForSearch(rawOrNormalized);
+    if (n.isBlank()) return n;
+    n = (" " + n + " ").replace(" q ", " que ").replace(" pa que ", " para que ").trim();
+    // Strip only conversational wrappers; never remove the factual subject itself.
+    String previous;
+    do {
+      previous = n;
+      n = n.replaceFirst("^(?:iso|isolda)\\s+", "");
+      n = n.replaceFirst("^(?:oye|che|eh|hola)\\s+(?:iso|isolda)?\\s*", "");
+      n = n.replaceFirst("^(?:me\\s+)?(?:dices|decis|dirias|cuentas|explicas)\\s+", "");
+      n = n.replaceFirst("^(?:me\\s+)?(?:puedes|podes|podrias|podria)\\s+(?:decirme|decir|contarme|contar|explicarme|explicar)\\s+", "");
+      n = n.replaceFirst("^(?:sabrias|sabes)\\s+(?:decirme\\s+|decir\\s+)?(?=(?:como|donde|que|quien|cual|cuanto|para|en)\\b)", "");
+      n = n.replaceFirst("^(?:me\\s+)?(?:ayudas|ayudarias)\\s+(?:a\\s+)?(?:saber|entender)\\s+", "");
+      n = n.replaceFirst("^(?:tenes|tienes)\\s+idea\\s+de\\s+(?=(?:como|donde|que|quien|cual|cuanto|para|en)\\b)", "");
+      n = n.replaceFirst("^(?:quiero|quisiera|queria)\\s+saber\\s+(?:sobre|acerca\\s+de)\\s+", "que sabes de ");
+      n = n.replaceFirst("^(?:quiero|quisiera|queria)\\s+saber\\s+", "");
+    } while (!n.equals(previous));
+    if (n.startsWith("sobre ")) n = "que sabes de " + n.substring(6).trim();
+    if (n.startsWith("acerca de ")) n = "que sabes de " + n.substring(9).trim();
+    return n.trim();
+  }
+
+  static boolean looksLikeBroadWikiCategoryQuery(String normalized) {
+    normalized = canonicalWikiRoutingQuery(normalized);
+    if (normalized.isBlank()) return false;
+    // A leading conversational "y" must not turn a category listing into a fake
+    // follow-up to the previous entity. Live examples: "y que nodos hay?" and
+    // "y que otros minerales hay?".
+    String core = normalized.startsWith("y ") ? normalized.substring(2).trim() : normalized;
+    String q = " " + core + " ";
+    boolean listingShape = containsAnyTerm(q,
+        " que otros ", " que otras ", " cuales son los ", " cuales son las ",
+        " que tipos de ", " tipos de ", " lista de ", " listado de ", " que hay de ",
+        " dime los ", " dime las ", " decime los ", " decime las ",
+        " nombrame los ", " nombrame las ", " menciona los ", " menciona las ")
+        || core.matches("^(?:que|cuales)\\s+(?:otros?\\s+|otras?\\s+)?[\\p{L}0-9_-]+\\s+(?:hay|existen|conoces).*")
+        || core.matches("^(?:que|cuales)\\s+[\\p{L}0-9_-]+(?:\\s+[\\p{L}0-9_-]+)?$")
+        || core.matches("^(?:dime|decime|nombrame|menciona|lista|listame)\\s+(?:los|las)?\\s*[\\p{L}0-9_-]+.*");
+    if (!listingShape) return false;
+    for (String token : core.split("\\s+")) {
+      if (WIKI_BROAD_CATEGORY_NOUNS.contains(token)) return true;
+      String singular = singularWikiEntityNoun(token);
+      if (singular != null && WIKI_BROAD_CATEGORY_NOUNS.contains(singular)) return true;
+    }
+    return false;
+  }
+
+  private static String wikiBroadCategory(String normalized) {
+    normalized = canonicalWikiRoutingQuery(normalized);
+    for (String token : normalized.split("\\s+")) {
+      String singular = singularWikiEntityNoun(token);
+      String candidate = singular != null ? singular : token;
+      if (WIKI_BROAD_CATEGORY_NOUNS.contains(token) || WIKI_BROAD_CATEGORY_NOUNS.contains(candidate)) {
+        return switch (candidate) {
+          case "nudo" -> "nodo";
+          case "pocion" -> "pocion";
+          default -> candidate;
+        };
+      }
+    }
+    return "";
+  }
+
+  static int wikiBroadCategoryBoost(String query, String key, boolean subjectMatched) {
+    if (key == null) return 0;
+    key = key.toLowerCase(Locale.ROOT);
+    String category = wikiBroadCategory(query);
+    return switch (category) {
+      case "mineral" -> key.equals("obtain-mining-materials") ? 22
+          : key.equals("ores-tier3") ? 18
+          : key.startsWith("ore-") ? 12
+          : key.startsWith("materials-mining") ? 10 : 0;
+      case "nodo" -> key.equals("tree-nodes-overview") ? 24
+          : key.equals("tree-nodes-types") ? 22
+          : key.equals("obtain-tree-nodes") ? 20 : 0;
+      case "comando" -> key.equals("commands-help") ? 22
+          : key.startsWith("commands-") ? 12 : 0;
+      case "pocion", "consumible" -> key.equals("crafting-consumables-basic") ? 24
+          : key.startsWith("crafting-consumables") ? 20
+          : key.contains("consumable") ? 12 : 0;
+      case "raza" -> key.equals("races-overview") ? 24 : key.startsWith("race-") ? 12 : 0;
+      case "arma" -> key.contains("weapons") || key.startsWith("weapon-") ? 16
+          : key.startsWith("crafting-") ? 8 : 0;
+      case "armadura", "set" -> key.startsWith("armor-") ? 16 : key.startsWith("crafting-armor") ? 8 : 0;
+      case "herramienta" -> key.startsWith("tools-") ? 16 : key.startsWith("crafting-tools") ? 10 : 0;
+      case "profesion" -> key.startsWith("profession-") || key.equals("professions-overview") ? 16 : 0;
+      case "faccion" -> key.startsWith("lore-") || key.startsWith("spawn-") ? 8 : 0;
+      case "evento" -> key.contains("event") || key.startsWith("spawn-") ? 8 : 0;
+      case "mob", "criatura", "enemigo" -> key.startsWith("mob-") || key.startsWith("mobs-") ? 10 : 0;
+      default -> subjectMatched
+          && (key.contains("overview") || key.startsWith("obtain-") || key.startsWith("commands-")) ? 8 : 0;
+    };
+  }
+
+  static boolean isWikiRecommendationIntent(String normalized) {
+    normalized = canonicalWikiRoutingQuery(normalized);
+    if (normalized.isBlank()) return false;
+    String q = " " + normalized + " ";
+    return containsAnyTerm(q,
+        " que arma es mejor ", " que armas son mejores ", " que armas me recomiendas ",
+        " que arma me recomiendas ", " que equipamiento recomiendas ",
+        " que set recomiendas ", " cual conviene ", " cuales convienen ",
+        " mejor para la raza ", " mejores para la raza ", " mejor para elfo ",
+        " mejores para elfo ", " mejor para orco ", " mejores para orco ",
+        " mejor para humano ", " mejores para humano ");
+  }
+
+  static boolean looksLikeWikiMetaRetry(String normalized) {
+    normalized = canonicalWikiRoutingQuery(normalized);
+    if (normalized.isBlank()) return false;
+    String q = " " + normalized + " ";
+    return containsAnyTerm(q,
+        " busca en la wiki ", " mira en la wiki ", " revisa la wiki ", " fijate en la wiki ",
+        " esta en la wiki ", " aparece en la wiki ", " ahi aparece ", " ahi esta ");
+  }
 
   /**
    * Fallback for short natural questions that name a server entity but omit classic
@@ -2235,7 +2502,9 @@ public final class ConversationManager {
         " jefe ", " jefes ",
         " boss ", " miniboss ", " npc ", " npcs ", " comerciante ", " comerciantes ",
         " mercader ", " mercaderes ", " mision ", " misiones ", " quest ", " quests ",
-        " receta ", " recetas ", " drop ", " drops ", " evento ", " eventos ",
+        " pocion ", " pociones ", " consumible ", " consumibles ",
+        " nodo ", " nodos ", " nudo ", " nudos ", " herramienta ", " herramientas ",
+        " comando ", " comandos ", " receta ", " recetas ", " drop ", " drops ", " evento ", " eventos ",
         " faccion ", " facciones ", " raza ", " razas ", " profesion ", " profesiones ",
         " habilidad ", " habilidades ", " hechizo ", " hechizos ");
 
@@ -2252,14 +2521,26 @@ public final class ConversationManager {
       "pantalon", "set", "amuleto", "anillo", "collar", "item", "objeto",
       "material", "mineral", "mena", "mob", "enemigo", "criatura", "bicho", "monstruo",
       "bestia", "animal", "jefe", "miniboss", "boss", "npc", "comerciante", "mercader",
-      "mision", "quest",
+      "mision", "quest", "pocion", "consumible", "nodo", "nudo", "comando", "herramienta",
       "evento", "faccion", "raza", "profesion", "habilidad", "hechizo");
 
   private static final Set<String> WIKI_ENTITY_QUERY_NOISE = Set.of(
       "sabes", "saber", "info", "informacion", "datos", "dato", "sobre", "acerca",
-      "quieres", "quiero", "decime", "dime", "contame", "cuentame", "explicame",
+      "dices", "decis", "dirias", "decir", "decirme", "diga", "digas", "puedes", "podes", "podrias", "puede", "podria",
+      "sabrias", "tenes", "idea", "ayudas", "ayudarias", "ayudar",
+      "explicas", "explicar", "explicarme", "cuentas", "contar", "contarme", "mencionas",
+      "quisiera", "queria", "pregunto", "preguntarte", "consulta", "consultar",
+      "quieres", "quiero", "dame", "mostrame", "muestrame",
+      "decime", "dime", "contame", "cuentame", "explicame",
       "porfa", "favor", "sisi", "dale", "bueno", "mas", "algo", "exactamente",
-      "hago", "hacer", "hecho", "fabrica", "fabrico", "fabricar", "fabricacion", "receta", "recetas",
+      "otro", "otros", "otra", "otras", "demas", "tipo", "tipos", "clase", "clases",
+      "mejor", "mejores", "recomiendas", "recomendar", "recomendarias", "conviene", "convienen",
+      "alli", "ahi", "aca", "aqui", "hasta", "llego", "llegar", "voy", "ir", "entro",
+      "vuelvo", "viajo", "viajar", "wiki", "busca", "buscar", "mira", "revisa", "revisar",
+      "comercio", "comerciar", "comercia", "intercambio", "intercambiar", "compro", "comprar",
+      "vendo", "vender", "tienda", "tiendas",
+      "hago", "hacer", "hecho", "fabrica", "fabrico", "fabricar", "fabricacion",
+      "crafteo", "crafteos", "receta", "recetas",
       "drops", "drop", "dropea", "dropean", "droppea", "droppean", "suelta", "sueltan",
       "deja", "dejan", "tira", "tiran", "sale", "salen", "saco", "sacan", "sacar",
       "hallo", "hallan", "hallar", "dura", "duran", "cuanto", "cuanta", "cuantos", "cuantas", "cuesta", "cuestan",
@@ -2276,8 +2557,9 @@ public final class ConversationManager {
    * generic wiki pages cannot prove that the named entity exists.
    */
   static boolean looksLikeConcreteNamedEntityQuery(String rawOrNormalized) {
-    String normalized = normalizeForSearch(rawOrNormalized);
+    String normalized = canonicalWikiRoutingQuery(rawOrNormalized);
     if (normalized.isBlank()) return false;
+    if (looksLikeBroadWikiCategoryQuery(normalized) || isWikiRecommendationIntent(normalized)) return false;
     Set<String> identityTerms = wikiIdentityTerms(normalized);
 
     String noun = firstWikiEntityNoun(normalized);
@@ -2319,7 +2601,7 @@ public final class ConversationManager {
       String key,
       String description,
       String content) {
-    String query = normalizeForSearch(rawOrNormalizedQuery);
+    String query = canonicalWikiRoutingQuery(rawOrNormalizedQuery);
     if (!looksLikeConcreteNamedEntityQuery(query)) return true;
 
     String candidate = normalizeForSearch(
@@ -2336,6 +2618,7 @@ public final class ConversationManager {
     // "Espada de Nagamuta" against a generic page that merely lists other swords.
     for (String qualifier : qualifiers) {
       if (containsWholeWordIgnoreCase(candidate, qualifier)) continue;
+      if (lexicalVariantMatches(qualifier, candidateTokens)) continue;
       if (bestFuzzyTokenScore(qualifier, candidateTokens) > 0) continue;
       if (noun != null && containsCompactEntityToken(candidateTokens, noun, qualifier)) continue;
       return false;
@@ -2427,6 +2710,27 @@ public final class ConversationManager {
   }
 
 
+  private static boolean lexicalVariantMatches(String term, Set<String> candidateTokens) {
+    if (term == null || term.isBlank() || candidateTokens == null || candidateTokens.isEmpty()) return false;
+    LinkedHashSet<String> variants = new LinkedHashSet<>();
+    variants.add(term);
+    if (term.endsWith("s") && term.length() > 3) variants.add(term.substring(0, term.length() - 1));
+    if (term.endsWith("es") && term.length() > 4) variants.add(term.substring(0, term.length() - 2));
+    for (String candidate : candidateTokens) {
+      if (candidate == null || candidate.isBlank()) continue;
+      LinkedHashSet<String> candidateVariants = new LinkedHashSet<>();
+      candidateVariants.add(candidate);
+      if (candidate.endsWith("s") && candidate.length() > 3) {
+        candidateVariants.add(candidate.substring(0, candidate.length() - 1));
+      }
+      if (candidate.endsWith("es") && candidate.length() > 4) {
+        candidateVariants.add(candidate.substring(0, candidate.length() - 2));
+      }
+      for (String a : variants) if (candidateVariants.contains(a)) return true;
+    }
+    return false;
+  }
+
   private static boolean containsCompactEntityToken(Set<String> tokens, String noun, String qualifier) {
     if (tokens == null || noun == null || qualifier == null) return false;
     String a = noun + qualifier;
@@ -2453,6 +2757,7 @@ public final class ConversationManager {
         int to = Math.min(tokens.length - 1, i + maxDistance);
         for (int j = from; j <= to; j++) {
           if (tokens[j].equals(qualifier)
+              || lexicalVariantMatches(qualifier, Set.of(tokens[j]))
               || bestFuzzyTokenScore(qualifier, Set.of(tokens[j])) > 0) {
             found = true;
             break;
@@ -2489,6 +2794,7 @@ public final class ConversationManager {
   private static boolean orderedTermsMatchCompactly(String[] tokens, List<String> terms) {
     for (int start = 0; start < tokens.length; start++) {
       if (!tokens[start].equals(terms.get(0))
+          && !lexicalVariantMatches(terms.get(0), Set.of(tokens[start]))
           && bestFuzzyTokenScore(terms.get(0), Set.of(tokens[start])) == 0) continue;
       int cursor = start;
       boolean all = true;
@@ -2500,6 +2806,7 @@ public final class ConversationManager {
             continue;
           }
           if (tokens[j].equals(terms.get(t))
+              || lexicalVariantMatches(terms.get(t), Set.of(tokens[j]))
               || bestFuzzyTokenScore(terms.get(t), Set.of(tokens[j])) > 0) {
             found = j;
             break;
@@ -2528,7 +2835,8 @@ public final class ConversationManager {
       for (int i = start; i < end; i++) window.add(tokens[i]);
       boolean all = true;
       for (String term : terms) {
-        if (window.contains(term) || bestFuzzyTokenScore(term, window) > 0) continue;
+        if (window.contains(term) || lexicalVariantMatches(term, window)
+            || bestFuzzyTokenScore(term, window) > 0) continue;
         all = false;
         break;
       }
@@ -2560,6 +2868,10 @@ public final class ConversationManager {
     boolean dropIntent = isWikiDropIntent(query);
     boolean inverseDropSourceIntent = isInverseDropSourceQuestion(query);
     boolean locationIntent = isWikiLocationIntent(query);
+    boolean travelIntent = isWikiTravelIntent(query);
+    boolean functionIntent = isWikiFunctionIntent(query);
+    boolean recommendationIntent = isWikiRecommendationIntent(query);
+    boolean broadCategoryIntent = looksLikeBroadWikiCategoryQuery(query);
     Set<String> topicTerms = wikiTopicTerms(query);
 
     List<WikiCandidate> candidates = new ArrayList<>();
@@ -2617,6 +2929,18 @@ public final class ConversationManager {
                 "se fabrica", "se crea", "se craftea", "se elabora")) score += 7;
       }
       if (locationIntent && key.startsWith("spawn-") && subjectMatchedBeforeIntentBonuses) score += 6;
+      if (travelIntent && subjectMatchedBeforeIntentBonuses) {
+        if (key.startsWith("commands-travel") || key.startsWith("lore-gamura")) score += 10;
+      }
+      if (functionIntent && subjectMatchedBeforeIntentBonuses) {
+        if (key.startsWith("crafting-") || key.startsWith("tools-") || key.startsWith("items-")) score += 4;
+      }
+      if (recommendationIntent && subjectMatchedBeforeIntentBonuses) {
+        if (key.startsWith("race-") || key.contains("weapons") || key.startsWith("magic-weapons")) score += 8;
+      }
+      if (broadCategoryIntent) {
+        score += wikiBroadCategoryBoost(query, key, subjectMatchedBeforeIntentBonuses);
+      }
       if (dropIntent && subjectMatchedBeforeIntentBonuses) {
         // For "qué mobs la dropean?" the authoritative obtain-* material page
         // usually summarizes all known source families. Promote it ahead of any one
@@ -2649,6 +2973,16 @@ public final class ConversationManager {
    * selected section contains the kind of information the player asked for.
    * No API/model call is involved.
    */
+  private static boolean isDedicatedWikiSectionKey(String key) {
+    if (key == null || key.isBlank()) return false;
+    String k = key.toLowerCase(Locale.ROOT);
+    if (k.contains("overview")) return false;
+    return k.startsWith("race-") || k.startsWith("lore-") || k.startsWith("mob-")
+        || k.startsWith("weapon-") || k.startsWith("armor-") || k.startsWith("ore-")
+        || k.startsWith("profession-") || k.startsWith("consumable-")
+        || k.startsWith("magic-tome-");
+  }
+
   private static boolean requiresEntityScopedFactEvidence(
       String factQuery, String subjectQuery) {
     if (!looksLikeConcreteNamedEntityQuery(subjectQuery)) return false;
@@ -2791,9 +3125,9 @@ public final class ConversationManager {
   static boolean candidateSupportsWikiFactIntent(
       String rawFactQuery, String rawSubjectQuery,
       String key, String description, String content) {
-    String query = normalizeForSearch(rawFactQuery);
+    String query = canonicalWikiRoutingQuery(rawFactQuery);
     if (query.isBlank()) return true;
-    String subjectQuery = normalizeForSearch(rawSubjectQuery);
+    String subjectQuery = canonicalWikiRoutingQuery(rawSubjectQuery);
     if (subjectQuery.isBlank()) subjectQuery = query;
 
     String fullRaw = ((key == null ? "" : key) + " "
@@ -2806,7 +3140,9 @@ public final class ConversationManager {
         // Dedicated sections such as lore-galumrog may not repeat the entity as a
         // "Name:" heading. Only trust the whole section when its KEY itself names
         // every identity term; a generic multi-entity page cannot use this escape hatch.
-        if (!sectionKeyDirectlyNamesConcreteEntity(subjectQuery, key)) return false;
+        if (!sectionKeyDirectlyNamesConcreteEntity(subjectQuery, key)
+            && !(isDedicatedWikiSectionKey(key)
+                && candidateStronglyMatchesConcreteEntity(subjectQuery, key, description, ""))) return false;
         evidenceRaw = content == null ? "" : content;
       } else {
         evidenceRaw = entry;
@@ -2892,11 +3228,13 @@ public final class ConversationManager {
       if (!supported) return false;
     }
     if (containsAnyTerm(q, " que arma ", " que armas ")) {
-      if (!containsAnyTerm(c,
+      boolean weaponEvidence = containsAnyTerm(c,
           " arma ", " espada ", " sable ", " daga ", " maza ", " lanza ", " arco ",
-          " ballesta ", " baculo ", " cetro ", " tomo ", " baston ", " escudo ")) {
-        return false;
-      }
+          " ballesta ", " baculo ", " cetro ", " tomo ", " baston ", " escudo ");
+      boolean recommendationTraitEvidence = isWikiRecommendationIntent(query)
+          && containsAnyTerm(c, " raza ", " dano magico ", " dano a distancia ",
+              " mana ", " vida maxima ", " proyectil ", " proyectiles ");
+      if (!weaponEvidence && !recommendationTraitEvidence) return false;
     }
 
     // Pure location questions (not acquisition wording) require location evidence.
@@ -2905,7 +3243,22 @@ public final class ConversationManager {
           || containsAnyTerm(c,
               " se encuentra ", " se encuentran ", " aparece ", " aparecen ", " habita ",
               " habitan ", " vive ", " viven ", " ubicacion ", " coordenada ",
-              " coordenadas ", " altura ", " bioma ", " biomas ", " region ", " regiones ");
+              " coordenadas ", " altura ", " bioma ", " biomas ", " region ", " regiones ",
+              " viajar ", " llegar ", " utilizando /", " usar /", " mercado ", " lobby ");
+      if (!supported) return false;
+    }
+
+    if (isWikiTravelIntent(query)) {
+      boolean supported = containsAnyTerm(c,
+          " viajar ", " llegar ", " ir a ", " utilizando /", " usar /", " comando ",
+          " /lobby ", " /survival ", " /mercado ", " /warp ", " portal ");
+      if (!supported) return false;
+    }
+
+    if (isWikiCommerceIntent(query)) {
+      boolean supported = containsAnyTerm(c,
+          " mercado ", " comerciante ", " comerciantes ", " aldeano ", " aldeanos ",
+          " comercio ", " comerciar ", " intercambio ", " /comercio ", " /mercado ");
       if (!supported) return false;
     }
 
@@ -2987,14 +3340,17 @@ public final class ConversationManager {
   }
 
   private static boolean isWikiObtainIntent(String query) {
+    query = canonicalWikiRoutingQuery(query);
     return containsAnyTerm(query,
         "como consigo", "como se consigue", "como obtengo", "como se obtiene",
         "de donde consigo", "de donde sale", "donde sale", "donde salen",
         "donde consigo", "donde se consigue", "donde se obtiene", "donde aparece",
         "donde aparecen", "como saco", "donde saco", "de donde saco", "como lo saco",
         "como la saco", "de donde lo saco", "de donde la saco", "como obtener", "como conseguir",
-        "como encontrar", "donde encuentro", "donde encontrar", "donde lo encuentro",
-        "donde la encuentro");
+        "como encontrar", "donde encuentro", "donde encontrar", "donde puedo encontrar",
+        "donde puedo conseguir", "donde puedo obtener", "como puedo conseguir", "como puedo obtener",
+        "donde lo encuentro", "donde la encuentro", "como lo obtengo", "como la obtengo", "como los obtengo",
+        "como las obtengo", "como lo consigo", "como la consigo", "como los consigo", "como las consigo");
   }
 
   private static String expandWikiAliases(String query) {
@@ -3047,6 +3403,40 @@ public final class ConversationManager {
     return (2.0 * previous[b.length()]) / (a.length() + b.length());
   }
 
+  private enum WikiIntentKind {
+    GENERAL, OBTAIN, CRAFT, DROP, LOCATION, TRAVEL, FUNCTION, STATS, LIST, RECOMMENDATION, COMMERCE
+  }
+
+  private static WikiIntentKind wikiIntentKind(String normalized) {
+    normalized = canonicalWikiRoutingQuery(normalized);
+    if (isWikiCraftIntent(normalized)) return WikiIntentKind.CRAFT;
+    if (isWikiObtainIntent(normalized)) return WikiIntentKind.OBTAIN;
+    if (isWikiDropIntent(normalized)) return WikiIntentKind.DROP;
+    if (isWikiTravelIntent(normalized)) return WikiIntentKind.TRAVEL;
+    if (isWikiCommerceIntent(normalized)) return WikiIntentKind.COMMERCE;
+    if (isWikiLocationIntent(normalized)) return WikiIntentKind.LOCATION;
+    if (isWikiFunctionIntent(normalized)) return WikiIntentKind.FUNCTION;
+    if (hasWikiPropertyFactCue(normalized)) return WikiIntentKind.STATS;
+    if (isWikiRecommendationIntent(normalized)) return WikiIntentKind.RECOMMENDATION;
+    if (looksLikeBroadWikiCategoryQuery(normalized)) return WikiIntentKind.LIST;
+    return WikiIntentKind.GENERAL;
+  }
+
+  private static String applyWikiIntentToSubject(WikiIntentKind kind, String subject) {
+    if (subject == null || subject.isBlank()) return "";
+    return switch (kind == null ? WikiIntentKind.GENERAL : kind) {
+      case OBTAIN -> "como consigo " + subject;
+      case CRAFT -> "como se craftea " + subject;
+      case DROP -> "que dropea " + subject;
+      case LOCATION, TRAVEL -> "donde encuentro " + subject;
+      case FUNCTION -> "para que sirve " + subject;
+      case STATS -> "que estadisticas tiene " + subject;
+      case RECOMMENDATION -> "que recomiendas para " + subject;
+      case COMMERCE -> "donde comercio " + subject;
+      case LIST, GENERAL -> "que sabes de " + subject;
+    };
+  }
+
   /**
    * Resolves the previous trusted wiki subject only for a genuinely incomplete
    * follow-up. The immediately previous scene must also have used wiki context and
@@ -3055,8 +3445,15 @@ public final class ConversationManager {
   private WikiSubjectAnchor resolveWikiFollowUpSubject(
       String normalizedDirectQuery,
       List<ChatMessage> currentMessages) {
+    if (!looksLikeWikiFollowUp(normalizedDirectQuery)) return null;
+    return resolveWikiFollowUpSubjectFlexible(normalizedDirectQuery, currentMessages);
+  }
 
-    if (!looksLikeWikiFollowUp(normalizedDirectQuery) || sceneHistory.isEmpty()) return null;
+  private WikiSubjectAnchor resolveWikiFollowUpSubjectFlexible(
+      String normalizedDirectQuery,
+      List<ChatMessage> currentMessages) {
+
+    if (sceneHistory.isEmpty()) return null;
 
     SceneMemory previous = sceneHistory.peekLast();
     if (previous == null || !previous.wikiContextUsed()) return null;
@@ -3080,13 +3477,14 @@ public final class ConversationManager {
   }
 
   private void rememberWikiSubject(
-      UUID playerId, String subjectQuery, String verificationQuery) {
+      UUID playerId, String subjectQuery, String verificationQuery, WikiIntentKind intentKind) {
     if (playerId == null || subjectQuery == null || subjectQuery.isBlank()) return;
     String verification = verificationQuery == null || verificationQuery.isBlank()
         ? subjectQuery
         : verificationQuery.trim();
     wikiSubjectAnchorByPlayer.put(playerId, new WikiSubjectAnchor(
-        subjectQuery.trim(), verification, System.currentTimeMillis()));
+        subjectQuery.trim(), verification,
+        intentKind == null ? WikiIntentKind.GENERAL : intentKind, System.currentTimeMillis()));
   }
 
   private static UUID lastPlayerId(List<ChatMessage> messages) {
@@ -3100,7 +3498,9 @@ public final class ConversationManager {
   }
 
   private static final Set<String> WIKI_FOLLOW_UP_SUBJECT_NOISE = Set.of(
-      "si", "sisi", "decime", "dime", "contame", "cuentame", "explicame",
+      "si", "sisi", "dame", "mostrame", "muestrame",
+      "decime", "dime", "contame", "cuentame", "explicame",
+      "dices", "decis", "decir", "decirme", "puedes", "podrias", "podria", "explicas", "cuentas",
       "dale", "bueno", "porfa", "favor", "mas", "ver", "saber", "info",
       "informacion", "dato", "datos", "sobre", "acerca", "cual", "cuales",
       "cuanto", "cuanta", "cuantos", "cuantas", "quien", "quienes",
@@ -3113,12 +3513,16 @@ public final class ConversationManager {
       "vende", "venden", "incluye", "incluyen", "contiene", "contienen",
       "uso", "efecto", "efectos", "stats",
       "estadistica", "estadisticas", "dano", "damage", "pega", "golpea", "hp", "mana", "cooldown", "durabilidad",
-      "receta", "recetas", "materiales", "porcentaje", "probabilidad", "chance",
+      "crafteo", "crafteos", "receta", "recetas", "materiales", "porcentaje", "probabilidad", "chance",
       "cantidad", "cantidades", "numero", "numeros", "valor", "valores", "nivel", "niveles",
       "rareza", "calidad", "tier", "tiers", "vida", "salud", "velocidad", "radio",
       "alcance", "duracion", "coste", "costo", "precio", "precios", "habilidad", "habilidades",
       "maximo", "maxima", "maximos", "maximas", "base", "total", "totales",
-      "actual", "actuales", "fisico", "fisica", "fisicos", "fisicas", "magico", "magica",
+      "actual", "actuales", "otro", "otros", "otra", "otras", "demas", "tipo", "tipos",
+      "clase", "clases", "mejor", "mejores", "recomiendas", "recomendarias",
+      "alli", "ahi", "hasta", "llego", "llegar", "voy", "ir", "entro", "vuelvo",
+      "viajo", "viajar", "wiki", "busca", "mira", "revisa",
+      "fisico", "fisica", "fisicos", "fisicas", "magico", "magica",
       "magicos", "magicas", "proyectil", "proyectiles", "resistencia", "resistencias",
       "reduccion", "regeneracion", "tenacidad", "bloqueo", "critico", "critica",
       "criticos", "criticas", "corazon", "corazones", "segundo", "segundos", "bloque", "bloques");
@@ -3130,6 +3534,13 @@ public final class ConversationManager {
    */
   static String buildWikiSubjectAnchor(String normalized) {
     if (normalized == null || normalized.isBlank()) return "";
+    normalized = canonicalWikiRoutingQuery(normalized);
+    // A verified broad category is also a valid local subject: "que pociones?"
+    // can safely anchor a following "dame los crafteos" without carrying old prose.
+    if (looksLikeBroadWikiCategoryQuery(normalized)) {
+      String category = wikiBroadCategory(normalized);
+      if (!category.isBlank()) return category;
+    }
     LinkedHashSet<String> kept = new LinkedHashSet<>();
     for (String term : meaningfulTerms(normalized)) {
       if (WIKI_FOLLOW_UP_SUBJECT_NOISE.contains(term)) continue;
@@ -3156,6 +3567,7 @@ public final class ConversationManager {
   private static Set<String> wikiIdentityTerms(String normalized) {
     LinkedHashSet<String> identity = new LinkedHashSet<>();
     if (normalized == null || normalized.isBlank()) return identity;
+    normalized = canonicalWikiRoutingQuery(normalized);
     for (String term : meaningfulTerms(normalized)) {
       if (WIKI_FOLLOW_UP_SUBJECT_NOISE.contains(term)) continue;
       if (WIKI_ENTITY_QUERY_NOISE.contains(term)) continue;
@@ -3186,6 +3598,8 @@ public final class ConversationManager {
 
   static boolean looksLikeWikiFollowUp(String normalized) {
     if (normalized == null || normalized.isBlank()) return false;
+    normalized = canonicalWikiRoutingQuery(normalized);
+    if (looksLikeBroadWikiCategoryQuery(normalized) || isWikiRecommendationIntent(normalized)) return false;
 
     // Subject beats syntax: "como consigo esencia del bosque" is a NEW direct
     // question, while "y como se consigue?" is a true continuation.
@@ -3198,8 +3612,10 @@ public final class ConversationManager {
         " dale decime ", " bueno decime ", " a ver decime ", " si contame ",
         " sisi contame ", " dime mas ", " decime mas ", " contame mas ");
     if (conversationalContinuation) return !hasIndependentSubject;
+    if (looksLikeWikiMetaRetry(normalized)) return true;
     if (hasIndependentSubject) return false;
     if (hasSubjectlessWikiFactIntent(normalized)) return true;
+    if (isWikiTravelIntent(normalized)) return true;
 
     // Once identity-bearing words are absent, length alone must not disqualify a
     // continuation. Natural property follow-ups such as "y cuanta vida maxima tiene?"
@@ -3355,8 +3771,15 @@ public final class ConversationManager {
         "que", "como", "donde", "cuando", "quien", "para", "por", "con", "una", "uno", "unos",
         "unas", "del", "las", "los", "eso", "esta", "este", "esto", "soy", "eres", "hay", "iso",
         "isolda", "se", "un", "de", "en", "mi", "mis", "su", "sus", "es", "son", "quiero",
-        "craftea", "craftear", "crafteo", "craft", "consigo", "consigue", "conseguir",
-        "obtengo", "obtiene", "obtener", "encuentro", "encontrar", "sirve", "sirven", "the", "and", "what", "where", "how", "when",
+        "craftea", "craftear", "crafteo", "crafteos", "craft", "dame", "mostrame", "muestrame",
+        "consigo", "consigue", "conseguir",
+        "obtengo", "obtiene", "obtener", "encuentro", "encontrar", "sirve", "sirven",
+        "dices", "decis", "dirias", "decir", "decirme", "puedes", "podes", "podrias", "podria", "explicas",
+        "sabrias", "tenes", "tienes", "idea", "ayudas", "ayudarias", "ayudar",
+        "explicar", "cuentas", "contar", "quisiera", "queria", "otro", "otros", "otra", "otras",
+        "demas", "mejor", "mejores", "clase", "clases", "alli", "ahi", "hasta",
+        "llego", "llegar", "voy", "ir", "entro", "vuelvo", "viajo", "viajar", "wiki",
+        "the", "and", "what", "where", "how", "when",
         "you", "your");
     Set<String> result = new LinkedHashSet<>();
     for (String token : text.split("\\s+")) {
@@ -4563,6 +4986,7 @@ public final class ConversationManager {
   private record WikiSubjectAnchor(
       String subjectQuery,
       String verificationQuery,
+      WikiIntentKind intentKind,
       long timestampMs) { }
 
   private record WikiCandidate(String key, String description, String content, int score) { }

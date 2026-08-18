@@ -6,7 +6,7 @@
 
     <groupId>me.kev</groupId>
     <artifactId>ServerAssistant</artifactId>
-    <version>1.7.16</version>
+    <version>1.7.17</version>
     <packaging>jar</packaging>
 
     <name>ServerAssistant</name>

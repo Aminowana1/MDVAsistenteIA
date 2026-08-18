@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.7.17 - Natural wiki routing / live-chat hardening
+
+- Fixes natural conversational wrappers such as `me dices como consigo viridita?`, `me podes decir...`, `me podrias explicar...`, `sabrias decirme...`, `tenes idea de...` and `me ayudas a saber...` contaminating entity identity. Wrapper language is stripped/ignored locally before entity verification.
+- Fixes factual function/use questions that previously bypassed the wiki, including `para q me sirve un denar?`, `y para que me sirve la viridita?`, `que puedo hacer con X?` and `en que se usa X?`.
+- Fixes broad list questions with conversational `y`, especially `y que nodos hay?`, `y que otros minerales hay?`, `y que pociones hay?` and `y que comandos hay?`. These are direct category lookups, not follow-ups to the previous concrete entity.
+- Broad verified categories can now become tiny local anchors, so `que pociones?` -> `dame los crafteos` stays on potions without carrying prior assistant prose.
+- Fixes elliptical subject swaps such as `y los nudos vivos` retaining the previous factual intent while replacing the subject (`Rama Resinosa` -> `Nudo Vivo`) instead of falling back to free model knowledge.
+- Fixes deictic travel continuity such as `que es Gamura?` -> `como llego hasta alli?`; the second line reuses only the verified `Gamura` anchor and can retrieve `/lobby` from the same local wiki.
+- Commerce verbs (`comercio`, `comprar`, `vender`, `intercambiar`, etc.) are treated as intent/noise rather than fake entity names, preventing over-strict rejection of `donde comercio?`.
+- Subjectless factual turns with no trusted wiki anchor now fail closed with a local `result=no_match` block instead of silently returning no wiki context and allowing the model to improvise.
+- Wiki anchors are now updated only after local subject/category existence was actually verified. Unknown direct entities clear an older unrelated anchor; known entities may remain anchored even when the exact requested property is undocumented.
+- Preserves the 1.7.16 entity/fact evidence gates, reverse-drop validation, named-entity anti-hallucination guard, group threading and SMART behavior.
+- No second OpenAI request, classifier, embedding, retry or external lookup was added. All routing and verification remains local Java over the existing in-memory wiki index.
+- Regression coverage expanded to 94 JUnit test methods plus source-structure validation.
+
 ## 1.7.16 - Wiki retrieval audit / fact-scoped grounding
 
 - Fixes the failing `propertyOnlyWikiQuestionsRemainFollowUps` regression: `y cuanta vida tiene?`, `que habilidades tiene?`, `que probabilidad tiene?` and equivalent property-only wording no longer creates a fake independent subject.
