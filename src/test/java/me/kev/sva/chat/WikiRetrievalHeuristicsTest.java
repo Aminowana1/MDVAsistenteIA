@@ -322,4 +322,252 @@ final class WikiRetrievalHeuristicsTest {
     }
   }
 
+  @Test
+  void propertyOnlyWikiQuestionsWorkWithOrWithoutLeadingAnd() {
+    for (String raw : List.of(
+        "cuanta vida tiene?",
+        "cuanta vida maxima tiene exactamente?",
+        "que habilidades tiene?",
+        "cuanto dura?",
+        "donde sale?",
+        "donde aparece?",
+        "donde lo hallo?",
+        "como lo saco?",
+        "que dropea?",
+        "quienes lo dropean?")) {
+      String normalized = ConversationManager.normalizeForSearch(raw);
+      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+    }
+  }
+
+  @Test
+  void explicitSubjectTurnsTheSamePropertyQuestionIntoDirectWikiLookup() {
+    for (String raw : List.of(
+        "iso cuanta vida tiene Galumrog?",
+        "iso que habilidades tiene el Hierofante del Eclipse?",
+        "iso donde sale Viridita?",
+        "iso donde vive Galumrog?",
+        "iso que dropea Zorok?",
+        "iso que materiales necesita Mango Resinoso?",
+        "iso que arma usa Galumrog?")) {
+      String normalized = ConversationManager.normalizeForSearch(raw);
+      assertTrue(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
+      assertFalse(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
+      assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(raw), raw);
+    }
+  }
+
+  @Test
+  void unknownSingleTokenEntityCannotBeProvedByGenericDropPages() {
+    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso que dropea Zorok?",
+        "mobs-goblins-common",
+        "Goblins comunes, estadísticas y drops",
+        "Goblin Arquero. Drops: 1 Esencia del Bosque: 20%."));
+    assertFalse(ConversationManager.candidateMatchesWikiTopic(
+        "iso que dropea Zorok?",
+        "mobs-goblins-common",
+        "Goblins comunes, estadísticas y drops",
+        "Goblin Arquero. Drops: 1 Esencia del Bosque: 20%."));
+
+    assertTrue(ConversationManager.candidateMatchesWikiTopic(
+        "iso que dropea Galumrog?",
+        "lore-galumrog",
+        "Galumrog, líder de la Hueste Insepulta",
+        "Galumrog es el gran líder de la Hueste Insepulta."));
+  }
+
+  @Test
+  void directEssenceQueryMatchesEssenceKnowledgeNotPreviousMangoTopic() {
+    assertTrue(ConversationManager.candidateMatchesWikiTopic(
+        "iso como consigo esencia del bosque?",
+        "obtain-faction-materials-t1",
+        "Cómo conseguir Esencia del Bosque, Corteza Viva y otros materiales",
+        "Esencia del Bosque: Se obtiene principalmente derrotando criaturas del Bosque Viviente."));
+    assertFalse(ConversationManager.candidateMatchesWikiTopic(
+        "iso como consigo esencia del bosque?",
+        "obtain-wood-crafted-materials",
+        "Cómo fabricar Mango Resinoso y Mango Arcano",
+        "Mango Resinoso: 9 Ramas Resinosas -> 1 Mango Resinoso."));
+  }
+
+  @Test
+  void requestedPropertyNounDoesNotReplaceTheActualNamedSubject() {
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso que habilidades tiene el Hierofante del Eclipse?",
+        "mob-acolitos-hierofante-eclipse",
+        "Hierofante del Eclipse, jefe lunar, estadísticas y fases",
+        "Hierofante del Eclipse: Lluvia del Eclipse y Juicio del Cénit."));
+
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso que materiales necesita Mango Resinoso?",
+        "obtain-wood-crafted-materials",
+        "Mango Resinoso y Mango Arcano",
+        "Mango Resinoso: 9 Ramas Resinosas -> 1 Mango Resinoso."));
+
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        "iso que arma usa Galumrog?",
+        "lore-galumrog",
+        "Galumrog, líder de la Hueste Insepulta",
+        "Galumrog es el gran líder de la Hueste Insepulta."));
+  }
+
+  @Test
+  void subjectlessNaturalFactPhrasesStayOnThePreviousWikiSubject() {
+    for (String raw : List.of(
+        "que probabilidad tiene?",
+        "que porcentaje tiene?",
+        "que mobs la dropean?",
+        "que bichos la dropean?",
+        "para que sirve?",
+        "como funciona?",
+        "que hace?",
+        "como lo saco?",
+        "donde lo encuentro?")) {
+      String normalized = ConversationManager.normalizeForSearch(raw);
+      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+    }
+  }
+
+  @Test
+  void multiWordEntityNameCannotBeProvedByTwoDifferentNearbyPhrases() {
+    String query = "iso cuanta vida tiene el Hierofante del Eclipse?";
+    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        query,
+        "mobs-acolitos-hierofante-summons",
+        "Fragmento del Hierofante, Corona del Eclipse e invocaciones",
+        "Fragmento de la Totalidad: Vida base: 20. Habilidad del Hierofante."));
+    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+        query,
+        "mob-acolitos-hierofante-eclipse",
+        "Hierofante del Eclipse, jefe lunar",
+        "Hierofante del Eclipse: Vida base: 500."));
+  }
+
+  @Test
+  void namedEntityExistenceDoesNotInventAMissingRequestedProperty() {
+    String galumrogLore = """
+        Galumrog es el gran líder de la Hueste Insepulta.
+        Habita una de las regiones más oscuras y profundas de la Disformidad.
+        """;
+
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso que dropea Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso cuanta vida tiene Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso que arma usa Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
+    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso donde vive Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
+  }
+
+  @Test
+  void craftingEvidenceMustDescribeTheRequestedOutputNotJustUseItAsIngredient() {
+    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso como se craftea Mango Resinoso?",
+        "obtain-wood-crafted-materials",
+        "Cómo conseguir Mango Resinoso",
+        "Mango Resinoso:\nSe fabrica con:\n9 Ramas Resinosas → 1 Mango Resinoso."));
+
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso como se craftea Mango Resinoso?",
+        "crafting-melee-t1",
+        "Crafteos de espadas",
+        "Espada Hoja:\n2 Nudos Vivos + 1 Mango Resinoso → 1 Espada Hoja."));
+
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso que materiales necesita Mango Resinoso?",
+        "materials-mining-t2",
+        "Materiales Tier 2, Mango Resinoso",
+        "Mango Resinoso [Especial / Tier 2]: Mango endurecido con savia."));
+  }
+
+  @Test
+  void requestedStatsAreScopedToTheNamedEntryInsideMultiEntityPages() {
+    String multi = """
+        Goblin Arquero:
+        Vida base: 22.
+        Drops:
+        - 1 Esencia del Bosque: 20%.
+
+        Goblin Fuerte:
+        Vida base: 30.
+        """;
+    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso cuanta vida tiene Goblin Arquero?",
+        "mobs-goblins-common", "Goblins comunes", multi));
+    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso que dropea Goblin Arquero?",
+        "mobs-goblins-common", "Goblins comunes", multi));
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "iso que habilidades tiene Goblin Arquero?",
+        "mobs-goblins-common", "Goblins comunes", multi));
+  }
+
+  @Test
+  void followUpPropertyUsesTheRememberedEntityEntryNotNeighborStats() {
+    String multi = """
+        Goblin Arquero:
+        Vida base: 22.
+        Drops:
+        - 1 Esencia del Bosque: 20%.
+
+        Goblin Asaltante:
+        Vida base: 22.
+        Habilidades:
+        - Esquiva Sombría.
+        """;
+
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "y que habilidades tiene?",
+        "iso que sabes del Goblin Arquero?",
+        "mobs-goblins-common", "Goblins comunes", multi));
+    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+        "y cuanta vida tiene?",
+        "iso que sabes del Goblin Arquero?",
+        "mobs-goblins-common", "Goblins comunes", multi));
+  }
+
+  @Test
+  void reverseDropFollowUpCanUseDropListsWhereTheItemIsNotAnEntryHeading() {
+    String goblins = """
+        Goblin Arquero:
+        Vida base: 22.
+        Drops:
+        - 1 Carne de Goblin: 60%.
+        - 1 Esencia del Bosque: 20%.
+        """;
+
+    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+        "y que mobs la dropean?",
+        "iso como consigo esencia del bosque?",
+        "mobs-goblins-common", "Goblins comunes", goblins));
+
+    String unrelatedDrop = """
+        Esencia del Bosque aparece mencionada en la introducción.
+
+        Goblin Arquero:
+        Drops:
+        - 1 Carne de Goblin: 60%.
+        """;
+    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+        "y que mobs la dropean?",
+        "iso como consigo esencia del bosque?",
+        "mobs-goblins-common", "Goblins comunes", unrelatedDrop));
+  }
+
+  @Test
+  void localFallbackNeverGuessesAResolvedSubjectForSubjectlessWikiFollowUps() {
+    String block = """
+        [WIKI REQUEST speaker=Aminowana query='y cuanta vida tiene?']
+        [mobs-goblins-common] Goblin Arquero:
+        Vida base: 22.
+        """;
+    assertTrue(ConversationManager.extractWikiFallbackAnswer(
+        "y cuanta vida tiene?", block).isBlank());
+  }
+
 }

@@ -1,7 +1,19 @@
-# ServerAssistant 1.7.15
+# ServerAssistant 1.7.16
 
-ServerAssistant 1.7.15 keeps the 1.7.14 strict entity grounding and makes wiki follow-up routing direct-first: a complete new factual question never inherits the previous wiki topic, while genuinely incomplete follow-ups reuse one tiny local per-player subject anchor. The architecture remains **one global conversation** with **one model request per scene**.
+ServerAssistant 1.7.16 hardens the local wiki router after live regression testing: property-only follow-ups stay attached to the verified subject, fact evidence is scoped to the correct entity entry, reverse drop questions are validated separately, and unsupported facts fail closed. The architecture remains **one global conversation** with **one model request per scene**; no classifier/model request was added.
 
+## 1.7.16 wiki retrieval audit and hardening
+
+- Fixes `y cuanta vida tiene?` / `cuanta vida maxima tiene?` being misread as new subjects. Generic stat/property words are now explicitly excluded from wiki identity terms, so these remain subjectless follow-ups.
+- A subjectless factual follow-up is searched only when the same player has a live, immediately relevant wiki subject anchor. Without one, Java skips the wiki instead of searching generic `vida`, `drops`, `rareza`, etc. across all sections.
+- Fact evidence is now scoped to the remembered entity entry for property/craft/function and subject-centric drop questions. A page mentioning `Goblin Arquero` can no longer borrow abilities or stats from `Goblin Asaltante` later in the same section.
+- Reverse drop questions such as `y que mobs la dropean?` use a separate relation check: the remembered item must occur inside nearby drop/acquisition evidence, so unrelated Drops blocks do not prove the answer.
+- Multi-word entity names must occur as one compact name. Separate phrases such as `Fragmento del Hierofante` and `Corona del Eclipse` cannot jointly prove `Hierofante del Eclipse`.
+- Existence and requested-fact evidence are separate. A lore page may prove that Galumrog exists without proving an exact life value, weapon or drop table. Missing requested facets become `result=no_match` rather than invitations to improvise.
+- The emergency local wiki extractor refuses to guess a subject for subjectless follow-ups; this removes another path for cross-entity factual leakage when a provider returns an empty reply.
+- GitHub Actions now runs `validate_source.py` before Maven to catch duplicate JUnit methods, duplicate exact Java method signatures, duplicate `Set.of(...)` literals, conflict markers, version drift and accidental committed OpenAI keys before compilation.
+- All changes are local Java/RAM logic. There is still exactly the same normal provider request for the scene and no extra OpenAI request, classifier, embedding call or retry.
+- The source now contains 80 JUnit regression methods, and the GitHub workflow runs a source-structure validator before Maven so copy/paste duplicates fail early.
 
 ## 1.7.15 direct-first wiki follow-ups
 

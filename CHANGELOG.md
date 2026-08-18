@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.16 - Wiki retrieval audit / fact-scoped grounding
+
+- Fixes the failing `propertyOnlyWikiQuestionsRemainFollowUps` regression: `y cuanta vida tiene?`, `que habilidades tiene?`, `que probabilidad tiene?` and equivalent property-only wording no longer creates a fake independent subject.
+- Subjectless factual follow-ups now require a live per-player wiki anchor from the immediately previous wiki scene; otherwise local retrieval is skipped safely instead of searching generic property words.
+- Adds entity-scoped fact evidence for property, crafting, function and subject-centric drop questions so stats/abilities/recipes from a neighboring entry in the same wiki section cannot leak into the requested entity.
+- Adds separate reverse-drop evidence validation for questions such as `que mobs la dropean?`: the remembered item/material must occur near actual drop/acquisition evidence.
+- Tightens multi-word entity verification so two nearby but unrelated phrases cannot jointly prove a made-up compound entity name.
+- Separates entity existence from requested-fact existence: a page that proves an entity exists cannot answer life, drops, weapons, price, abilities, etc. unless that fact type is actually present.
+- Local fallback extraction no longer guesses the missing subject of subjectless wiki follow-ups.
+- Adds `validate_source.py` to the GitHub workflow before Maven to catch duplicate tests/method signatures, duplicate `Set.of` literals, merge markers, version mismatches and obvious committed OpenAI keys.
+- No additional model/API call, embedding, classifier or retry was added. Wiki ranking, subject routing and all new safety checks are Java-local over the existing in-memory index.
+- Regression coverage is expanded to 80 JUnit test methods; the current wiki routing helpers were also audited against the 220-section MDVCRAFT wiki used in live testing.
+
 ## 1.7.15 - Direct-first wiki subjects
 
 - Wiki retrieval now treats every self-contained factual question as a fresh direct subject, even when it uses continuation-like wording such as `como consigo`.
