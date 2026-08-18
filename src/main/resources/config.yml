@@ -21,6 +21,13 @@ ai:
   temperature: 0.75
   max-requests-per-minute: 12
 
+  # Diagnostic per request. Uses the exact token counters returned by the AI provider.
+  # Example console line:
+  # AI token usage: scene=42 provider=OpenAI model=gpt-4o-mini input=1810 cached=1024 output=64 total=1874 players=Aminowana
+  # `cached` is already included inside `input`; it is shown separately only to reveal cache hits.
+  usage-debug:
+    enabled: false
+
   # OpenAI prompt caching (GPT path only). OpenAI still decides cache eligibility/hits.
   # ServerAssistant keeps CORE/personality/static capabilities at the beginning of
   # every request and places changing wiki/player/event/scene data afterwards.

@@ -2,6 +2,8 @@
 
 ## 1.7.17 - Natural wiki routing / live-chat hardening
 
+- Added optional per-request token usage debug (`ai.usage-debug.enabled`) logging input, cached, output and total tokens with scene/provider/model context.
+
 - Fixes natural conversational wrappers such as `me dices como consigo viridita?`, `me podes decir...`, `me podrias explicar...`, `sabrias decirme...`, `tenes idea de...` and `me ayudas a saber...` contaminating entity identity. Wrapper language is stripped/ignored locally before entity verification.
 - Fixes factual function/use questions that previously bypassed the wiki, including `para q me sirve un denar?`, `y para que me sirve la viridita?`, `que puedo hacer con X?` and `en que se usa X?`.
 - Fixes broad list questions with conversational `y`, especially `y que nodos hay?`, `y que otros minerales hay?`, `y que pociones hay?` and `y que comandos hay?`. These are direct category lookups, not follow-ups to the previous concrete entity.

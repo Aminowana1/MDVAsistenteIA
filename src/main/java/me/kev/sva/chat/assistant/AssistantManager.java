@@ -217,6 +217,7 @@ public class AssistantManager {
       try {
         if (!shutdown) {
           var response = runtime.client().chat().completions().create(params);
+          logTokenUsage(provider, requestContext, response);
           logPromptCacheUsage(provider, response);
           if (!response.choices().isEmpty()) {
             responseText = response.choices()
@@ -356,10 +357,72 @@ public class AssistantManager {
     }
   }
 
+  /**
+   * Per-request token diagnostics returned by the provider.
+   *
+   * <p>This is intentionally independent from prompt caching: when enabled, every
+   * successful request that returns a usage object is logged. Chat Completions names
+   * these counters prompt/completion tokens; the log uses input/output terminology
+   * because it is easier to compare with the OpenAI Usage dashboard.</p>
+   */
+  private void logTokenUsage(
+      ProviderSettings provider,
+      AssistantRequestContext requestContext,
+      com.openai.models.chat.completions.ChatCompletion response) {
+    if (!plugin.getConfig().getBoolean("ai.usage-debug.enabled", false)
+        || response == null) {
+      return;
+    }
+
+    String providerName = provider == null ? "unknown" : provider.displayName();
+    String model = provider == null || provider.model() == null ? "unknown" : provider.model();
+    long sceneId = requestContext == null ? -1L : requestContext.sceneId();
+    String sceneLabel = sceneId < 0 ? "?" : Long.toString(sceneId);
+    String players = requestContext == null ? "" : oneLineForUsageLog(requestContext.involvedPlayers());
+
+    response.usage().ifPresentOrElse(usage -> {
+      long input = usage.promptTokens();
+      long output = usage.completionTokens();
+      long total = input + output;
+      long cached = usage.promptTokensDetails()
+          .flatMap(details -> details.cachedTokens())
+          .orElse(0L);
+
+      StringBuilder line = new StringBuilder("AI token usage: scene=")
+          .append(sceneLabel)
+          .append(" provider=").append(providerName)
+          .append(" model=").append(model)
+          .append(" input=").append(input)
+          .append(" cached=").append(cached)
+          .append(" output=").append(output)
+          .append(" total=").append(total);
+      if (!players.isBlank()) {
+        line.append(" players=").append(players);
+      }
+      plugin.getLogger().info(line.toString());
+    }, () -> plugin.getLogger().info(
+        "AI token usage: scene=" + sceneLabel
+            + " provider=" + providerName
+            + " model=" + model
+            + " usage=unavailable"));
+  }
+
+  private static String oneLineForUsageLog(String value) {
+    if (value == null || value.isBlank()) return "";
+    String oneLine = value.replace('\n', ' ').replace('\r', ' ').trim();
+    if (oneLine.length() > 160) {
+      return oneLine.substring(0, 157) + "...";
+    }
+    return oneLine;
+  }
+
   private void logPromptCacheUsage(
       ProviderSettings provider,
       com.openai.models.chat.completions.ChatCompletion response) {
-    if (!isOpenAIPromptCacheEnabled(provider)
+    // The new per-request debug already includes cached tokens, so avoid duplicate
+    // console lines if both the legacy and new diagnostics are enabled.
+    if (plugin.getConfig().getBoolean("ai.usage-debug.enabled", false)
+        || !isOpenAIPromptCacheEnabled(provider)
         || !plugin.getConfig().getBoolean("ai.prompt-cache.log-usage", false)
         || response == null) {
       return;
