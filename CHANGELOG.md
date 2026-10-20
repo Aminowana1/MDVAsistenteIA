@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Internal: `ConversationManager` (5,100 lines) is split into focused classes in `me.kev.sva.chat`, with no behavior change. `ConversationManager` keeps the capture window and public entry points; `SceneBuilder` builds each scene, `SceneRequestQueue` runs the single AI pipeline and paced delivery, `ReplyPostProcessor` applies local reply fixes, `SmartFollowUpGate` owns SMART continuity, `GroupThreadSelector` and `ThreadAffinity` handle group threading, and `WikiRetriever`, `WikiQueryClassifier` and `WikiEvidence` handle local wiki retrieval. Shared records and logs live in their own small files. Tests now target the class that owns each helper.
+
 ## 1.7.19 - Realistic reply timing
 
 - New `chat.response-pacing` (enabled by default): the first line of a reply appears `base-delay-ms` (2500) after the player's message plus `(line length / chat.max-assistant-message-length) * length-delay-ms` (3500). The capture window and the AI's own latency are part of that budget; if they already took longer, the line is sent immediately.

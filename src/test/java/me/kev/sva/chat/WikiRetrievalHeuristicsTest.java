@@ -13,55 +13,55 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void naturalObtainAndDropWordingTriggersWiki() {
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("iso como se consigue mango resinoso?")));
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("iso que da el acolito necrotico")));
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("iso en que coordenadas puedo encontrar un mini jefe")));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("iso como se consigue mango resinoso?")));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("iso que da el acolito necrotico")));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("iso en que coordenadas puedo encontrar un mini jefe")));
   }
 
   @Test
   void smallTalkStillDoesNotBecomeKnowledgeIntent() {
-    assertFalse(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("iso como estas?")));
+    assertFalse(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("iso como estas?")));
   }
 
   @Test
   void deicticOpinionQuestionsStaySocialInsteadOfWikiNoMatch() {
-    assertTrue(ConversationManager.looksLikeDeicticOpinionSmallTalk(
-        ConversationManager.normalizeForSearch("iso q opinas de eso?")));
-    assertTrue(ConversationManager.looksLikeDeicticOpinionSmallTalk(
-        ConversationManager.normalizeForSearch("que piensas de eso iso")));
-    assertFalse(ConversationManager.looksLikeImplicitServerEntityQuestion(
-        "iso q opinas de eso?", ConversationManager.normalizeForSearch("iso q opinas de eso?")));
+    assertTrue(WikiQueryClassifier.looksLikeDeicticOpinionSmallTalk(
+        ChatText.normalizeForSearch("iso q opinas de eso?")));
+    assertTrue(WikiQueryClassifier.looksLikeDeicticOpinionSmallTalk(
+        ChatText.normalizeForSearch("que piensas de eso iso")));
+    assertFalse(WikiQueryClassifier.looksLikeImplicitServerEntityQuestion(
+        "iso q opinas de eso?", ChatText.normalizeForSearch("iso q opinas de eso?")));
   }
 
   @Test
   void shortUnknownServerEntityQuestionStillConsultsLocalWiki() {
     String raw = "epicardo y la espada ultracita? iso";
-    assertTrue(ConversationManager.looksLikeImplicitServerEntityQuestion(
-        raw, ConversationManager.normalizeForSearch(raw)));
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("iso quien es epicardo?")));
+    assertTrue(WikiQueryClassifier.looksLikeImplicitServerEntityQuestion(
+        raw, ChatText.normalizeForSearch(raw)));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("iso quien es epicardo?")));
   }
 
   @Test
   void commonMobTyposReceiveFuzzyCredit() {
-    assertTrue(ConversationManager.bestFuzzyTokenScore(
+    assertTrue(WikiEvidence.bestFuzzyTokenScore(
         "acohilitico", Set.of("acolito", "necrotico")) > 0);
-    assertTrue(ConversationManager.bestFuzzyTokenScore(
+    assertTrue(WikiEvidence.bestFuzzyTokenScore(
         "necrotido", Set.of("acolito", "necrotico")) > 0);
   }
 
   @Test
   void fuzzyEntityTermsPreferDedicatedWikiKey() {
-    String key = ConversationManager.normalizeForSearch("mob-hueste-acolito-necrotico".replace('-', ' '));
-    assertTrue(ConversationManager.allTermsMatchKey(
+    String key = ChatText.normalizeForSearch("mob-hueste-acolito-necrotico".replace('-', ' '));
+    assertTrue(WikiEvidence.allTermsMatchKey(
         Set.of("acohilitico", "necrotido"), key, Set.of("mob", "hueste", "acolito", "necrotico")));
-    assertFalse(ConversationManager.allTermsMatchKey(
+    assertFalse(WikiEvidence.allTermsMatchKey(
         Set.of("acohilitico", "necrotido"),
-        ConversationManager.normalizeForSearch("mobs-hueste-overview".replace('-', ' ')),
+        ChatText.normalizeForSearch("mobs-hueste-overview".replace('-', ' ')),
         Set.of("mobs", "hueste", "overview")));
   }
 
@@ -73,7 +73,7 @@ final class WikiRetrievalHeuristicsTest {
         Se fabrica con:
         9 Ramas Resinosas → 1 Mango Resinoso.
         """;
-    String craft = ConversationManager.extractWikiFallbackAnswer(
+    String craft = ReplyPostProcessor.extractWikiFallbackAnswer(
         "iso como se consigue mango resinoso?", craftBlock);
     assertTrue(craft.contains("9 Ramas Resinosas"));
 
@@ -87,40 +87,40 @@ final class WikiRetrievalHeuristicsTest {
         - 1-4 Huesos Profanos: 99%.
         - 1-3 Esencias de la Muerte: 99%.
         """;
-    String drops = ConversationManager.extractWikiFallbackAnswer(
+    String drops = ReplyPostProcessor.extractWikiFallbackAnswer(
         "iso que da el acolito necrotico", dropsBlock);
     assertTrue(drops.contains("1-4 Huesos Profanos"));
     assertTrue(drops.contains("1-3 Esencias de la Muerte"));
   }
   @Test
   void multiSpeakerCoverageRequiresExplicitNameForIndependentFacts() {
-    assertTrue(ConversationManager.responseCoversSpeaker(
+    assertTrue(ReplyPostProcessor.responseCoversSpeaker(
         List.of("Aminowana, se fabrica con 9 Ramas Resinosas"), "Aminowana"));
-    assertFalse(ConversationManager.responseCoversSpeaker(
+    assertFalse(ReplyPostProcessor.responseCoversSpeaker(
         List.of("calmense los dos, parecen viejas de pueblo xd"), "Aminowana"));
   }
 
   @Test
   void explicitGroupBridgeCanInheritSmartContinuityWithoutBroadChatterGuessing() {
-    assertTrue(ConversationManager.looksLikeExplicitGroupBridge("contale q estas bien"));
-    assertTrue(ConversationManager.looksLikeExplicitGroupBridge("decile que no exagere"));
-    assertFalse(ConversationManager.looksLikeExplicitGroupBridge("viste infinit"));
-    assertFalse(ConversationManager.looksLikeExplicitGroupBridge("ando minando hierro"));
+    assertTrue(ThreadAffinity.looksLikeExplicitGroupBridge("contale q estas bien"));
+    assertTrue(ThreadAffinity.looksLikeExplicitGroupBridge("decile que no exagere"));
+    assertFalse(ThreadAffinity.looksLikeExplicitGroupBridge("viste infinit"));
+    assertFalse(ThreadAffinity.looksLikeExplicitGroupBridge("ando minando hierro"));
   }
 
   @Test
   void groupThreadHeuristicsSeparateSideChatFromIsoldasExchange() {
-    assertTrue(ConversationManager.looksLikeGroupContinuation("si, es un ladron y un mezquino"));
-    assertFalse(ConversationManager.looksLikeGroupContinuation("yo tengo"));
-    assertTrue(ConversationManager.looksLikeSocialThreadInterjection(
+    assertTrue(ThreadAffinity.looksLikeGroupContinuation("si, es un ladron y un mezquino"));
+    assertFalse(ThreadAffinity.looksLikeGroupContinuation("yo tengo"));
+    assertTrue(ThreadAffinity.looksLikeSocialThreadInterjection(
         "Amino dejate de hacerte el que esta bien"));
-    assertTrue(ConversationManager.referencesAnyParticipantAlias(
+    assertTrue(ThreadAffinity.referencesAnyParticipantAlias(
         "Amino dejate de hacerte el que esta bien", Set.of("Aminowana")));
-    assertTrue(ConversationManager.sharesConversationTopic(
+    assertTrue(ThreadAffinity.sharesConversationTopic(
         "Amino dejate de hacerte el que esta bien",
         "bien gracias, que haces?",
         Set.of("Aminowana")));
-    assertFalse(ConversationManager.sharesConversationTopic(
+    assertFalse(ThreadAffinity.sharesConversationTopic(
         "Amino, alguien tiene piedra?",
         "bien gracias, que haces?",
         Set.of("Aminowana")));
@@ -128,14 +128,14 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void affinityRouterPrefersActiveIsoldaThreadForLinkedSocialReply() {
-    int isolda = ConversationManager.localThreadAffinity(
+    int isolda = ThreadAffinity.localThreadAffinity(
         "Amino dejate de hacerte el que esta bien",
         "bien gracias, que haces?",
         "bien gracias, que haces?",
         Set.of("Aminowana"),
         900L,
         false);
-    int side = ConversationManager.localLateralAffinity(
+    int side = ThreadAffinity.localLateralAffinity(
         "Amino dejate de hacerte el que esta bien",
         "dile la verdad",
         "Pedrox",
@@ -146,14 +146,14 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void affinityRouterKeepsEllipticalAnswerInCompetingStoneSideThread() {
-    int isolda = ConversationManager.localThreadAffinity(
+    int isolda = ThreadAffinity.localThreadAffinity(
         "yo tengo",
         "bien gracias, que haces?",
         "bien gracias, que haces?",
         Set.of("Aminowana"),
         700L,
         false);
-    int side = ConversationManager.localLateralAffinity(
+    int side = ThreadAffinity.localLateralAffinity(
         "yo tengo",
         "oye alguien tiene piedra?",
         "Pedrox",
@@ -164,7 +164,7 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void affinityRouterCanUnderstandUnlistedContextualContradiction() {
-    int isolda = ConversationManager.localThreadAffinity(
+    int isolda = ThreadAffinity.localThreadAffinity(
         "eso no tiene ningun sentido",
         "Aminowana dice que esta perfectamente bien",
         "Aminowana dice que esta perfectamente bien",
@@ -180,28 +180,28 @@ final class WikiRetrievalHeuristicsTest {
         [WIKI REQUEST speaker=Aminowana query='epicardo y la espada ultracita' result=no_match]
         No trusted wiki section matched this server-knowledge question; do not guess a server-specific fact.
         """;
-    assertTrue(ConversationManager.wikiBlockIsNoMatch(noMatch));
-    assertTrue(ConversationManager.extractWikiFallbackAnswer(
+    assertTrue(ReplyPostProcessor.wikiBlockIsNoMatch(noMatch));
+    assertTrue(ReplyPostProcessor.extractWikiFallbackAnswer(
         "epicardo y la espada ultracita? iso", noMatch).isBlank());
   }
 
   @Test
   void concreteNamedEntityGateRejectsGenericRelatedPages() {
-    assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(
+    assertTrue(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(
         "iso donde consigo la espada de artera"));
-    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso donde consigo la espada de artera",
         "spawn-saurios",
         "Dónde aparecen los Saurios, junglas y pantanos",
         "Los Saurios aparecen en Jungla y Pantano."));
 
-    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso que sabes del arco de la jungla",
         "spawn-saurios",
         "Dónde aparecen los Saurios, junglas y pantanos",
         "Biomas: Jungla, Pantano."));
 
-    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso donde esta la espada de nagamuta",
         "weapons-swords-common",
         "Espadas comunes, Espada Hoja, Espada Orco y Filo Escarchado",
@@ -210,19 +210,19 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void concreteNamedEntityGateKeepsRealNamedItemsAndCompactIds() {
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso donde consigo espada hoja",
         "weapons-swords-common",
         "Espadas comunes y Espada Hoja",
         "Espada Hoja: espada fabricada con materiales del bosque."));
 
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso como hago el arco bosque",
         "crafting-ranged-t1",
         "Crafteos de arcos y ballestas",
         "ARCOBOSQUE: 2 Nudos Vivos + 2 Mangos Resinosos."));
 
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso donde consigo la espada del duelista necrotido",
         "weapon-necrotic-duelist-sword",
         "Espada del Duelista Necrótido",
@@ -231,78 +231,78 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void factualContinuationKeepsPreviousWikiSubject() {
-    assertTrue(ConversationManager.looksLikeWikiFollowUp(
-        ConversationManager.normalizeForSearch("sisi decime porfa")));
-    assertTrue(ConversationManager.looksLikeWikiFollowUp(
-        ConversationManager.normalizeForSearch("dale decime mas")));
+    assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(
+        ChatText.normalizeForSearch("sisi decime porfa")));
+    assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(
+        ChatText.normalizeForSearch("dale decime mas")));
   }
 
   @Test
   void noMatchReplySubjectDetectorCatchesInventedEntityClaims() {
-    assertTrue(ConversationManager.replyMentionsConcreteNoMatchSubject(
+    assertTrue(ReplyPostProcessor.replyMentionsConcreteNoMatchSubject(
         "La espada de Nagamuta está en las Ruinas de Zorok.",
         "iso donde esta la espada de nagamuta?"));
-    assertTrue(ConversationManager.replyMentionsConcreteNoMatchSubject(
+    assertTrue(ReplyPostProcessor.replyMentionsConcreteNoMatchSubject(
         "El arco de la jungla se fabrica con madera y cuerdas.",
         "iso que sabes del arco de la jungla?"));
-    assertFalse(ConversationManager.replyMentionsConcreteNoMatchSubject(
+    assertFalse(ReplyPostProcessor.replyMentionsConcreteNoMatchSubject(
         "no tengo información fiable sobre eso",
         "iso donde esta la espada de nagamuta?"));
   }
 
   @Test
   void completeNewKnowledgeQuestionDoesNotInheritPreviousWikiTopic() {
-    String essence = ConversationManager.normalizeForSearch(
+    String essence = ChatText.normalizeForSearch(
         "iso como consigo esencia del bosque?");
-    String mango = ConversationManager.normalizeForSearch(
+    String mango = ChatText.normalizeForSearch(
         "iso como se craftea el mango resinoso?");
 
-    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(essence));
-    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(mango));
-    assertFalse(ConversationManager.looksLikeWikiFollowUp(essence));
-    assertFalse(ConversationManager.looksLikeWikiFollowUp(mango));
-    assertTrue(ConversationManager.buildWikiSubjectAnchor(essence).contains("esencia"));
-    assertTrue(ConversationManager.buildWikiSubjectAnchor(essence).contains("bosque"));
-    assertFalse(ConversationManager.buildWikiSubjectAnchor(essence).contains("mango"));
-    assertTrue(ConversationManager.buildWikiSubjectAnchor(mango).contains("mango"));
-    assertTrue(ConversationManager.buildWikiSubjectAnchor(mango).contains("resinoso"));
+    assertTrue(WikiQueryClassifier.wikiQueryHasIndependentSubject(essence));
+    assertTrue(WikiQueryClassifier.wikiQueryHasIndependentSubject(mango));
+    assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(essence));
+    assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(mango));
+    assertTrue(WikiQueryClassifier.buildWikiSubjectAnchor(essence).contains("esencia"));
+    assertTrue(WikiQueryClassifier.buildWikiSubjectAnchor(essence).contains("bosque"));
+    assertFalse(WikiQueryClassifier.buildWikiSubjectAnchor(essence).contains("mango"));
+    assertTrue(WikiQueryClassifier.buildWikiSubjectAnchor(mango).contains("mango"));
+    assertTrue(WikiQueryClassifier.buildWikiSubjectAnchor(mango).contains("resinoso"));
   }
 
   @Test
   void onlySubjectlessKnowledgeContinuationInheritsWikiTopic() {
-    String where = ConversationManager.normalizeForSearch("y donde sale?");
-    String obtain = ConversationManager.normalizeForSearch("y como se consigue?");
-    String drops = ConversationManager.normalizeForSearch("y que mobs la dropean?");
+    String where = ChatText.normalizeForSearch("y donde sale?");
+    String obtain = ChatText.normalizeForSearch("y como se consigue?");
+    String drops = ChatText.normalizeForSearch("y que mobs la dropean?");
 
-    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(where));
-    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(obtain));
-    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(drops));
-    assertTrue(ConversationManager.looksLikeWikiFollowUp(where));
-    assertTrue(ConversationManager.looksLikeWikiFollowUp(obtain));
-    assertTrue(ConversationManager.looksLikeWikiFollowUp(drops));
+    assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(where));
+    assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(obtain));
+    assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(drops));
+    assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(where));
+    assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(obtain));
+    assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(drops));
   }
 
   @Test
   void explicitSubjectAfterAndStillStaysDirect() {
-    String essence = ConversationManager.normalizeForSearch("y la esencia del bosque?");
-    String sword = ConversationManager.normalizeForSearch("y la espada hoja donde sale?");
-    String more = ConversationManager.normalizeForSearch("decime mas sobre viridita");
+    String essence = ChatText.normalizeForSearch("y la esencia del bosque?");
+    String sword = ChatText.normalizeForSearch("y la espada hoja donde sale?");
+    String more = ChatText.normalizeForSearch("decime mas sobre viridita");
 
-    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(essence));
-    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(sword));
-    assertTrue(ConversationManager.wikiQueryHasIndependentSubject(more));
-    assertFalse(ConversationManager.looksLikeWikiFollowUp(essence));
-    assertFalse(ConversationManager.looksLikeWikiFollowUp(sword));
-    assertFalse(ConversationManager.looksLikeWikiFollowUp(more));
+    assertTrue(WikiQueryClassifier.wikiQueryHasIndependentSubject(essence));
+    assertTrue(WikiQueryClassifier.wikiQueryHasIndependentSubject(sword));
+    assertTrue(WikiQueryClassifier.wikiQueryHasIndependentSubject(more));
+    assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(essence));
+    assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(sword));
+    assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(more));
   }
 
   @Test
   void craftedNamedMaterialAlsoUsesStrictExistenceGrounding() {
-    assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(
+    assertTrue(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(
         "iso como se craftea el mango resinoso"));
-    assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(
+    assertTrue(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(
         "iso como se craftea el mango ultracita"));
-    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso como se craftea el mango ultracita",
         "obtain-wood-crafted-materials",
         "Mango Resinoso y Mango Arcano",
@@ -317,9 +317,9 @@ final class WikiRetrievalHeuristicsTest {
         "y cuanta vida tiene?",
         "y que rareza es?",
         "y que habilidades tiene?")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
-      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+      String normalized = ChatText.normalizeForSearch(raw);
+      assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(normalized), raw);
     }
   }
 
@@ -336,9 +336,9 @@ final class WikiRetrievalHeuristicsTest {
         "como lo saco?",
         "que dropea?",
         "quienes lo dropean?")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
-      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+      String normalized = ChatText.normalizeForSearch(raw);
+      assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(normalized), raw);
     }
   }
 
@@ -352,28 +352,28 @@ final class WikiRetrievalHeuristicsTest {
         "iso que dropea Zorok?",
         "iso que materiales necesita Mango Resinoso?",
         "iso que arma usa Galumrog?")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertTrue(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
-      assertFalse(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
-      assertTrue(ConversationManager.looksLikeConcreteNamedEntityQuery(raw), raw);
+      String normalized = ChatText.normalizeForSearch(raw);
+      assertTrue(WikiQueryClassifier.wikiQueryHasIndependentSubject(normalized), raw);
+      assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(raw), raw);
     }
   }
 
   @Test
   void unknownSingleTokenEntityCannotBeProvedByGenericDropPages() {
-    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso que dropea Zorok?",
         "mobs-goblins-common",
         "Goblins comunes, estadísticas y drops",
         "Goblin Arquero. Drops: 1 Esencia del Bosque: 20%."));
-    assertFalse(ConversationManager.candidateMatchesWikiTopic(
+    assertFalse(WikiEvidence.candidateMatchesWikiTopic(
         "iso que dropea Zorok?",
         "mobs-goblins-common",
         "Goblins comunes, estadísticas y drops",
         "Goblin Arquero. Drops: 1 Esencia del Bosque: 20%."));
 
-    assertTrue(ConversationManager.candidateMatchesWikiTopic(
+    assertTrue(WikiEvidence.candidateMatchesWikiTopic(
         "iso que dropea Galumrog?",
         "lore-galumrog",
         "Galumrog, líder de la Hueste Insepulta",
@@ -382,12 +382,12 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void directEssenceQueryMatchesEssenceKnowledgeNotPreviousMangoTopic() {
-    assertTrue(ConversationManager.candidateMatchesWikiTopic(
+    assertTrue(WikiEvidence.candidateMatchesWikiTopic(
         "iso como consigo esencia del bosque?",
         "obtain-faction-materials-t1",
         "Cómo conseguir Esencia del Bosque, Corteza Viva y otros materiales",
         "Esencia del Bosque: Se obtiene principalmente derrotando criaturas del Bosque Viviente."));
-    assertFalse(ConversationManager.candidateMatchesWikiTopic(
+    assertFalse(WikiEvidence.candidateMatchesWikiTopic(
         "iso como consigo esencia del bosque?",
         "obtain-wood-crafted-materials",
         "Cómo fabricar Mango Resinoso y Mango Arcano",
@@ -396,19 +396,19 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void requestedPropertyNounDoesNotReplaceTheActualNamedSubject() {
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso que habilidades tiene el Hierofante del Eclipse?",
         "mob-acolitos-hierofante-eclipse",
         "Hierofante del Eclipse, jefe lunar, estadísticas y fases",
         "Hierofante del Eclipse: Lluvia del Eclipse y Juicio del Cénit."));
 
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso que materiales necesita Mango Resinoso?",
         "obtain-wood-crafted-materials",
         "Mango Resinoso y Mango Arcano",
         "Mango Resinoso: 9 Ramas Resinosas -> 1 Mango Resinoso."));
 
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "iso que arma usa Galumrog?",
         "lore-galumrog",
         "Galumrog, líder de la Hueste Insepulta",
@@ -428,21 +428,21 @@ final class WikiRetrievalHeuristicsTest {
         "que hace?",
         "como lo saco?",
         "donde lo encuentro?")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized), raw);
-      assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+      String normalized = ChatText.normalizeForSearch(raw);
+      assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(normalized), raw);
     }
   }
 
   @Test
   void multiWordEntityNameCannotBeProvedByTwoDifferentNearbyPhrases() {
     String query = "iso cuanta vida tiene el Hierofante del Eclipse?";
-    assertFalse(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         query,
         "mobs-acolitos-hierofante-summons",
         "Fragmento del Hierofante, Corona del Eclipse e invocaciones",
         "Fragmento de la Totalidad: Vida base: 20. Habilidad del Hierofante."));
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         query,
         "mob-acolitos-hierofante-eclipse",
         "Hierofante del Eclipse, jefe lunar",
@@ -456,31 +456,31 @@ final class WikiRetrievalHeuristicsTest {
         Habita una de las regiones más oscuras y profundas de la Disformidad.
         """;
 
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso que dropea Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso cuanta vida tiene Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso que arma usa Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso donde vive Galumrog?", "lore-galumrog", "Galumrog y la Hueste", galumrogLore));
   }
 
   @Test
   void craftingEvidenceMustDescribeTheRequestedOutputNotJustUseItAsIngredient() {
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso como se craftea Mango Resinoso?",
         "obtain-wood-crafted-materials",
         "Cómo conseguir Mango Resinoso",
         "Mango Resinoso:\nSe fabrica con:\n9 Ramas Resinosas → 1 Mango Resinoso."));
 
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso como se craftea Mango Resinoso?",
         "crafting-melee-t1",
         "Crafteos de espadas",
         "Espada Hoja:\n2 Nudos Vivos + 1 Mango Resinoso → 1 Espada Hoja."));
 
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso que materiales necesita Mango Resinoso?",
         "materials-mining-t2",
         "Materiales Tier 2, Mango Resinoso",
@@ -498,13 +498,13 @@ final class WikiRetrievalHeuristicsTest {
         Goblin Fuerte:
         Vida base: 30.
         """;
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso cuanta vida tiene Goblin Arquero?",
         "mobs-goblins-common", "Goblins comunes", multi));
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso que dropea Goblin Arquero?",
         "mobs-goblins-common", "Goblins comunes", multi));
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso que habilidades tiene Goblin Arquero?",
         "mobs-goblins-common", "Goblins comunes", multi));
   }
@@ -523,11 +523,11 @@ final class WikiRetrievalHeuristicsTest {
         - Esquiva Sombría.
         """;
 
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "y que habilidades tiene?",
         "iso que sabes del Goblin Arquero?",
         "mobs-goblins-common", "Goblins comunes", multi));
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "y cuanta vida tiene?",
         "iso que sabes del Goblin Arquero?",
         "mobs-goblins-common", "Goblins comunes", multi));
@@ -543,7 +543,7 @@ final class WikiRetrievalHeuristicsTest {
         - 1 Esencia del Bosque: 20%.
         """;
 
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "y que mobs la dropean?",
         "iso como consigo esencia del bosque?",
         "mobs-goblins-common", "Goblins comunes", goblins));
@@ -555,7 +555,7 @@ final class WikiRetrievalHeuristicsTest {
         Drops:
         - 1 Carne de Goblin: 60%.
         """;
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "y que mobs la dropean?",
         "iso como consigo esencia del bosque?",
         "mobs-goblins-common", "Goblins comunes", unrelatedDrop));
@@ -568,7 +568,7 @@ final class WikiRetrievalHeuristicsTest {
         [mobs-goblins-common] Goblin Arquero:
         Vida base: 22.
         """;
-    assertTrue(ConversationManager.extractWikiFallbackAnswer(
+    assertTrue(ReplyPostProcessor.extractWikiFallbackAnswer(
         "y cuanta vida tiene?", block).isBlank());
   }
 
@@ -577,14 +577,14 @@ final class WikiRetrievalHeuristicsTest {
   @Test
   void politeConversationalWrappersDoNotBecomeEntityIdentity() {
     String raw = "me dices como consigo viridita?";
-    String normalized = ConversationManager.normalizeForSearch(raw);
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(normalized));
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    String normalized = ChatText.normalizeForSearch(raw);
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(normalized));
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         raw,
         "ore-viridita",
         "Viridita, veta de Viridita, dónde encontrar Viridita, altura y poder de pico",
         "Viridita: Se encuentra entre Y -15 y Y 0. Requiere Poder de Pico 4."));
-    assertTrue(ConversationManager.canonicalWikiRoutingQuery(raw).startsWith("como consigo viridita"));
+    assertTrue(WikiQueryClassifier.canonicalWikiRoutingQuery(raw).startsWith("como consigo viridita"));
 
     for (String variant : List.of(
         "iso me puedes decir como consigo viridita?",
@@ -594,8 +594,8 @@ final class WikiRetrievalHeuristicsTest {
         "quisiera saber como consigo viridita?",
         "quiero saber sobre viridita",
         "podrias contarme sobre viridita?")) {
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-          ConversationManager.normalizeForSearch(variant)), variant);
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+          ChatText.normalizeForSearch(variant)), variant);
     }
   }
 
@@ -606,8 +606,8 @@ final class WikiRetrievalHeuristicsTest {
         "para q me sirve un denar?",
         "de que sirve la viridita?",
         "la viridita sirve de algo?")) {
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-          ConversationManager.normalizeForSearch(raw)), raw);
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+          ChatText.normalizeForSearch(raw)), raw);
     }
   }
 
@@ -619,35 +619,35 @@ final class WikiRetrievalHeuristicsTest {
         "que pociones?",
         "iso que comandos hay?",
         "que razas hay?")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertTrue(ConversationManager.looksLikeBroadWikiCategoryQuery(normalized), raw);
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
-      assertFalse(ConversationManager.looksLikeConcreteNamedEntityQuery(raw), raw);
-      assertFalse(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
+      String normalized = ChatText.normalizeForSearch(raw);
+      assertTrue(WikiQueryClassifier.looksLikeBroadWikiCategoryQuery(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
+      assertFalse(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(raw), raw);
+      assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(normalized), raw);
     }
   }
 
   @Test
   void broadCategoryBoostsPreferAuthoritativeOverviewSections() {
-    assertTrue(ConversationManager.wikiBroadCategoryBoost(
+    assertTrue(WikiEvidence.wikiBroadCategoryBoost(
         "que otros minerales hay", "obtain-mining-materials", false)
-        > ConversationManager.wikiBroadCategoryBoost(
+        > WikiEvidence.wikiBroadCategoryBoost(
             "que otros minerales hay", "ore-viridita", true));
-    assertTrue(ConversationManager.wikiBroadCategoryBoost(
+    assertTrue(WikiEvidence.wikiBroadCategoryBoost(
         "que nodos hay", "tree-nodes-overview", false) >= 24);
-    assertTrue(ConversationManager.wikiBroadCategoryBoost(
+    assertTrue(WikiEvidence.wikiBroadCategoryBoost(
         "que pociones", "crafting-consumables-basic", false) >= 24);
-    assertTrue(ConversationManager.wikiBroadCategoryBoost(
+    assertTrue(WikiEvidence.wikiBroadCategoryBoost(
         "que comandos hay", "commands-help", false) >= 22);
   }
 
   @Test
   void deicticTravelQuestionStaysOnPreviousPlaceSubject() {
     String raw = "como llego hasta alli?";
-    String normalized = ConversationManager.normalizeForSearch(raw);
-    assertFalse(ConversationManager.wikiQueryHasIndependentSubject(normalized));
-    assertTrue(ConversationManager.looksLikeWikiFollowUp(normalized));
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    String normalized = ChatText.normalizeForSearch(raw);
+    assertFalse(WikiQueryClassifier.wikiQueryHasIndependentSubject(normalized));
+    assertTrue(WikiQueryClassifier.looksLikeWikiFollowUp(normalized));
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         raw,
         "que es Gamura?",
         "lore-gamura",
@@ -657,15 +657,15 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void shortAndSubjectSwapCanInheritPreviousWikiIntentWithoutOldSubject() {
-    assertTrue(ConversationManager.looksLikeEllipticalWikiSubjectSwap(
-        ConversationManager.normalizeForSearch("y los nudos vivos")));
-    assertTrue(ConversationManager.looksLikeEllipticalWikiSubjectSwap(
-        ConversationManager.normalizeForSearch("y la umbrita")));
-    assertFalse(ConversationManager.looksLikeEllipticalWikiSubjectSwap(
-        ConversationManager.normalizeForSearch("y que otros minerales hay?")));
-    assertFalse(ConversationManager.looksLikeEllipticalWikiSubjectSwap(
-        ConversationManager.normalizeForSearch("y para que sirve la viridita?")));
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertTrue(WikiQueryClassifier.looksLikeEllipticalWikiSubjectSwap(
+        ChatText.normalizeForSearch("y los nudos vivos")));
+    assertTrue(WikiQueryClassifier.looksLikeEllipticalWikiSubjectSwap(
+        ChatText.normalizeForSearch("y la umbrita")));
+    assertFalse(WikiQueryClassifier.looksLikeEllipticalWikiSubjectSwap(
+        ChatText.normalizeForSearch("y que otros minerales hay?")));
+    assertFalse(WikiQueryClassifier.looksLikeEllipticalWikiSubjectSwap(
+        ChatText.normalizeForSearch("y para que sirve la viridita?")));
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "como consigo nudos vivos",
         "obtain-tree-nodes",
         "Cómo conseguir Nudo Vivo, Tronco Corrupto, Nudo Rúnico y otros nodos",
@@ -674,7 +674,7 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void genericMultiEntityMetadataCannotAuthorizeMissingEntityStats() {
-    assertFalse(ConversationManager.candidateSupportsWikiFactIntent(
+    assertFalse(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso cuanta vida tiene Goblin Arquero?",
         "iso cuanta vida tiene Goblin Arquero?",
         "mobs-goblins-common",
@@ -693,10 +693,10 @@ final class WikiRetrievalHeuristicsTest {
         Daño a distancia: +3%.
         Daño mágico: +3%.
         """;
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "iso que hace la raza elfo?", "iso que hace la raza elfo?",
         "race-elf", description, content));
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         "que estadisticas tienen los elfos iso?", "que estadisticas tienen los elfos iso?",
         "race-elf", description, content));
   }
@@ -704,26 +704,26 @@ final class WikiRetrievalHeuristicsTest {
   @Test
   void raceWeaponRecommendationIsBroadAdviceNotInventedNamedWeapon() {
     String query = "iso que armas son mejores para la clase elfo";
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch(query)));
-    assertFalse(ConversationManager.looksLikeConcreteNamedEntityQuery(query));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch(query)));
+    assertFalse(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(query));
 
     String elf = "El Elfo tiene Maná máximo 32, Daño a distancia +3% y Daño mágico +3%.";
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         query, query, "race-elf", "Elfo, raza élfica, estadísticas del Elfo", elf));
-    assertTrue(ConversationManager.candidateSupportsWikiFactIntent(
+    assertTrue(WikiEvidence.candidateSupportsWikiFactIntent(
         query, query, "magic-weapons-common", "Armas mágicas comunes, bastones y cetros",
         "Las siguientes armas mágicas son de calidad Común. Bastón del Bosque: Daño mágico +50%."));
   }
 
   @Test
   void wikiRetryAndCommercePhrasingAreRecognizedWithoutAnotherModelCall() {
-    assertTrue(ConversationManager.looksLikeWikiMetaRetry(
-        ConversationManager.normalizeForSearch("busca en la wiki, en razas ahi aparece")));
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("donde comercio?")));
-    assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-        ConversationManager.normalizeForSearch("donde puedo comprar cosas?")));
+    assertTrue(WikiQueryClassifier.looksLikeWikiMetaRetry(
+        ChatText.normalizeForSearch("busca en la wiki, en razas ahi aparece")));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("donde comercio?")));
+    assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+        ChatText.normalizeForSearch("donde puedo comprar cosas?")));
   }
 
   @Test
@@ -735,15 +735,15 @@ final class WikiRetrievalHeuristicsTest {
         "y cuales minerales existen?",
         "decime los minerales",
         "nombrame los nodos")) {
-      String normalized = ConversationManager.normalizeForSearch(raw);
-      assertTrue(ConversationManager.looksLikeBroadWikiCategoryQuery(normalized), raw);
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
-      assertFalse(ConversationManager.looksLikeWikiFollowUp(normalized), raw);
-      assertFalse(ConversationManager.looksLikeConcreteNamedEntityQuery(raw), raw);
+      String normalized = ChatText.normalizeForSearch(raw);
+      assertTrue(WikiQueryClassifier.looksLikeBroadWikiCategoryQuery(normalized), raw);
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(normalized), raw);
+      assertFalse(WikiQueryClassifier.looksLikeWikiFollowUp(normalized), raw);
+      assertFalse(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery(raw), raw);
     }
-    assertTrue(ConversationManager.wikiBroadCategoryBoost(
+    assertTrue(WikiEvidence.wikiBroadCategoryBoost(
         "y que nodos hay", "tree-nodes-overview", false) >= 24);
-    assertTrue(ConversationManager.wikiBroadCategoryBoost(
+    assertTrue(WikiEvidence.wikiBroadCategoryBoost(
         "y que otros minerales hay", "obtain-mining-materials", false) >= 22);
   }
 
@@ -755,11 +755,11 @@ final class WikiRetrievalHeuristicsTest {
         "sabrias decirme donde encuentro viridita?",
         "tenes idea de donde sale viridita?",
         "me ayudas a saber como consigo viridita?")) {
-      String routed = ConversationManager.canonicalWikiRoutingQuery(raw);
+      String routed = WikiQueryClassifier.canonicalWikiRoutingQuery(raw);
       assertTrue(routed.contains("viridita"), raw + " -> " + routed);
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-          ConversationManager.normalizeForSearch(raw)), raw);
-      assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+          ChatText.normalizeForSearch(raw)), raw);
+      assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
           raw,
           "ore-viridita",
           "Viridita, veta de Viridita, dónde encontrar Viridita, altura y poder de pico",
@@ -776,11 +776,11 @@ final class WikiRetrievalHeuristicsTest {
         "en que se usa la viridita?",
         "donde comercio?",
         "donde puedo comprar cosas?")) {
-      assertTrue(ConversationManager.looksLikeLikelyWikiKnowledgeRequest(
-          ConversationManager.normalizeForSearch(raw)), raw);
+      assertTrue(WikiQueryClassifier.looksLikeLikelyWikiKnowledgeRequest(
+          ChatText.normalizeForSearch(raw)), raw);
     }
-    assertFalse(ConversationManager.looksLikeConcreteNamedEntityQuery("donde comercio?"));
-    assertTrue(ConversationManager.candidateStronglyMatchesConcreteEntity(
+    assertFalse(WikiQueryClassifier.looksLikeConcreteNamedEntityQuery("donde comercio?"));
+    assertTrue(WikiEvidence.candidateStronglyMatchesConcreteEntity(
         "para q me sirve un denar?",
         "economy-denar",
         "Denar, denares, moneda de MDVCRAFT, dinero, mercado",
@@ -789,9 +789,9 @@ final class WikiRetrievalHeuristicsTest {
 
   @Test
   void broadCategoryCanBecomeSafeLocalFollowUpAnchor() {
-    assertEquals("pocion", ConversationManager.buildWikiSubjectAnchor("que pociones?"));
-    assertEquals("nodo", ConversationManager.buildWikiSubjectAnchor("y que nodos hay?"));
-    assertEquals("mineral", ConversationManager.buildWikiSubjectAnchor("que otros minerales hay?"));
+    assertEquals("pocion", WikiQueryClassifier.buildWikiSubjectAnchor("que pociones?"));
+    assertEquals("nodo", WikiQueryClassifier.buildWikiSubjectAnchor("y que nodos hay?"));
+    assertEquals("mineral", WikiQueryClassifier.buildWikiSubjectAnchor("que otros minerales hay?"));
   }
 
 

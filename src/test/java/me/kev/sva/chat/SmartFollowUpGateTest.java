@@ -11,19 +11,19 @@ class SmartFollowUpGateTest {
 
   @Test
   void naturalRepliesRemainStrongSmartContinuations() {
-    int chatty = ConversationManager.smartFollowUpAffinity(
+    int chatty = ThreadAffinity.smartFollowUpAffinity(
         "bien gracias, que haces?",
         "iso como estas?",
         "bien gracias y tu?",
         Set.of("Aminowana"),
         1200L);
-    int activity = ConversationManager.smartFollowUpAffinity(
+    int activity = ThreadAffinity.smartFollowUpAffinity(
         "voy a minar un rato",
         "iso como estas?",
         "bien, y tu que haces?",
         Set.of("Aminowana"),
         1800L);
-    int opinion = ConversationManager.smartFollowUpAffinity(
+    int opinion = ThreadAffinity.smartFollowUpAffinity(
         "y tu que opinas?",
         "estabamos hablando de Tablos",
         "mmm, puede ser",
@@ -37,41 +37,41 @@ class SmartFollowUpGateTest {
 
   @Test
   void broadPublicRequestsDoNotConfuseNormalWhoQuestions() {
-    assertTrue(ConversationManager.looksLikeBroadSmartSideRequest("alguien tiene piedra?"));
-    assertTrue(ConversationManager.looksLikeBroadSmartSideRequest("quien vende hierro"));
-    assertFalse(ConversationManager.looksLikeBroadSmartSideRequest("quien es Tablos?"));
-    assertFalse(ConversationManager.looksLikeBroadSmartSideRequest("alguien me dijo que estas loca"));
+    assertTrue(ThreadAffinity.looksLikeBroadSmartSideRequest("alguien tiene piedra?"));
+    assertTrue(ThreadAffinity.looksLikeBroadSmartSideRequest("quien vende hierro"));
+    assertFalse(ThreadAffinity.looksLikeBroadSmartSideRequest("quien es Tablos?"));
+    assertFalse(ThreadAffinity.looksLikeBroadSmartSideRequest("alguien me dijo que estas loca"));
   }
 
   @Test
   void explicitOtherPlayerAddressRequiresRecipientShape() {
     Set<String> others = Set.of("Wachi", "Pedrox", "Aminowana");
-    assertTrue(ConversationManager.looksLikeExplicitOtherPlayerAddress(
+    assertTrue(ThreadAffinity.looksLikeExplicitOtherPlayerAddress(
         "Wachi ven al spawn", others));
-    assertTrue(ConversationManager.looksLikeExplicitOtherPlayerAddress(
+    assertTrue(ThreadAffinity.looksLikeExplicitOtherPlayerAddress(
         "oye Pedrox dame piedra", others));
-    assertFalse(ConversationManager.looksLikeExplicitOtherPlayerAddress(
+    assertFalse(ThreadAffinity.looksLikeExplicitOtherPlayerAddress(
         "que opinas de Wachi?", others));
-    assertFalse(ConversationManager.looksLikeExplicitOtherPlayerAddress(
+    assertFalse(ThreadAffinity.looksLikeExplicitOtherPlayerAddress(
         "Wachi es bastante raro", others));
   }
 
   @Test
   void trivialAcknowledgementsCanStayLocal() {
-    assertTrue(ConversationManager.isTrivialSmartAcknowledgement("xd"));
-    assertTrue(ConversationManager.isTrivialSmartAcknowledgement("jajaja"));
-    assertFalse(ConversationManager.isTrivialSmartAcknowledgement("bien gracias"));
+    assertTrue(ThreadAffinity.isTrivialSmartAcknowledgement("xd"));
+    assertTrue(ThreadAffinity.isTrivialSmartAcknowledgement("jajaja"));
+    assertFalse(ThreadAffinity.isTrivialSmartAcknowledgement("bien gracias"));
   }
 
   @Test
   void ellipticalSideAnswerFitsRecentPublicQuestionBetterThanIsoldaAnchor() {
-    int isolda = ConversationManager.smartFollowUpAffinity(
+    int isolda = ThreadAffinity.smartFollowUpAffinity(
         "yo tengo",
         "iso como estas?",
         "bien gracias y tu?",
         Set.of("Aminowana"),
         700L);
-    int side = ConversationManager.localLateralAffinity(
+    int side = ThreadAffinity.localLateralAffinity(
         "yo tengo",
         "oye alguien tiene piedra?",
         "Pedrox",

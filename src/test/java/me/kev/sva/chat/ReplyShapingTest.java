@@ -11,7 +11,7 @@ class ReplyShapingTest {
 
   @Test
   void oneThoughtSplitByModelBecomesOnePublicBubble() {
-    List<String> shaped = ConversationManager.coalesceMessagesByExplicitTargets(
+    List<String> shaped = ReplyPostProcessor.coalesceMessagesByExplicitTargets(
         List.of("¿Te duele algo?", "No esperaba que te lo tomes asi..."),
         Set.of("En3Minutos"));
 
@@ -20,7 +20,7 @@ class ReplyShapingTest {
 
   @Test
   void continuationForSameNamedPlayerAlsoBecomesOneBubble() {
-    List<String> shaped = ConversationManager.coalesceMessagesByExplicitTargets(
+    List<String> shaped = ReplyPostProcessor.coalesceMessagesByExplicitTargets(
         List.of("En3Minutos, no es tan sencillo.", "Necesitamos hablarlo con calma."),
         Set.of("En3Minutos", "Aminowana"));
 
@@ -30,7 +30,7 @@ class ReplyShapingTest {
 
   @Test
   void explicitIndependentRepliesToDifferentPlayersStaySeparate() {
-    List<String> shaped = ConversationManager.coalesceMessagesByExplicitTargets(
+    List<String> shaped = ReplyPostProcessor.coalesceMessagesByExplicitTargets(
         List.of("Aminowana, la Viridita sale bajo tierra.",
             "En3Minutos, el Mango Resinoso usa Ramas Resinosas."),
         Set.of("Aminowana", "En3Minutos"));
