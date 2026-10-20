@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.18 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.19 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 17
+config-version: 18
 
 assistant-name: Isolda
 
@@ -113,7 +113,8 @@ global-conversation:
   scene:
     # Read relevant context immediately before the trigger, then listen this many
     # milliseconds after it. All collected chat/events are handled as ONE scene.
-    capture-window-ms: 4000
+    # Keep this below chat.response-pacing.base-delay-ms or the base delay is never felt.
+    capture-window-ms: 1500
     pre-lookback-ms: 12000
 
     # Applied AFTER Java filters unrelated players/messages.
@@ -385,6 +386,18 @@ tools:
 chat:
   assistant-format: '&8[&5Cronista&8] &e%assistant_name%&7» &f%message%'
   max-messages-per-response: 3
+  # Minimum gap between two Isolda lines in the same reply.
   assistant-chained-messages-delay: 750
   max-assistant-message-length: 189
   max-player-message-length: 250
+
+  # Realistic reply timing. The first line appears base-delay-ms after the player's
+  # message plus (line length / max-assistant-message-length) * length-delay-ms.
+  # The capture window and the AI's own response time count inside that budget;
+  # they are never added on top. Each following line waits for its own typing time
+  # (at least assistant-chained-messages-delay). Actions such as lightning happen
+  # together with the first line. enabled: false restores immediate replies.
+  response-pacing:
+    enabled: true
+    base-delay-ms: 2500
+    length-delay-ms: 3500

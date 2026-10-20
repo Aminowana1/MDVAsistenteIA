@@ -468,9 +468,23 @@ public final class ToolManager {
    * because the model also leaked one stale call from history.
    */
   public boolean processModelCalls(List<String> calls, String currentActionText) {
-    if (calls == null || calls.isEmpty() || !plugin.getConfig().getBoolean("tools.enabled", true)) return true;
+    PreparedCalls prepared = prepareModelCalls(calls, currentActionText);
+    prepared.run();
+    return prepared.accepted();
+  }
+
+  /**
+   * Validates model ACTION calls now, against the current scene, but lets the caller
+   * decide when they run. Isolda's paced reply uses this so "ahi va el rayo" and the
+   * lightning itself happen together.
+   */
+  public PreparedCalls prepareModelCalls(List<String> calls, String currentActionText) {
+    List<Runnable> actions = new ArrayList<>();
+    if (calls == null || calls.isEmpty() || !plugin.getConfig().getBoolean("tools.enabled", true)) {
+      return new PreparedCalls(true, actions);
+    }
     int maxCalls = Math.max(plugin.getConfig().getInt("tools.max-calls-per-response", 2), 0);
-    if (maxCalls == 0) return true;
+    if (maxCalls == 0) return new PreparedCalls(true, actions);
 
     boolean anyAccepted = false;
     boolean anyRejected = false;
@@ -510,14 +524,29 @@ public final class ToolManager {
         continue;
       }
 
+      String arguments = authorizedArguments;
       if (tool.activation() == ToolActivation.ASK) {
-        queueApproval(tool, authorizedArguments, tool.name + " " + authorizedArguments);
+        actions.add(() -> queueApproval(tool, arguments, tool.name + " " + arguments));
       } else {
-        executeAndLog(tool, authorizedArguments, "AI");
+        actions.add(() -> executeAndLog(tool, arguments, "AI"));
       }
       anyAccepted = true;
     }
-    return anyAccepted || !anyRejected;
+    return new PreparedCalls(anyAccepted || !anyRejected, actions);
+  }
+
+  /**
+   * Accepted calls ready to run. {@code accepted} is false only when the response had
+   * ACTION calls and every one of them was rejected.
+   */
+  public record PreparedCalls(boolean accepted, List<Runnable> actions) {
+    public PreparedCalls {
+      actions = List.copyOf(actions);
+    }
+
+    public void run() {
+      for (Runnable action : actions) action.run();
+    }
   }
 
   private boolean isModelCallAuthorized(Tool tool, String arguments, String currentActionText) {

@@ -32,10 +32,11 @@ import me.kev.sva.chat.message.ChatMessage;
 import me.kev.sva.chat.message.PlayerChatMessage;
 import me.kev.sva.chat.message.SystemContextMessage;
 import me.kev.sva.chat.tools.ContextTargetResolver;
+import me.kev.sva.chat.tools.ToolManager;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 
 /**
- * ServerAssistant 1.7.18: one public global conversation with local context/tools.
+ * ServerAssistant 1.7.19: one public global conversation with local context/tools.
  *
  * <p>There are no player/group slots. A direct call (or a short smart follow-up)
  * opens one configurable scene window. Java reads a small amount of public chat
@@ -67,6 +68,11 @@ public final class ConversationManager {
   private BukkitTask idleScheduleTask;
   private boolean requestInFlight = false;
   private boolean shutdown = false;
+
+  /** Paced chat lines not yet shown; cancelled on reload so no line appears afterwards. */
+  private final Set<BukkitTask> pendingLineTasks = new HashSet<>();
+  /** Send time of the last scheduled Isolda line. Later scenes never overtake it. */
+  private long lastScheduledLineAt = 0L;
   private long nextSceneId = 1L;
 
   /**
@@ -151,6 +157,8 @@ public final class ConversationManager {
     cancelTask(captureTask);
     cancelTask(requestRateRetryTask);
     cancelTask(idleScheduleTask);
+    for (BukkitTask task : pendingLineTasks) cancelTask(task);
+    pendingLineTasks.clear();
     captureTask = null;
     requestRateRetryTask = null;
     idleScheduleTask = null;
@@ -404,7 +412,8 @@ public final class ConversationManager {
             ""),
         "",
         AssistantManager.PRIMARY,
-        0);
+        0,
+        -1L);
 
     sceneQueue.addLast(scene);
     processNextRequest();
@@ -920,7 +929,8 @@ public final class ConversationManager {
             activityHistory, relationshipContext, currentActionText),
         currentActionText,
         AssistantManager.PRIMARY,
-        0);
+        0,
+        capture.triggerAt());
   }
 
   private static String requestTextForPlayer(List<ChatMessage> messages, UUID playerId) {
@@ -1772,7 +1782,8 @@ public final class ConversationManager {
             "", "", "", "", "", relation, ""),
         "",
         AssistantManager.PRIMARY,
-        0);
+        0,
+        -1L);
     sceneQueue.addLast(scene);
     processNextRequest();
   }
@@ -4021,26 +4032,32 @@ public final class ConversationManager {
       plugin.getLogger().warning("Direct-mention scene " + scene.sceneId()
           + " returned no public chat line (tool_calls=" + response.getToolCalls().size() + ").");
     }
+    ToolManager.PreparedCalls toolCalls = null;
     boolean toolCallsAccepted = true;
     if (plugin.getToolManager() != null && !response.getToolCalls().isEmpty()) {
-      toolCallsAccepted = plugin.getToolManager().processModelCalls(
+      toolCalls = plugin.getToolManager().prepareModelCalls(
           response.getToolCalls(), scene.currentActionText());
+      toolCallsAccepted = toolCalls.accepted();
     }
-    if (!reply.isBlank() && toolCallsAccepted) {
-      response.broadcastMessages();
-    } else if (!reply.isBlank() && !toolCallsAccepted
+    if (!reply.isBlank() && !toolCallsAccepted
         && plugin.getConfig().getBoolean("tools.action-safety.suppress-reply-on-rejected-call", true)) {
       plugin.getLogger().warning("Suppressed AI chat for scene " + scene.sceneId()
           + " because it was paired with a stale/policy-blocked action call.");
       reply = "";
-    } else if (!reply.isBlank()) {
-      response.broadcastMessages();
+    }
+
+    long now = System.currentTimeMillis();
+    // When Isolda's first line actually appears in chat; actions and SMART timing follow it.
+    long firstVisibleAt = now;
+    if (!reply.isBlank()) {
+      firstVisibleAt = deliverPaced(scene, response.getMessages(), toolCalls, now);
+    } else if (toolCalls != null) {
+      toolCalls.run();
     }
 
     rememberScene(scene, reply);
     long baseFollowUpMs = Math.max(plugin.getConfig().getLong(
         "global-conversation.smart-follow-up-ms", 30_000L), 0L);
-    long now = System.currentTimeMillis();
     pruneSmartFollowUps(now);
     if (!reply.isBlank()) {
       for (UUID playerId : conversationParticipants) {
@@ -4048,7 +4065,9 @@ public final class ConversationManager {
             ? baseFollowUpMs
             : plugin.getRelationshipManager().followUpMs(playerId, baseFollowUpMs);
         if (followUpMs > 0L) {
-          smartFollowUpUntilByPlayer.put(playerId, now + followUpMs);
+          // The window opens now (a player may answer while Isolda is still "typing")
+          // but is measured from when her reply becomes visible.
+          smartFollowUpUntilByPlayer.put(playerId, firstVisibleAt + followUpMs);
           smartFollowUpAnchorByPlayer.put(playerId, buildSmartFollowUpAnchor(scene, playerId, reply, now));
         } else {
           smartFollowUpUntilByPlayer.remove(playerId);
@@ -4060,6 +4079,42 @@ public final class ConversationManager {
     processNextRequest();
   }
 
+
+  /**
+   * Schedules Isolda's lines with realistic typing time (see {@link ResponsePacing}).
+   * Accepted ACTION calls run together with the first line. Returns when the first
+   * line will be visible.
+   */
+  private long deliverPaced(
+      SceneRequest scene, List<String> messages, ToolManager.PreparedCalls toolCalls, long now) {
+    ResponsePacing pacing = new ResponsePacing(
+        plugin.getConfig().getBoolean("chat.response-pacing.enabled", true),
+        plugin.getConfig().getLong("chat.response-pacing.base-delay-ms", 2_500L),
+        plugin.getConfig().getLong("chat.response-pacing.length-delay-ms", 3_500L),
+        plugin.getConfig().getInt("chat.max-assistant-message-length", 189),
+        plugin.getConfig().getLong("chat.assistant-chained-messages-delay", 750L));
+    List<Long> sendTimes = pacing.schedule(messages, scene.triggerAtMs(), now, lastScheduledLineAt);
+    if (sendTimes.isEmpty()) {
+      if (toolCalls != null) toolCalls.run();
+      return now;
+    }
+
+    for (int i = 0; i < messages.size(); i++) {
+      String message = messages.get(i);
+      Runnable beforeLine = i == 0 && toolCalls != null ? toolCalls::run : null;
+      long ticks = Math.max(0L, (sendTimes.get(i) - now + 49L) / 50L);
+      BukkitTask[] holder = new BukkitTask[1];
+      holder[0] = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        pendingLineTasks.remove(holder[0]);
+        if (shutdown) return;
+        if (beforeLine != null) beforeLine.run();
+        plugin.getServer().broadcast(AssistantResponse.formatMessage(plugin, message));
+      }, ticks);
+      pendingLineTasks.add(holder[0]);
+    }
+    lastScheduledLineAt = sendTimes.get(sendTimes.size() - 1);
+    return sendTimes.get(0);
+  }
 
   private List<String> enforceWikiNoMatchGrounding(SceneRequest scene, List<String> modelReplies) {
     if (scene == null || scene.context() == null) {
@@ -5036,20 +5091,23 @@ public final class ConversationManager {
       AssistantRequestContext context,
       String currentActionText,
       int providerIndex,
-      int retryCount) {
+      int retryCount,
+      /** When the player wrote the line that opened this scene; negative when no player did. */
+      long triggerAtMs) {
 
     SceneRequest withProvider(int newProvider) {
       return new SceneRequest(
           sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
           followUpEligiblePlayerIds, groupParticipantCandidateIds, autoGroupParticipantIds,
-          groupParticipantCandidatesByName, context, currentActionText, newProvider, 0);
+          groupParticipantCandidatesByName, context, currentActionText, newProvider, 0, triggerAtMs);
     }
 
     SceneRequest withRetry(int newRetryCount) {
       return new SceneRequest(
           sceneId, messages, currentSceneMessages, involvedPlayerIds, involvedPlayerNames,
           followUpEligiblePlayerIds, groupParticipantCandidateIds, autoGroupParticipantIds,
-          groupParticipantCandidatesByName, context, currentActionText, providerIndex, newRetryCount);
+          groupParticipantCandidatesByName, context, currentActionText, providerIndex, newRetryCount,
+          triggerAtMs);
     }
   }
 }

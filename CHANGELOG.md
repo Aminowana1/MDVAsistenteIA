@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.19 - Realistic reply timing
+
+- New `chat.response-pacing` (enabled by default): the first line of a reply appears `base-delay-ms` (2500) after the player's message plus `(line length / chat.max-assistant-message-length) * length-delay-ms` (3500). The capture window and the AI's own latency are part of that budget; if they already took longer, the line is sent immediately.
+- Each following line of a multi-line reply waits for its own typing time (never less than `chat.assistant-chained-messages-delay`). Lines from a later scene can no longer appear before an earlier scene's lines.
+- Accepted ACTION calls (lightning, sound, schedule, mute approvals) now run together with the first visible line instead of before it. Calls in a reply with no chat line still run immediately.
+- SMART follow-up windows are measured from when Isolda's reply becomes visible, and a player may already answer while she is still "typing".
+- `global-conversation.scene.capture-window-ms` 4000 -> 1500 so the 2.5s base delay is noticeable. Configs still using the exact old bundled value are migrated automatically.
+- `/sva reload` cancels lines that were still waiting to be shown.
+
 ## 1.7.18 - Reliable AI queue / longer SMART follow-ups
 
 - Every AI request now has its own timeout (`ai.request-timeout-ms` and `ai.fallback.request-timeout-ms`, default 20000, minimum 3000) and the OpenAI SDK no longer retries on its own. Previously the SDK defaults (10 minute timeout, 2 hidden retries) let one stuck provider call silence Isolda for minutes, and the local RPM cap counted one call where up to three were sent.
