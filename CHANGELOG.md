@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.7.18 - Reliable AI queue / longer SMART follow-ups
 
+- Every AI request now has its own timeout (`ai.request-timeout-ms` and `ai.fallback.request-timeout-ms`, default 20000, minimum 3000) and the OpenAI SDK no longer retries on its own. Previously the SDK defaults (10 minute timeout, 2 hidden retries) let one stuck provider call silence Isolda for minutes, and the local RPM cap counted one call where up to three were sent.
+- A watchdog releases the single in-flight slot if a request never reports back, and the request executor no longer has a single thread that an abandoned call could block. Timeouts are treated as temporary errors, so the fallback provider is tried when enabled.
+- Scenes dropped after a temporary provider error are now logged, and a failure while post-processing a reply can no longer stall the queue until the next scene.
+- SMART follow-up windows doubled: `global-conversation.smart-follow-up-ms` 15000 -> 30000 and every `relationships.yml` `behavior.dynamic-follow-up.by-tier` value (arch-enemy stays 0). Existing installations still using the exact old bundled values are migrated automatically; custom values are kept.
 - Player coordinates are no longer exposed to the assistant. `player-data` now reports only world and biome for location, `coords`/`coordenadas` no longer trigger it, and the system prompt forbids giving, estimating or inventing any player's coordinates. Other tools already cover coordinates, and exposing them let any player locate another one through public chat.
 
 ## 1.7.17 - Natural wiki routing / live-chat hardening

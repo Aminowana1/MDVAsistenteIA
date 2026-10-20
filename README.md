@@ -1,6 +1,13 @@
-# ServerAssistant 1.7.17
+# ServerAssistant 1.7.18
 
 ServerAssistant 1.7.17 hardens natural-language wiki routing after live server tests. Conversational wrappers, broad category questions, use/function questions, commerce, deictic travel, and short subject swaps are all resolved locally before the normal model request. The architecture remains **one global conversation** with **one model request per scene**; no classifier/model request, embedding call, retry, or external wiki lookup was added.
+
+## 1.7.18 reliable AI queue / longer SMART follow-ups
+
+- Every AI request now has its own timeout (`ai.request-timeout-ms`, default 20s) and no hidden SDK retries. A stuck provider can no longer silence Isolda for minutes.
+- A watchdog releases the queue if a request never finishes, and dropped scenes are logged.
+- SMART follow-up windows doubled (base 30s; per-tier values in `relationships.yml`). Installations still using the old bundled values are migrated automatically.
+- Player coordinates are no longer sent to the model.
 
 ## 1.7.17 natural wiki routing
 

@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.17 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.18 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 16
+config-version: 17
 
 assistant-name: Isolda
 
@@ -20,6 +20,9 @@ ai:
   max-output-tokens: 120
   temperature: 0.75
   max-requests-per-minute: 12
+  # Maximum wait for one AI answer. A slow or stuck provider is abandoned after this
+  # and the queue moves on (fallback is tried when enabled). Minimum 3000.
+  request-timeout-ms: 20000
 
   # Diagnostic per request. Uses the exact token counters returned by the AI provider.
   # Example console line:
@@ -51,6 +54,7 @@ ai:
     max-output-tokens: 100
     temperature: 0.85
     max-requests-per-minute: 4
+    request-timeout-ms: 20000
     max-wait-ms: 2500
 
 # ============================================================
@@ -76,7 +80,9 @@ global-conversation:
   # group chat is routed locally by active-thread affinity versus competing side-chat;
   # strong matches inherit continuity directly and borderline candidates may be
   # confirmed by the SAME model response. Unrelated chatter never inherits it.
-  smart-follow-up-ms: 15000
+  # Players WITH a relationship profile use relationships.yml dynamic-follow-up
+  # instead; this base value covers everyone else.
+  smart-follow-up-ms: 30000
 
   # Zero-token semantic gate for an EXISTING SMART holder's next line. A live SMART
   # timer is permission to continue, not permission for every public-chat message to

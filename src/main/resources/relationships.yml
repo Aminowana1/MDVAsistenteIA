@@ -4,7 +4,7 @@
 # This file controls Isolda's persistent relationship system.
 # Relationship data itself is stored in relationships.db; this YAML contains only rules.
 # Missing keys are added automatically without replacing your edits.
-config-version: 6
+config-version: 7
 
 enabled: true
 
@@ -185,14 +185,14 @@ behavior:
     enabled: true
     by-tier:
       arch-enemy: 0
-      enemy: 5000
-      hostile: 8000
-      disliked: 11000
-      neutral: 15000
-      known: 18000
-      friend: 23000
-      close-friend: 28000
-      maximum-bond: 30000
+      enemy: 10000
+      hostile: 16000
+      disliked: 22000
+      neutral: 30000
+      known: 36000
+      friend: 46000
+      close-friend: 56000
+      maximum-bond: 60000
 
 # Optional spontaneous reactions to trusted server events. Each firing intentionally
 # spends ONE normal AI request, therefore it is OFF by default for maximum economy.

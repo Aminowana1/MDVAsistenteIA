@@ -35,7 +35,7 @@ import me.kev.sva.chat.tools.ContextTargetResolver;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 
 /**
- * ServerAssistant 1.7.17: one public global conversation with local context/tools.
+ * ServerAssistant 1.7.18: one public global conversation with local context/tools.
  *
  * <p>There are no player/group slots. A direct call (or a short smart follow-up)
  * opens one configurable scene window. Java reads a small amount of public chat
@@ -3865,6 +3865,17 @@ public final class ConversationManager {
 
   private void handleCompletion(SceneRequest scene, AssistantResponse response, Throwable error) {
     requestInFlight = false;
+    try {
+      processCompletion(scene, response, error);
+    } catch (RuntimeException ex) {
+      // Post-processing bugs must never stall the global queue until the next scene.
+      plugin.getLogger().warning("Could not finish global scene " + scene.sceneId() + ": "
+          + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+      processNextRequest();
+    }
+  }
+
+  private void processCompletion(SceneRequest scene, AssistantResponse response, Throwable error) {
     var provider = assistantManager.getProviderSettings(scene.providerIndex());
 
     if (error != null) {
@@ -3887,6 +3898,9 @@ public final class ConversationManager {
         if (queueTransientRetry(scene)) {
           return;
         }
+        plugin.getLogger().warning("AI request failed for global scene " + scene.sceneId()
+            + " (temporary provider error, no fallback/retry left): "
+            + error.getClass().getSimpleName() + ": " + error.getMessage());
       } else {
         plugin.getLogger().warning("AI request failed for global scene " + scene.sceneId()
             + ": " + error.getClass().getSimpleName() + ": " + error.getMessage());
@@ -4025,7 +4039,7 @@ public final class ConversationManager {
 
     rememberScene(scene, reply);
     long baseFollowUpMs = Math.max(plugin.getConfig().getLong(
-        "global-conversation.smart-follow-up-ms", 12_000L), 0L);
+        "global-conversation.smart-follow-up-ms", 30_000L), 0L);
     long now = System.currentTimeMillis();
     pruneSmartFollowUps(now);
     if (!reply.isBlank()) {
