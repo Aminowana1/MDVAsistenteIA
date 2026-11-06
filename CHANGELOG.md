@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Internal: `ConversationManager` (5,100 lines) is split into focused classes in `me.kev.sva.chat`, with no behavior change. `ConversationManager` keeps the capture window and public entry points; `SceneBuilder` builds each scene, `SceneRequestQueue` runs the single AI pipeline and paced delivery, `ReplyPostProcessor` applies local reply fixes, `SmartFollowUpGate` owns SMART continuity, `GroupThreadSelector` and `ThreadAffinity` handle group threading, and `WikiRetriever`, `WikiQueryClassifier` and `WikiEvidence` handle local wiki retrieval. Shared records and logs live in their own small files. Tests now target the class that owns each helper.
+
+## 1.7.19 - Realistic reply timing
+
+- New `chat.response-pacing` (enabled by default): the first line of a reply appears `base-delay-ms` (2500) after the player's message plus `(line length / chat.max-assistant-message-length) * length-delay-ms` (3500). The capture window and the AI's own latency are part of that budget; if they already took longer, the line is sent immediately.
+- Each following line of a multi-line reply waits for its own typing time (never less than `chat.assistant-chained-messages-delay`). Lines from a later scene can no longer appear before an earlier scene's lines.
+- Accepted ACTION calls (lightning, sound, schedule, mute approvals) now run together with the first visible line instead of before it. Calls in a reply with no chat line still run immediately.
+- SMART follow-up windows are measured from when Isolda's reply becomes visible, and a player may already answer while she is still "typing".
+- `global-conversation.scene.capture-window-ms` 4000 -> 1500 so the 2.5s base delay is noticeable. Configs still using the exact old bundled value are migrated automatically.
+- `/sva reload` cancels lines that were still waiting to be shown.
+
+## 1.7.18 - Reliable AI queue / longer SMART follow-ups
+
+- Every AI request now has its own timeout (`ai.request-timeout-ms` and `ai.fallback.request-timeout-ms`, default 20000, minimum 3000) and the OpenAI SDK no longer retries on its own. Previously the SDK defaults (10 minute timeout, 2 hidden retries) let one stuck provider call silence Isolda for minutes, and the local RPM cap counted one call where up to three were sent.
+- A watchdog releases the single in-flight slot if a request never reports back, and the request executor no longer has a single thread that an abandoned call could block. Timeouts are treated as temporary errors, so the fallback provider is tried when enabled.
+- Scenes dropped after a temporary provider error are now logged, and a failure while post-processing a reply can no longer stall the queue until the next scene.
+- SMART follow-up windows doubled: `global-conversation.smart-follow-up-ms` 15000 -> 30000 and every `relationships.yml` `behavior.dynamic-follow-up.by-tier` value (arch-enemy stays 0). Existing installations still using the exact old bundled values are migrated automatically; custom values are kept.
+- Player coordinates are no longer exposed to the assistant. `player-data` now reports only world and biome for location, `coords`/`coordenadas` no longer trigger it, and the system prompt forbids giving, estimating or inventing any player's coordinates. Other tools already cover coordinates, and exposing them let any player locate another one through public chat.
+
 ## 1.7.17 - Natural wiki routing / live-chat hardening
 
 - Added optional per-request token usage debug (`ai.usage-debug.enabled`) logging input, cached, output and total tokens with scene/provider/model context.

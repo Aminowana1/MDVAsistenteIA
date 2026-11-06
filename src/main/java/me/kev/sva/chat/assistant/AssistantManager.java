@@ -3,14 +3,21 @@ package me.kev.sva.chat.assistant;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+
+import org.bukkit.scheduler.BukkitTask;
 
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
@@ -36,6 +43,7 @@ import me.kev.sva.utils.MessageSender;
 public class AssistantManager {
   public static final int PRIMARY = 0;
   public static final int FALLBACK = 1;
+  private static final long WATCHDOG_GRACE_MS = 5_000L;
 
   private final ServerAssistantPlugin plugin;
   private final ProviderRuntime primary;
@@ -78,7 +86,10 @@ public class AssistantManager {
       thread.setDaemon(true);
       return thread;
     };
-    requestExecutor = Executors.newSingleThreadExecutor(factory);
+    // ConversationManager already serializes scenes (one request in flight). A cached
+    // pool only guarantees that a call abandoned by the watchdog can never block the
+    // thread the next request needs.
+    requestExecutor = Executors.newCachedThreadPool(factory);
   }
 
   private ProviderRuntime createRuntime(ProviderSettings settings, String role) {
@@ -89,9 +100,14 @@ public class AssistantManager {
       return new ProviderRuntime(settings, null);
     }
 
+    // The SDK defaults (10 min timeout, 2 hidden retries) let one stuck provider call
+    // silence Isolda for minutes and made the local RPM cap count 1 call for up to 3.
+    // ConversationManager already owns fallback/retry, so the SDK must fail fast.
     OpenAIClient client = OpenAIOkHttpClient.builder()
         .apiKey(settings.resolveApiKey())
         .baseUrl(settings.baseUrl())
+        .timeout(Duration.ofMillis(settings.requestTimeoutMs()))
+        .maxRetries(0)
         .build();
     return new ProviderRuntime(settings, client);
   }
@@ -104,6 +120,7 @@ public class AssistantManager {
     plugin.getLogger().info(role + " AI provider: " + settings.displayName());
     plugin.getLogger().info(role + " AI model: " + settings.model());
     plugin.getLogger().info(role + " AI max output tokens: " + settings.maxOutputTokens());
+    plugin.getLogger().info(role + " AI request timeout: " + settings.requestTimeoutMs() + "ms");
     plugin.getLogger().info(role + " AI local RPM cap: "
         + (settings.maxRequestsPerMinute() == 0 ? "unlimited" : settings.maxRequestsPerMinute()));
   }
@@ -210,7 +227,19 @@ public class AssistantManager {
 
     ChatCompletionCreateParams params = paramsBuilder.build();
 
-    requestExecutor.submit(() -> {
+    // The completion must run exactly once, or ConversationManager keeps its single
+    // in-flight slot forever. Whichever finishes first wins: the provider call or
+    // the watchdog below.
+    AtomicBoolean completed = new AtomicBoolean(false);
+    AtomicReference<BukkitTask> watchdog = new AtomicReference<>();
+    BiConsumer<AssistantResponse, Throwable> completeOnce = (response, error) -> {
+      if (!completed.compareAndSet(false, true)) return;
+      BukkitTask task = watchdog.getAndSet(null);
+      if (task != null) task.cancel();
+      completion.accept(response, error);
+    };
+
+    Future<?> call = requestExecutor.submit(() -> {
       String responseText = "";
       Throwable failure = null;
 
@@ -236,13 +265,31 @@ public class AssistantManager {
 
       if (!shutdown && plugin.isEnabled()) {
         plugin.getServer().getScheduler().runTask(plugin, () -> {
-          AssistantResponse parsed = finalResponseText.isBlank()
-              ? new AssistantResponse(plugin, List.of(), List.of(), false)
-              : new AssistantResponse(plugin, finalResponseText);
-          completion.accept(parsed, finalFailure);
+          AssistantResponse parsed;
+          try {
+            parsed = finalResponseText.isBlank()
+                ? new AssistantResponse(plugin, List.of(), List.of(), false)
+                : new AssistantResponse(plugin, finalResponseText);
+          } catch (RuntimeException parseError) {
+            completeOnce.accept(null, finalFailure != null ? finalFailure : parseError);
+            return;
+          }
+          completeOnce.accept(parsed, finalFailure);
         });
       }
     });
+
+    // Safety net beyond the HTTP timeout (DNS hangs, a stuck stream, etc.). The grace
+    // period lets the normal timeout report first with its real error message.
+    long watchdogTicks = Math.max(1L, (provider.requestTimeoutMs() + WATCHDOG_GRACE_MS + 49L) / 50L);
+    watchdog.set(plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+      if (completed.get()) return;
+      call.cancel(true);
+      plugin.getLogger().warning(provider.displayName() + " request exceeded "
+          + provider.requestTimeoutMs() + "ms; releasing the AI queue.");
+      completeOnce.accept(null, new TimeoutException(
+          provider.displayName() + " request timed out after " + provider.requestTimeoutMs() + "ms"));
+    }, watchdogTicks));
   }
 
   private void appendSystemPromptsToBuilder(

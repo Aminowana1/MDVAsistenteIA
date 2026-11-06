@@ -1,6 +1,20 @@
-# ServerAssistant 1.7.17
+# ServerAssistant 1.7.19
 
 ServerAssistant 1.7.17 hardens natural-language wiki routing after live server tests. Conversational wrappers, broad category questions, use/function questions, commerce, deictic travel, and short subject swaps are all resolved locally before the normal model request. The architecture remains **one global conversation** with **one model request per scene**; no classifier/model request, embedding call, retry, or external wiki lookup was added.
+
+## 1.7.19 realistic reply timing
+
+- Isolda answers about 2.5s after the player's message plus a typing delay proportional to each line's length (`chat.response-pacing`). The capture window and the AI's own latency count inside that time instead of adding to it.
+- Multi-line replies type each line separately, replies never overtake an earlier one, and actions such as lightning happen together with the first line.
+- SMART follow-up windows are measured from when the reply becomes visible.
+- `global-conversation.scene.capture-window-ms` drops from 4000 to 1500 (migrated automatically when unchanged).
+
+## 1.7.18 reliable AI queue / longer SMART follow-ups
+
+- Every AI request now has its own timeout (`ai.request-timeout-ms`, default 20s) and no hidden SDK retries. A stuck provider can no longer silence Isolda for minutes.
+- A watchdog releases the queue if a request never finishes, and dropped scenes are logged.
+- SMART follow-up windows doubled (base 30s; per-tier values in `relationships.yml`). Installations still using the old bundled values are migrated automatically.
+- Player coordinates are no longer sent to the model.
 
 ## 1.7.17 natural wiki routing
 

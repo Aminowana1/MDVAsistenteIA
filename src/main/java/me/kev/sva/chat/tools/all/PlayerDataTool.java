@@ -14,11 +14,15 @@ import me.kev.sva.chat.tools.ContextTargetResolver;
 import me.kev.sva.chat.tools.ToolKind;
 import me.kev.sva.chat.tools.ToolManager;
 
-/** Local trusted online-player location/status context. */
+/**
+ * Local trusted online-player location/status context.
+ *
+ * <p>Location is limited to world and biome. Coordinates are never exposed to the
+ * model: they would let any player locate another one through public chat.</p>
+ */
 public final class PlayerDataTool extends Tool {
   private static final List<String> LOCATION_TERMS = List.of(
-      "donde", "ubicacion", "coordenad", "coords", "coors", "coor", "position", "location",
-      "zona", "region", "bioma", "biome");
+      "donde", "ubicacion", "zona", "region", "bioma", "biome");
   private static final List<String> STATUS_TERMS = List.of(
       "vida", "health", "hambre", "food",
       "nivel vanilla", "level vanilla", "xp vanilla", "experiencia vanilla",
@@ -123,11 +127,9 @@ public final class PlayerDataTool extends Tool {
       return "Player '" + playerName + "' is not online.";
     }
 
-    var location = player.getLocation();
     return "Player=" + player.getName()
         + ", world=" + player.getWorld().getName()
         + ", biome=" + biomeName(player)
-        + ", xyz=" + String.format(Locale.ROOT, "%.2f,%.2f,%.2f", location.getX(), location.getY(), location.getZ())
         + ", gamemode=" + player.getGameMode().name()
         + ", health=" + String.format(Locale.ROOT, "%.1f", player.getHealth())
         + ", food=" + player.getFoodLevel()
@@ -160,8 +162,6 @@ public final class PlayerDataTool extends Tool {
 
   private boolean matchesLocationIntent(String text, String speakerName, List<ChatMessage> sceneMessages) {
     if (!containsAny(text, LOCATION_TERMS)) return false;
-    // "coords?" is a common shorthand for the speaker's current coordinates.
-    if (containsAny(text, List.of("coords", "coors", "coor", "mis coords", "mis coors", "mis coordenadas"))) return true;
     return matchesPersonalReference(text, speakerName, sceneMessages)
         || containsAny(text, LOCATION_DEICTIC_TERMS);
   }
@@ -213,10 +213,8 @@ public final class PlayerDataTool extends Tool {
   private String compact(Player player, boolean includeLocation, boolean includeStatus) {
     StringBuilder out = new StringBuilder("PLAYER_DATA player=").append(player.getName());
     if (includeLocation) {
-      var loc = player.getLocation();
       out.append(" | world=").append(player.getWorld().getName())
-          .append(" | biome=").append(biomeName(player))
-          .append(" | xyz=").append(loc.getBlockX()).append(',').append(loc.getBlockY()).append(',').append(loc.getBlockZ());
+          .append(" | biome=").append(biomeName(player));
     }
     if (includeStatus) {
       out.append(" | mode=").append(player.getGameMode().name())

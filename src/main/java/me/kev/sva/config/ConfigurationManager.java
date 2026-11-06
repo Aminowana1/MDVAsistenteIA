@@ -72,14 +72,18 @@ public final class ConfigurationManager {
     boolean archEnemyIgnoreMigrated = migrate176ArchEnemyIgnoreDefault(relationships);
     boolean relationshipMemoryBudgetMigrated = migrate179RelationshipMemoryBudget(relationships);
     boolean groupThreadDefaultsMigrated = migrate1712GroupThreadDefaults(main);
+    boolean smartFollowUpMigrated = migrate1718SmartFollowUpBase(main);
+    boolean followUpTiersMigrated = migrate1718FollowUpTiers(relationships);
+    boolean captureWindowMigrated = migrate1719CaptureWindow(main);
     boolean mainChanged = migrated | actionSafetyMigrated | outputBudgetMigrated | multiReplyMigrated
-        | groupThreadDefaultsMigrated | mergeBundledDefaults(main, "config.yml");
+        | groupThreadDefaultsMigrated | smartFollowUpMigrated | captureWindowMigrated
+        | mergeBundledDefaults(main, "config.yml");
     boolean personalityChanged = migrated | relationshipPersonalityMigrated | mergeBundledDefaults(personality, PERSONALITY_FILE);
     // wiki.* is user knowledge, not schema. Do not resurrect pages an admin intentionally removed.
     boolean wikiChanged = migrated | mergeBundledDefaults(wiki, WIKI_FILE, "wiki");
     boolean integrationsChanged = mergeBundledDefaults(integrations, INTEGRATIONS_FILE);
     boolean relationshipsChanged = relationshipCapacityMigrated | relationshipContextMigrated | archEnemyIgnoreMigrated
-        | relationshipMemoryBudgetMigrated | mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
+        | relationshipMemoryBudgetMigrated | followUpTiersMigrated | mergeBundledDefaults(relationships, RELATIONSHIPS_FILE);
 
     mainChanged |= syncSchemaVersion(main, "config.yml");
     personalityChanged |= syncSchemaVersion(personality, PERSONALITY_FILE);
@@ -133,6 +137,12 @@ public final class ConfigurationManager {
     }
     if (groupThreadDefaultsMigrated) {
       plugin.getLogger().info("Migrated 1.7.12 group-thread defaults: wider pre-call window and more natural zero-token join affinity.");
+    }
+    if (smartFollowUpMigrated || followUpTiersMigrated) {
+      plugin.getLogger().info("Migrated 1.7.18 SMART follow-up windows: doubled the old bundled values (custom values were kept).");
+    }
+    if (captureWindowMigrated) {
+      plugin.getLogger().info("Migrated 1.7.19 capture window from 4000 to 1500 ms so the paced 2.5 s reply delay is noticeable.");
     }
   }
 
@@ -211,6 +221,43 @@ public final class ConfigurationManager {
     changed |= migrateExactInt(main,
         "global-conversation.scene.group-threading.affinity.auto-follow-up-threshold", 68, 64);
     return changed;
+  }
+
+  /**
+   * 1.7.18 doubles how long a player may keep talking to Isolda after a mention
+   * without repeating her name. Only the exact 1.7.17 bundled value is migrated.
+   */
+  private boolean migrate1718SmartFollowUpBase(YamlConfiguration main) {
+    if (main.getInt("config-version", 0) > 16) return false;
+    return migrateExactInt(main, "global-conversation.smart-follow-up-ms", 15000, 30000);
+  }
+
+  /**
+   * Players with a relationship profile use these per-tier windows instead of the
+   * base value, so they must move together. Custom tier values are preserved.
+   */
+  private boolean migrate1718FollowUpTiers(YamlConfiguration relationships) {
+    if (relationships.getInt("config-version", 0) > 6) return false;
+    String prefix = "behavior.dynamic-follow-up.by-tier.";
+    boolean changed = false;
+    changed |= migrateExactInt(relationships, prefix + "enemy", 5000, 10000);
+    changed |= migrateExactInt(relationships, prefix + "hostile", 8000, 16000);
+    changed |= migrateExactInt(relationships, prefix + "disliked", 11000, 22000);
+    changed |= migrateExactInt(relationships, prefix + "neutral", 15000, 30000);
+    changed |= migrateExactInt(relationships, prefix + "known", 18000, 36000);
+    changed |= migrateExactInt(relationships, prefix + "friend", 23000, 46000);
+    changed |= migrateExactInt(relationships, prefix + "close-friend", 28000, 56000);
+    changed |= migrateExactInt(relationships, prefix + "maximum-bond", 30000, 60000);
+    return changed;
+  }
+
+  /**
+   * 1.7.19 paces replies from the player's message (2.5 s base). A 4 s capture window
+   * alone would exceed that base, so only the exact old bundled value is lowered.
+   */
+  private boolean migrate1719CaptureWindow(YamlConfiguration main) {
+    if (main.getInt("config-version", 0) > 17) return false;
+    return migrateExactInt(main, "global-conversation.scene.capture-window-ms", 4000, 1500);
   }
 
   private static boolean migrateExactInt(

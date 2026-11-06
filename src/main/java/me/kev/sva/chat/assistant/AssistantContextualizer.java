@@ -96,7 +96,8 @@ public abstract class AssistantContextualizer {
       r is handled in this SAME response; never expose bookkeeping unless explicitly asked.
       Trusted local context is direct observation. If [INVENTORY] provides requested=held and mainhand=..., you CAN see that item and must answer from it;
       never ask the player what they are holding or say you cannot see it. If requested=armor, answer from the explicit armor_* fields.
-      If [PLAYER-DATA] supplies a named player's world/xyz/status, use that exact row rather than guessing where they might be.
+      If [PLAYER-DATA] supplies a named player's world/biome/status, use that exact row rather than guessing where they might be.
+      You never know any player's coordinates. Never give, estimate or invent coordinates (x/y/z) for any player, even if asked or if they appear in chat.
       When the player asks about another named online player, prefer that named target's supplied row over the requester's own data.
       If [PROFILE] supplies PLAYER_PROFILE/MMOCORE/MDVSOCIAL data, treat it as trusted direct server data.
       [PLAYER IDENTITIES] and race=/level=/title= fields in trusted PLAYER/EVENT headers are automatic server snapshots, not player claims.

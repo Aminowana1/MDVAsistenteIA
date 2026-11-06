@@ -12,7 +12,11 @@ public record ProviderSettings(
     String model,
     long maxOutputTokens,
     double temperature,
-    int maxRequestsPerMinute) {
+    int maxRequestsPerMinute,
+    long requestTimeoutMs) {
+
+  /** Lower bound so a typo such as 20 (meant as seconds) cannot make every request fail. */
+  private static final long MIN_REQUEST_TIMEOUT_MS = 3_000L;
 
   /** Primary provider. The ai.* section is intentionally backward compatible with 1.4.0. */
   public static ProviderSettings primary(ServerAssistantPlugin plugin) {
@@ -83,6 +87,9 @@ public record ProviderSettings(
     int maxRequests = Math.max(
         plugin.getConfig().getInt(section + ".max-requests-per-minute", defaultRequestsPerMinute),
         0);
+    long requestTimeoutMs = Math.max(
+        plugin.getConfig().getLong(section + ".request-timeout-ms", 20_000L),
+        MIN_REQUEST_TIMEOUT_MS);
 
     if (!base.isBlank() && !base.endsWith("/")) {
       base += "/";
@@ -97,7 +104,8 @@ public record ProviderSettings(
         model,
         maxOutput,
         temperature,
-        maxRequests);
+        maxRequests,
+        requestTimeoutMs);
   }
 
   public String resolveApiKey() {

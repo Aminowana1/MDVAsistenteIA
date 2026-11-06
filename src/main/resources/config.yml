@@ -1,10 +1,10 @@
 # ============================================================
-# SERVER ASSISTANT 1.7.17 - RUNTIME CONFIG + TOOLS
+# SERVER ASSISTANT 1.7.19 - RUNTIME CONFIG + TOOLS
 # ============================================================
 
 # Technical/runtime settings only. Character prompt -> personality.yml; knowledge -> wiki.yml.
 # Missing keys from newer plugin versions are merged automatically without replacing your values.
-config-version: 16
+config-version: 18
 
 assistant-name: Isolda
 
@@ -20,6 +20,9 @@ ai:
   max-output-tokens: 120
   temperature: 0.75
   max-requests-per-minute: 12
+  # Maximum wait for one AI answer. A slow or stuck provider is abandoned after this
+  # and the queue moves on (fallback is tried when enabled). Minimum 3000.
+  request-timeout-ms: 20000
 
   # Diagnostic per request. Uses the exact token counters returned by the AI provider.
   # Example console line:
@@ -51,6 +54,7 @@ ai:
     max-output-tokens: 100
     temperature: 0.85
     max-requests-per-minute: 4
+    request-timeout-ms: 20000
     max-wait-ms: 2500
 
 # ============================================================
@@ -76,7 +80,9 @@ global-conversation:
   # group chat is routed locally by active-thread affinity versus competing side-chat;
   # strong matches inherit continuity directly and borderline candidates may be
   # confirmed by the SAME model response. Unrelated chatter never inherits it.
-  smart-follow-up-ms: 15000
+  # Players WITH a relationship profile use relationships.yml dynamic-follow-up
+  # instead; this base value covers everyone else.
+  smart-follow-up-ms: 30000
 
   # Zero-token semantic gate for an EXISTING SMART holder's next line. A live SMART
   # timer is permission to continue, not permission for every public-chat message to
@@ -107,7 +113,8 @@ global-conversation:
   scene:
     # Read relevant context immediately before the trigger, then listen this many
     # milliseconds after it. All collected chat/events are handled as ONE scene.
-    capture-window-ms: 4000
+    # Keep this below chat.response-pacing.base-delay-ms or the base delay is never felt.
+    capture-window-ms: 1500
     pre-lookback-ms: 12000
 
     # Applied AFTER Java filters unrelated players/messages.
@@ -266,7 +273,8 @@ tools:
     debug-log: false
 
   # Local trusted Bukkit data; Java adds it only when the scene asks about
-  # location/status. No second AI request.
+  # location/status. No second AI request. Location means world + biome only;
+  # player coordinates are never sent to the model.
   player-data:
     activation: smart
     max-players: 2
@@ -378,6 +386,18 @@ tools:
 chat:
   assistant-format: '&8[&5Cronista&8] &e%assistant_name%&7» &f%message%'
   max-messages-per-response: 3
+  # Minimum gap between two Isolda lines in the same reply.
   assistant-chained-messages-delay: 750
   max-assistant-message-length: 189
   max-player-message-length: 250
+
+  # Realistic reply timing. The first line appears base-delay-ms after the player's
+  # message plus (line length / max-assistant-message-length) * length-delay-ms.
+  # The capture window and the AI's own response time count inside that budget;
+  # they are never added on top. Each following line waits for its own typing time
+  # (at least assistant-chained-messages-delay). Actions such as lightning happen
+  # together with the first line. enabled: false restores immediate replies.
+  response-pacing:
+    enabled: true
+    base-delay-ms: 2500
+    length-delay-ms: 3500
